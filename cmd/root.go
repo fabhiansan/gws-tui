@@ -44,7 +44,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `gws — Google Workspace CLI + terminal UI
 
 USAGE:
-    gws tui [--feature chat|mail|calendar|meet] [--auth] [--no-icons] [--no-color]
+    gws tui [--feature chat|mail|calendar|meet] [--auth] [--no-icons] [--no-color] [--no-images]
     gws <existing gws command> ...
 
 The TUI is implemented locally. Non-TUI commands are delegated to an installed

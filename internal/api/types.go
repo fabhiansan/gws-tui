@@ -71,18 +71,30 @@ func (s Space) Title() string {
 	return "unknown space"
 }
 
+type Attachment struct {
+	ID           string `json:"id,omitempty"`
+	ResourceName string `json:"resourceName,omitempty"`
+	Name         string `json:"name,omitempty"`
+	ContentType  string `json:"contentType,omitempty"`
+	URL          string `json:"url,omitempty"`
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
+	DownloadURL  string `json:"downloadUrl,omitempty"`
+	LocalPath    string `json:"localPath,omitempty"`
+}
+
 type ChatMessage struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name,omitempty"`
-	Space        string    `json:"space"`
-	SenderID     string    `json:"senderId"`
-	SenderName   string    `json:"senderName"`
-	Text         string    `json:"text"`
-	CreateTime   time.Time `json:"createTime"`
-	ThreadID     string    `json:"threadId,omitempty"`
-	ParentID     string    `json:"parentId,omitempty"`
-	Pending      bool      `json:"pending,omitempty"`
-	FromRealtime bool      `json:"fromRealtime,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name,omitempty"`
+	Space        string       `json:"space"`
+	SenderID     string       `json:"senderId"`
+	SenderName   string       `json:"senderName"`
+	Text         string       `json:"text"`
+	Attachments  []Attachment `json:"attachments,omitempty"`
+	CreateTime   time.Time    `json:"createTime"`
+	ThreadID     string       `json:"threadId,omitempty"`
+	ParentID     string       `json:"parentId,omitempty"`
+	Pending      bool         `json:"pending,omitempty"`
+	FromRealtime bool         `json:"fromRealtime,omitempty"`
 }
 
 type MailLabel struct {
@@ -99,17 +111,18 @@ type MailQuery struct {
 }
 
 type MailThread struct {
-	ID          string    `json:"id"`
-	Sender      string    `json:"sender"`
-	SenderEmail string    `json:"senderEmail,omitempty"`
-	Subject     string    `json:"subject"`
-	Snippet     string    `json:"snippet"`
-	Date        time.Time `json:"date"`
-	Body        string    `json:"body"`
-	Unread      bool      `json:"unread"`
-	Starred     bool      `json:"starred"`
-	Labels      []string  `json:"labelIds,omitempty"`
-	QuotedLines int       `json:"quotedLines,omitempty"`
+	ID          string       `json:"id"`
+	Sender      string       `json:"sender"`
+	SenderEmail string       `json:"senderEmail,omitempty"`
+	Subject     string       `json:"subject"`
+	Snippet     string       `json:"snippet"`
+	Date        time.Time    `json:"date"`
+	Body        string       `json:"body"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Unread      bool         `json:"unread"`
+	Starred     bool         `json:"starred"`
+	Labels      []string     `json:"labelIds,omitempty"`
+	QuotedLines int          `json:"quotedLines,omitempty"`
 }
 
 type MailDraft struct {
@@ -149,14 +162,39 @@ type EventDraft struct {
 }
 
 type MeetSpace struct {
-	Name               string    `json:"name"`
-	MeetingURI         string    `json:"meetingUri"`
-	MeetingCode        string    `json:"meetingCode,omitempty"`
-	Created            time.Time `json:"created"`
-	Type               string    `json:"type,omitempty"`
-	ActiveParticipants int       `json:"activeParticipants,omitempty"`
-	Recording          bool      `json:"recording"`
-	Active             bool      `json:"active"`
+	Name               string                `json:"name"`
+	MeetingURI         string                `json:"meetingUri"`
+	MeetingCode        string                `json:"meetingCode,omitempty"`
+	Created            time.Time             `json:"created,omitempty"`
+	Type               string                `json:"type,omitempty"`
+	ActiveParticipants int                   `json:"activeParticipants,omitempty"`
+	Recording          bool                  `json:"recording"`
+	Active             bool                  `json:"active"`
+	Config             *MeetSpaceConfig      `json:"config,omitempty"`
+	ActiveConference   *MeetActiveConference `json:"activeConference,omitempty"`
+}
+
+type MeetSpaceConfig struct {
+	AccessType       string `json:"accessType,omitempty"`
+	EntryPointAccess string `json:"entryPointAccess,omitempty"`
+}
+
+type MeetActiveConference struct {
+	ConferenceRecord string `json:"conferenceRecord,omitempty"`
+}
+
+func (s MeetSpace) AccessType() string {
+	if s.Config != nil && s.Config.AccessType != "" {
+		return s.Config.AccessType
+	}
+	return s.Type
+}
+
+func (s MeetSpace) IsActive() bool {
+	if s.ActiveConference != nil && s.ActiveConference.ConferenceRecord != "" {
+		return true
+	}
+	return s.Active
 }
 
 type WorkspaceClient interface {
@@ -167,6 +205,7 @@ type WorkspaceClient interface {
 	SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error)
 	ChatMembers(ctx context.Context, spaceName string) ([]SpaceMember, error)
 	PeopleGet(ctx context.Context, userID string) (Person, error)
+	DownloadAttachment(ctx context.Context, attachment Attachment, outputPath string) error
 
 	MailLabels(context.Context) ([]MailLabel, error)
 	MailThreads(context.Context, MailQuery) (Page[MailThread], error)

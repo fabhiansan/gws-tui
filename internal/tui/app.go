@@ -30,6 +30,14 @@ const (
 
 var featureOrder = []Feature{FeatureChat, FeatureMail, FeatureCalendar, FeatureMeet}
 
+type pane int
+
+const (
+	paneList pane = iota
+	paneDetail
+	paneAction
+)
+
 type Options struct {
 	Client       api.WorkspaceClient
 	Config       Config
@@ -63,7 +71,7 @@ type Model struct {
 	detail  viewport.Model
 	input   textarea.Model
 
-	actionFocus bool
+	focusedPane pane
 	loading     bool
 	err         string
 	toast       string
@@ -94,9 +102,30 @@ type Model struct {
 	selfUserIDs    map[string]bool
 	peopleAPIDown  bool
 
-	selected  map[Feature]int
-	persisted persistedState
-	modal     *composeModal
+	selected        map[Feature]int
+	persisted       persistedState
+	cache           workspaceCache
+	cacheLoaded     bool
+	imageFiles      map[string]string
+	imageLoading    map[string]bool
+	imageErrors     map[string]string
+	modal           *composeModal
+	helpVisible     bool
+	vimComposer     vimMode
+	vimPending      string
+	vimRegister     string
+	vimRegisterLine bool
+
+	detailCursor     int
+	detailCol        int
+	detailAnchor     int
+	detailAnchorCol  int
+	detailVisual     bool
+	detailVisualLine bool
+	detailPending    string
+	detailLines      []string
+	detailLineCount  int
+	detailKey        string
 }
 
 type loadedMsg struct {
@@ -118,11 +147,21 @@ type featureLoadedMsg struct {
 	err     error
 }
 
+type featureRefreshedMsg struct {
+	feature Feature
+	labels  []api.MailLabel
+	threads api.Page[api.MailThread]
+	events  api.Page[api.CalendarEvent]
+	meet    api.Page[api.MeetSpace]
+	err     error
+}
+
 type chatLoadedMsg struct {
 	spaceName string
 	loadID    int
 	messages  api.Page[api.ChatMessage]
 	err       error
+	refresh   bool
 }
 
 type chatSentMsg struct {
@@ -156,6 +195,12 @@ type realtimeMsg struct {
 
 type autosaveMsg struct{}
 
+type imageCachedMsg struct {
+	source string
+	path   string
+	err    error
+}
+
 type userResolvedMsg struct {
 	userID    string
 	label     string
@@ -181,6 +226,7 @@ func New(opts Options) Model {
 	cfg := opts.Config
 	cfg.InitialFeature = normalizeFeature(cfg.InitialFeature)
 	persisted := loadPersistedState(cfg.StatePath)
+	cache, cacheLoaded := loadWorkspaceCache(cfg.CachePath)
 	feature := Feature(cfg.InitialFeature)
 	if persisted.LastFeature != "" && cfg.InitialFeature == "chat" {
 		feature = Feature(normalizeFeature(persisted.LastFeature))
@@ -197,7 +243,7 @@ func New(opts Options) Model {
 
 	detail := viewport.New(80, 20)
 
-	return Model{
+	model := Model{
 		client:         opts.Client,
 		cfg:            cfg,
 		theme:          theme.New(cfg.NoColor),
@@ -212,7 +258,8 @@ func New(opts Options) Model {
 		spinner:        spin,
 		input:          input,
 		detail:         detail,
-		loading:        true,
+		focusedPane:    paneList,
+		loading:        !cacheLoaded,
 		seenMessages:   map[string]bool{},
 		userLabels:     map[string]string{},
 		pendingUsers:   map[string]bool{},
@@ -225,12 +272,26 @@ func New(opts Options) Model {
 			FeatureCalendar: persisted.Selections[string(FeatureCalendar)],
 			FeatureMeet:     persisted.Selections[string(FeatureMeet)],
 		},
-		persisted: persisted,
+		persisted:    persisted,
+		cache:        cache,
+		cacheLoaded:  cacheLoaded,
+		imageFiles:   map[string]string{},
+		imageLoading: map[string]bool{},
+		imageErrors:  map[string]string{},
 	}
+	if cacheLoaded {
+		model.hydrateWorkspaceCache(cache)
+	}
+	return model
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadAllCmd(), m.autosaveTick(), m.whoamiCmd())
+	cmds := []tea.Cmd{m.spinner.Tick, m.autosaveTick()}
+	cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
+	if !m.cacheLoaded {
+		cmds = append(cmds, m.loadAllCmd(), m.whoamiCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) whoamiCmd() tea.Cmd {
@@ -287,9 +348,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.calendarNext = msg.events.NextPageToken
 		m.meetSpaces = msg.meet.Items
 		m.clampSelections()
+		m.persistWorkspaceCache()
 		cmds = append(cmds, m.subscribeCmd())
 		cmds = append(cmds, m.enrichSpacesCmds()...)
 		cmds = append(cmds, m.enrichSendersCmds()...)
+		cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
 	case chatLoadedMsg:
 		if msg.loadID != m.chatLoadID || msg.spaceName != m.selectedSpace().Name {
 			break
@@ -306,7 +369,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, chat := range m.chatMessages {
 			m.seenMessages[chat.ID] = true
 		}
+		if msg.refresh {
+			m.toast = "chat refreshed"
+		}
+		m.rememberChatPage(msg.spaceName, msg.messages)
+		m.persistWorkspaceCache()
 		cmds = append(cmds, m.enrichSendersCmds()...)
+		cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
 	case featureLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -322,29 +391,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.seenMessages[chat.ID] = true
 				}
 				m.toast = "older messages loaded"
+				m.persistWorkspaceCache()
 				cmds = append(cmds, m.enrichSendersCmds()...)
+				cmds = append(cmds, m.imageDownloadCmdsForChat(messages)...)
 			}
 		case FeatureMail:
 			if threads, ok := msg.items.([]api.MailThread); ok {
 				m.mailThreads = append(m.mailThreads, threads...)
 				m.mailNext = msg.next
 				m.toast = "more mail loaded"
+				m.persistWorkspaceCache()
+				cmds = append(cmds, m.imageDownloadCmdsForMail(threads)...)
 			}
 		case FeatureCalendar:
 			if events, ok := msg.items.([]api.CalendarEvent); ok {
 				m.events = append(m.events, events...)
 				m.calendarNext = msg.next
 				m.toast = "more events loaded"
+				m.persistWorkspaceCache()
 			}
+		}
+	case featureRefreshedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			break
+		}
+		switch msg.feature {
+		case FeatureMail:
+			m.mailLabels = msg.labels
+			m.mailThreads = msg.threads.Items
+			m.mailNext = msg.threads.NextPageToken
+			m.toast = "mail refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
+			cmds = append(cmds, m.imageDownloadCmdsForMail(m.mailThreads)...)
+		case FeatureCalendar:
+			m.events = msg.events.Items
+			m.calendarNext = msg.events.NextPageToken
+			m.toast = "calendar refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
+		case FeatureMeet:
+			m.meetSpaces = msg.meet.Items
+			m.toast = "meet refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
 		}
 	case chatSentMsg:
 		m.replacePending(msg.pendingID, msg.message, msg.err)
+		m.persistWorkspaceCache()
+		if msg.err == nil {
+			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
+		}
 	case mailActionMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		} else {
 			m.toast = msg.label
 			m.applyMailThread(msg.thread)
+			m.persistWorkspaceCache()
+			cmds = append(cmds, m.imageDownloadCmdsForMail([]api.MailThread{msg.thread})...)
 		}
 	case eventActionMsg:
 		if msg.err != nil {
@@ -352,6 +459,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.toast = msg.label
 			m.applyEvent(msg.event)
+			m.persistWorkspaceCache()
 		}
 	case meetActionMsg:
 		if msg.err != nil {
@@ -360,6 +468,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = msg.label
 			if msg.space.Name != "" {
 				m.applyMeetSpace(msg.space)
+				m.persistWorkspaceCache()
 			}
 		}
 	case realtimeMsg:
@@ -372,11 +481,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.message.ID != "" && !m.seenMessages[msg.message.ID] {
 			m.seenMessages[msg.message.ID] = true
-			m.chatMessages = append(m.chatMessages, msg.message)
+			m.rememberChatMessage(msg.message)
+			if m.isSelectedSpace(msg.message.Space) {
+				m.chatMessages = append(m.chatMessages, msg.message)
+			}
 			m.toast = "new chat message"
 			if cmd := m.resolveUserCmd(api.UserIDFromName(msg.message.SenderID)); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
 			if m.feature != FeatureChat || !m.isSelectedSpace(msg.message.Space) {
 				notify.Send("gws chat", msg.message.SenderName+": "+msg.message.Text, notify.Options{
 					Desktop:   m.cfg.NotifyDesktop,
@@ -384,8 +497,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					SoundFile: m.cfg.NotifySoundFile,
 				})
 			}
+			m.persistWorkspaceCache()
 		}
 		cmds = append(cmds, m.subscribeCmd())
+	case imageCachedMsg:
+		delete(m.imageLoading, msg.source)
+		if msg.err == nil && msg.source != "" && msg.path != "" {
+			m.imageFiles[msg.source] = msg.path
+			delete(m.imageErrors, msg.source)
+		} else if msg.err != nil && msg.source != "" {
+			m.imageErrors[msg.source] = msg.err.Error()
+		}
 	case selfResolvedMsg:
 		if msg.apiAbsent {
 			m.peopleAPIDown = true
@@ -398,6 +520,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.label != "" {
 			m.userLabels[msg.userID] = msg.label
 		}
+		m.persistWorkspaceCache()
 	case userResolvedMsg:
 		delete(m.pendingUsers, msg.userID)
 		if msg.apiAbsent {
@@ -409,6 +532,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.label != "" {
 			m.userLabels[msg.userID] = msg.label
+			m.persistWorkspaceCache()
 		}
 	case membersLoadedMsg:
 		delete(m.pendingMembers, msg.spaceName)
@@ -416,6 +540,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.membersBySpace[msg.spaceName] = msg.members
+		m.persistWorkspaceCache()
 		for _, member := range msg.members {
 			if member.Type != "" && member.Type != "HUMAN" {
 				continue
@@ -431,6 +556,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		cmds = append(cmds, m.autosaveTick())
+	case tea.MouseMsg:
+		next, cmd := m.updateMouse(msg)
+		m = next
+		cmds = append(cmds, cmd)
 	case tea.KeyMsg:
 		if m.modal != nil {
 			next, cmd := m.updateModal(msg)
@@ -443,17 +572,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	cmds = append(cmds, m.imageDownloadCmdsForCurrentDetail()...)
 	m.updateDetailContent()
 	return m, tea.Batch(cmds...)
 }
 
 func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	if m.actionFocus {
+	if m.helpVisible {
 		switch msg.String() {
-		case "esc":
-			m.actionFocus = false
+		case "?", "esc", "q":
+			m.helpVisible = false
+		}
+		return m, nil
+	}
+	if m.focusedPane == paneAction {
+		if m.cfg.VimMode {
+			key := msg.String()
+			if m.vimComposer == vimModeNormal && key == "esc" {
+				m.focusedPane = paneList
+				m.input.Blur()
+				m.vimPending = ""
+				return m, nil
+			}
+			if m.vimComposer == vimModeNormal && key == "enter" {
+				return m.submitAction()
+			}
+			if m.vimComposer == vimModeNormal && key == "/" {
+				m.openSearchModal()
+				return m, nil
+			}
+			if m.vimComposerKey(msg) {
+				return m, nil
+			}
+		} else if msg.String() == "esc" {
+			m.focusedPane = paneList
 			m.input.Blur()
 			return m, nil
+		}
+		switch msg.String() {
 		case "enter":
 			return m.submitAction()
 		case "shift+enter":
@@ -465,11 +621,31 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.focusedPane == paneDetail && m.cfg.VimMode {
+		if next, cmd, handled := m.updateDetailVim(msg); handled {
+			return next, cmd
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		m.persist()
 		m.cancel()
 		return m, tea.Quit
+	case "?":
+		m.helpVisible = true
+		return m, nil
+	case "H", "ctrl+h":
+		m.focusedPane = paneList
+		return m, nil
+	case "L", "ctrl+l":
+		m.focusedPane = paneDetail
+		return m, nil
+	case "esc":
+		if m.focusedPane != paneList {
+			m.focusedPane = paneList
+			return m, nil
+		}
 	case "tab":
 		m.feature = m.nextFeature(1)
 		m.toast = string(m.feature)
@@ -485,23 +661,73 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "4":
 		m.feature = FeatureMeet
 	case "j", "down":
+		if m.focusedPane == paneDetail {
+			m.detail.LineDown(1)
+			return m, nil
+		}
 		return m.moveSelection(1)
 	case "k", "up":
+		if m.focusedPane == paneDetail {
+			m.detail.LineUp(1)
+			return m, nil
+		}
 		return m.moveSelection(-1)
+	case "ctrl+d":
+		if m.focusedPane == paneDetail {
+			m.detail.HalfViewDown()
+			return m, nil
+		}
+	case "ctrl+u":
+		if m.focusedPane == paneDetail {
+			m.detail.HalfViewUp()
+			return m, nil
+		}
+	case "ctrl+f", "pgdown":
+		if m.focusedPane == paneDetail {
+			m.detail.ViewDown()
+			return m, nil
+		}
+	case "ctrl+b", "pgup":
+		if m.focusedPane == paneDetail {
+			m.detail.ViewUp()
+			return m, nil
+		}
 	case "g":
+		if m.focusedPane == paneDetail {
+			m.detail.GotoTop()
+			return m, nil
+		}
 		m.selected[m.feature] = 0
 		return m.loadSelectedChat()
 	case "G":
+		if m.focusedPane == paneDetail {
+			m.detail.GotoBottom()
+			return m, nil
+		}
 		m.selected[m.feature] = m.listLen() - 1
 		return m.loadSelectedChat()
 	case "enter", "o":
 		m.toast = m.openHint()
 	case "i":
-		m.actionFocus = true
+		m.focusedPane = paneAction
 		m.input.Focus()
+		m.vimComposer = vimModeInsert
+	case "a":
+		m.focusedPane = paneAction
+		m.input.Focus()
+		m.vimComposer = vimModeInsert
+		m.input.CursorEnd()
+	case "y":
+		if m.feature == FeatureCalendar {
+			return m.rsvpSelected("accepted")
+		}
+		cmd := m.yankFocused()
+		return m, cmd
+	case "p":
+		return m.pasteIntoComposer()
 	case "r":
-		m.loading = true
-		return m, m.loadAllCmd()
+		m.imageErrors = map[string]string{}
+		return m.refreshCurrentFeature()
 	case "ctrl+r":
 		cfg, err := LoadConfig()
 		if err != nil {
@@ -517,7 +743,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.loadMore()
 	case "s":
 		if m.feature == FeatureChat {
-			m.toggleChatSubscription()
+			return m, m.toggleChatSubscription()
 		} else if m.feature == FeatureMail {
 			return m.toggleSelectedStar()
 		}
@@ -532,9 +758,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			thread := m.selectedMail()
 			m.openMailCompose(&thread, true)
 		} else if m.feature == FeatureChat {
-			m.actionFocus = true
-			m.input.Focus()
-			m.input.SetValue("↪ ")
+			m.loading = true
+			m.imageErrors = map[string]string{}
+			return m, m.loadAllCmd()
 		}
 	case "f":
 		if m.feature == FeatureMail {
@@ -549,18 +775,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.feature == FeatureMail {
 			return m.trashSelectedMail()
 		}
-	case "y":
-		if m.feature == FeatureCalendar {
-			return m.rsvpSelected("accepted")
-		}
 	case "n":
 		if m.feature == FeatureCalendar {
 			return m.rsvpSelected("declined")
 		}
 		if m.feature == FeatureMeet {
-			m.actionFocus = true
-			m.input.Focus()
-			m.input.SetValue("")
+			return m.createMeetSpaceNow()
 		}
 	case "M":
 		if m.feature == FeatureCalendar {
@@ -607,7 +827,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) submitAction() (Model, tea.Cmd) {
 	value := strings.TrimSpace(m.input.Value())
 	if value == "" {
-		m.actionFocus = false
+		m.focusedPane = paneList
 		m.input.Blur()
 		return m, nil
 	}
@@ -629,7 +849,7 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 		}
 		m.chatMessages = append(m.chatMessages, pending)
 		m.input.SetValue("")
-		m.actionFocus = false
+		m.focusedPane = paneList
 		m.input.Blur()
 		return m, func() tea.Msg {
 			msg, err := m.client.SendChatMessage(m.ctx, space.Name, value)
@@ -637,7 +857,7 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 		}
 	case FeatureCalendar:
 		m.input.SetValue("")
-		m.actionFocus = false
+		m.focusedPane = paneList
 		m.input.Blur()
 		return m, func() tea.Msg {
 			event, err := m.client.QuickAddEvent(m.ctx, value)
@@ -645,7 +865,7 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 		}
 	case FeatureMeet:
 		m.input.SetValue("")
-		m.actionFocus = false
+		m.focusedPane = paneList
 		m.input.Blur()
 		return m, func() tea.Msg {
 			space, err := m.client.CreateMeetSpace(m.ctx, value)
@@ -763,6 +983,83 @@ func (m Model) loadAllCmd() tea.Cmd {
 	}
 }
 
+func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
+	switch m.feature {
+	case FeatureChat:
+		return m.refreshSelectedChat()
+	case FeatureMail:
+		m.loading = true
+		search := m.search
+		label := "Inbox"
+		if search != "" {
+			label = "All Mail"
+		}
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			labels, labelsErr := m.client.MailLabels(ctx)
+			threads, threadsErr := m.client.MailThreads(ctx, api.MailQuery{Label: label, Search: search})
+			return featureRefreshedMsg{
+				feature: FeatureMail,
+				labels:  labels,
+				threads: threads,
+				err:     firstErr(labelsErr, threadsErr),
+			}
+		}
+	case FeatureCalendar:
+		m.loading = true
+		search := m.search
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			events, err := m.client.CalendarEvents(ctx, api.CalendarQuery{Search: search})
+			return featureRefreshedMsg{feature: FeatureCalendar, events: events, err: err}
+		}
+	case FeatureMeet:
+		m.loading = true
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			meet, err := m.client.MeetSpaces(ctx)
+			return featureRefreshedMsg{feature: FeatureMeet, meet: meet, err: err}
+		}
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) refreshSelectedChat() (Model, tea.Cmd) {
+	space := m.selectedSpace()
+	if space.Name == "" {
+		m.chatMessages = nil
+		m.chatOlder = ""
+		m.chatLoading = false
+		m.chatLoadSpace = ""
+		m.loading = false
+		return m, nil
+	}
+
+	m.chatLoadID++
+	loadID := m.chatLoadID
+	spaceName := space.Name
+	m.loading = true
+	m.chatLoading = true
+	m.chatLoadSpace = spaceName
+	m.chatMessages = nil
+	m.chatOlder = ""
+
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+
+		page, err := m.client.ChatMessages(ctx, spaceName, "")
+		return chatLoadedMsg{spaceName: spaceName, loadID: loadID, messages: page, err: err, refresh: true}
+	}
+}
+
 func (m Model) loadMore() (Model, tea.Cmd) {
 	switch m.feature {
 	case FeatureChat:
@@ -851,7 +1148,11 @@ func (m *Model) resize() {
 	actionHeight := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
 	detailHeight := max(5, h-statusH-detailVBorder-actionHeight-actionVBorder)
 
-	m.detail.Width = max(10, right-detailHPad)
+	detailWidth := max(10, right-detailHPad)
+	if m.cfg.VimMode {
+		detailWidth = max(10, detailWidth-2)
+	}
+	m.detail.Width = detailWidth
 	m.detail.Height = max(3, detailHeight-1)
 	m.input.SetWidth(max(10, right-actionHPad))
 	m.input.SetHeight(max(2, actionHeight-1))
@@ -897,6 +1198,13 @@ func (m Model) loadSelectedChat() (Model, tea.Cmd) {
 	if space.Name == "" {
 		m.chatMessages = nil
 		m.chatOlder = ""
+		m.chatLoading = false
+		m.chatLoadSpace = ""
+		return m, nil
+	}
+
+	if m.applyCachedSelectedChat() {
+		m.loading = false
 		m.chatLoading = false
 		m.chatLoadSpace = ""
 		return m, nil
@@ -1079,6 +1387,14 @@ func (m Model) deleteSelectedEvent() (Model, tea.Cmd) {
 	}
 }
 
+func (m Model) createMeetSpaceNow() (Model, tea.Cmd) {
+	m.toast = "creating meet space..."
+	return m, func() tea.Msg {
+		space, err := m.client.CreateMeetSpace(m.ctx, "")
+		return meetActionMsg{space: space, err: err, label: "meet space created"}
+	}
+}
+
 func (m Model) openMeetLink() (Model, tea.Cmd) {
 	space := m.selectedMeet()
 	if space.MeetingURI == "" {
@@ -1101,6 +1417,57 @@ func (m Model) copyMeetLink() (Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) yankFocused() tea.Cmd {
+	var text string
+	switch m.feature {
+	case FeatureChat:
+		if len(m.chatMessages) > 0 {
+			text = m.chatMessages[len(m.chatMessages)-1].Text
+		}
+	case FeatureMail:
+		thread := m.selectedMail()
+		text = thread.Subject
+		if thread.Body != "" {
+			text = thread.Subject + "\n\n" + thread.Body
+		}
+	case FeatureCalendar:
+		event := m.selectedEvent()
+		text = event.Summary
+	case FeatureMeet:
+		text = m.selectedMeet().MeetingURI
+	}
+	if text == "" {
+		m.toast = "nothing to yank"
+		return nil
+	}
+	m.vimRegister = text
+	m.vimRegisterLine = false
+	if err := copyText(text); err != nil {
+		m.toast = "yank: " + err.Error()
+	} else {
+		m.toast = "yanked to clipboard"
+	}
+	return nil
+}
+
+func (m Model) pasteIntoComposer() (Model, tea.Cmd) {
+	text, err := pasteText()
+	if err != nil || text == "" {
+		m.toast = "clipboard empty"
+		return m, nil
+	}
+	m.focusedPane = paneAction
+	m.input.Focus()
+	m.vimComposer = vimModeInsert
+	if current := m.input.Value(); current != "" {
+		m.input.SetValue(current + text)
+	} else {
+		m.input.SetValue(text)
+	}
+	m.input.CursorEnd()
+	return m, nil
+}
+
 func (m Model) endSelectedMeet() (Model, tea.Cmd) {
 	space := m.selectedMeet()
 	if space.Name == "" {
@@ -1112,7 +1479,7 @@ func (m Model) endSelectedMeet() (Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) toggleChatSubscription() {
+func (m *Model) toggleChatSubscription() tea.Cmd {
 	space := m.selectedSpace()
 	for i := range m.spaces {
 		if m.spaces[i].Name == space.Name {
@@ -1122,9 +1489,14 @@ func (m *Model) toggleChatSubscription() {
 			} else {
 				m.toast = "subscription off"
 			}
-			return
+			m.persistWorkspaceCache()
+			if m.spaces[i].Live {
+				return m.subscribeCmd()
+			}
+			return nil
 		}
 	}
+	return nil
 }
 
 func (m Model) openHint() string {
@@ -1158,7 +1530,53 @@ func (m *Model) updateDetailContent() {
 	if m.width == 0 {
 		return
 	}
-	m.detail.SetContent(m.detailContent())
+	wasAtBottom := m.detail.AtBottom()
+	prevLast := m.detailLineCount - 1
+	wasAtLastLine := prevLast >= 0 && m.detailCursor >= prevLast
+
+	key := m.detailKeyForSelection()
+	keyChanged := key != m.detailKey
+	if keyChanged {
+		m.detailResetCursor()
+		m.detailKey = key
+		wasAtLastLine = false
+	}
+
+	// Chat history reads bottom-up (oldest → newest), so whenever a chat is
+	// first opened or the user switches to a different space the latest
+	// messages should already be in view without manual scrolling.
+	pinToBottom := m.feature == FeatureChat && keyChanged
+
+	decorated, plain := m.decorateDetail(m.detailContent())
+	m.detailLines = plain
+	m.detailLineCount = len(plain)
+	m.detailClampCursor()
+
+	m.detail.SetContent(decorated)
+	if wasAtBottom || pinToBottom {
+		m.detail.GotoBottom()
+	}
+	if m.detailVimEnabled() {
+		if (wasAtLastLine || pinToBottom) && m.detailLineCount > 0 {
+			m.detailCursor = m.detailLineCount - 1
+		}
+		m.detailEnsureCursorVisible()
+	}
+}
+
+func (m Model) detailKeyForSelection() string {
+	switch m.feature {
+	case FeatureChat:
+		return "chat:" + m.selectedSpace().Name
+	case FeatureMail:
+		return "mail:" + m.selectedMail().ID
+	case FeatureCalendar:
+		return "cal:" + m.selectedEvent().ID
+	case FeatureMeet:
+		return "meet:" + m.selectedMeet().Name
+	default:
+		return string(m.feature)
+	}
 }
 
 func normalizeFeature(value string) string {

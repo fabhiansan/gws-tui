@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
 )
 
@@ -81,6 +82,10 @@ func (m Model) View() string {
 	}
 
 	body := m.mainView(width, height)
+	if m.helpVisible {
+		help := m.renderHelp(max(50, width-4), max(10, height-2))
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, help)
+	}
 	if m.modal != nil {
 		modal := m.renderModal(max(40, width-14))
 		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
@@ -104,7 +109,11 @@ func (m Model) mainView(width, height int) string {
 	leftContentH := max(5, height-statusH-leftVBorder)
 
 	left := m.renderList(leftW, leftContentH)
-	detail := m.theme.Active.Width(rightW).Height(detailContentH).Render(m.title(" "+m.detailTitle()+" ") + "\n" + m.detail.View())
+	detailStyle := m.theme.Pane
+	if m.focusedPane == paneDetail {
+		detailStyle = m.theme.Active
+	}
+	detail := detailStyle.Width(rightW).Height(detailContentH).Render(m.title(" "+m.detailTitle()+" ") + "\n" + m.detail.View())
 	action := m.renderAction(rightW, actionContentH)
 	right := lipgloss.JoinVertical(lipgloss.Left, detail, action)
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
@@ -213,10 +222,14 @@ func (m Model) renderList(width, height int) string {
 				prefix = m.accent(m.icon("▎", "|") + " ")
 			}
 			status := ""
-			if space.Active {
+			if space.IsActive() {
 				status = " " + m.live("active")
 			}
-			lines = append(lines, prefix+truncate(lastSegment(space.Name), width-14)+status)
+			label := lastSegment(space.Name)
+			if label == "" {
+				label = space.MeetingCode
+			}
+			lines = append(lines, prefix+truncate(label, width-14)+status)
 		}
 	}
 	if len(lines) == 0 {
@@ -225,23 +238,24 @@ func (m Model) renderList(width, height int) string {
 	innerW := max(1, width-m.theme.Pane.GetHorizontalPadding())
 	body := m.title(title) + "\n" + fitLines(lines, innerW, max(1, height-1))
 	style := m.theme.Pane
-	if !m.actionFocus {
+	if m.focusedPane == paneList {
 		style = m.theme.Active
 	}
 	return style.Width(width).Height(height).Render(body)
 }
 
 func (m Model) renderAction(width, height int) string {
+	focused := m.focusedPane == paneAction
 	title := " " + m.actionTitle() + " "
 	content := ""
-	if m.actionFocus {
+	if focused {
 		content = m.input.View()
 	} else {
 		content = m.subtle(m.actionPlaceholder())
 	}
 	style := m.theme.Input.Width(width).Height(height)
-	if m.actionFocus {
-		style = style.BorderForeground(lipgloss.Color(m.theme.Accent))
+	if !focused {
+		style = style.BorderForeground(lipgloss.Color(m.theme.Subtle))
 	}
 	return style.Render(m.title(title) + "\n" + content)
 }
@@ -263,7 +277,7 @@ func (m Model) renderStatus(width int) string {
 			liveCount++
 		}
 	}
-	right := fmt.Sprintf("%s %d live   j/k move  Enter open  / search  q quit", m.live(m.icon("●", "*")), liveCount)
+	right := fmt.Sprintf("%s %d live   %s   H/L pane  ? help  q quit", m.live(m.icon("●", "*")), liveCount, m.paneHints())
 	if m.loading {
 		right = m.spinner.View() + " loading   " + right
 	}
@@ -311,19 +325,276 @@ func (m Model) renderModal(width int) string {
 	return m.theme.Modal.Width(min(width, 88)).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) renderHelp(width, height int) string {
+	type binding struct {
+		keys string
+		desc string
+	}
+	type section struct {
+		name     string
+		bindings []binding
+	}
+	sections := []section{
+		{"Global", []binding{
+			{"?", "toggle this help"},
+			{"q · Ctrl+C", "quit"},
+			{"Tab · S-Tab", "cycle features"},
+			{"1 / 2 / 3 / 4", "chat / mail / calendar / meet"},
+			{"r", "refresh current feature"},
+			{"Ctrl+R", "reload config"},
+			{"x", "dismiss error / toast"},
+		}},
+		{"Pane focus", []binding{
+			{"H · Ctrl+H", "focus list pane"},
+			{"L · Ctrl+L", "focus detail pane"},
+			{"i", "focus action (input)"},
+			{"Esc", "back to list"},
+		}},
+		{"List pane", []binding{
+			{"j / k", "move selection"},
+			{"g / G", "first / last item"},
+			{"Enter · o", "open selected"},
+			{"/", "search"},
+			{"m", "load more"},
+		}},
+		{"Detail pane", []binding{
+			{"h j k l", "move text cursor (vim)"},
+			{"w / b / e", "word forward / back / end"},
+			{"0 / $", "line start / end"},
+			{"Ctrl+D · Ctrl+U", "half-page scroll"},
+			{"Ctrl+F · Ctrl+B", "page scroll (vim)"},
+			{"PgDn · PgUp", "page scroll"},
+			{"gg / G", "top / bottom"},
+			{"v / V", "visual char / line mode"},
+			{"y / yy", "yank selection / line"},
+			{"Esc", "exit visual · back to list"},
+		}},
+		{"Action pane", []binding{
+			{"Enter", "submit"},
+			{"Shift+Enter", "newline"},
+			{"Esc", "vim: insert→normal · plain: cancel"},
+			{"Esc (normal)", "exit composer"},
+		}},
+		{"Vim — composer (normal)", []binding{
+			{"i / I / a / A", "insert here / line start / after / end"},
+			{"o / O", "open line below / above"},
+			{"h j k l", "move char / line"},
+			{"w / b", "word forward / back"},
+			{"0 / $", "line start / end"},
+			{"gg / G", "top / bottom of input"},
+			{"x / X", "delete char forward / back"},
+			{"dd / cc", "delete line / change line"},
+			{"yy / p / P", "yank / paste after / before"},
+			{"Enter", "send message"},
+		}},
+		{"Vim — yank & paste", []binding{
+			{"y (list)", "yank selected item to clipboard"},
+			{"p (list)", "paste clipboard into composer"},
+			{"a (list)", "append to composer in insert mode"},
+		}},
+		{"Chat", []binding{
+			{"s", "toggle live subscription"},
+			{"R", "refresh all workspace data"},
+		}},
+		{"Mail", []binding{
+			{"s", "toggle star"},
+			{"c", "compose"},
+			{"R", "reply"},
+			{"f", "forward"},
+			{"e", "archive"},
+			{"#", "trash"},
+		}},
+		{"Calendar", []binding{
+			{"c", "new event"},
+			{"y / n / M", "RSVP yes / no / maybe"},
+			{"d", "delete event"},
+			{"t", "jump to today"},
+			{"] · [", "next / prev week"},
+		}},
+		{"Meet", []binding{
+			{"n", "new space"},
+			{"J", "join (open link)"},
+			{"C", "copy link"},
+			{"E", "end conference"},
+		}},
+	}
+
+	keyW := 0
+	for _, sec := range sections {
+		for _, b := range sec.bindings {
+			if w := lipgloss.Width(b.keys); w > keyW {
+				keyW = w
+			}
+		}
+	}
+
+	renderSection := func(sec section) []string {
+		out := make([]string, 0, len(sec.bindings)+1)
+		out = append(out, m.accent(sec.name))
+		for _, b := range sec.bindings {
+			pad := strings.Repeat(" ", max(1, keyW-lipgloss.Width(b.keys)+2))
+			out = append(out, "  "+b.keys+pad+m.subtle(b.desc))
+		}
+		return out
+	}
+
+	rendered := make([][]string, len(sections))
+	sectionWidth := 0
+	for i, sec := range sections {
+		rendered[i] = renderSection(sec)
+		for _, line := range rendered[i] {
+			if w := lipgloss.Width(line); w > sectionWidth {
+				sectionWidth = w
+			}
+		}
+	}
+
+	title := m.title(" gws · keybindings ")
+	footer := m.subtle("Press ? or Esc to close")
+
+	chrome := m.theme.Modal.GetVerticalFrameSize() + 4
+	contentHeight := max(1, height-chrome)
+
+	columnGap := 3
+	hFrame := m.theme.Modal.GetHorizontalFrameSize()
+	maxColumns := (width - hFrame + columnGap) / (sectionWidth + columnGap)
+	if maxColumns < 1 {
+		maxColumns = 1
+	}
+
+	columns := 1
+	chosenSpacer := 1
+	bestHeight := 0
+	for _, sp := range []int{1, 0} {
+		fit := false
+		for c := 1; c <= maxColumns; c++ {
+			h := balancedHeight(rendered, c, sp)
+			if h <= contentHeight {
+				columns = c
+				chosenSpacer = sp
+				bestHeight = h
+				fit = true
+				break
+			}
+		}
+		if fit {
+			break
+		}
+		columns = maxColumns
+		chosenSpacer = sp
+		bestHeight = balancedHeight(rendered, columns, sp)
+	}
+
+	cols := distributeSections(rendered, columns, chosenSpacer)
+	colStrs := make([]string, 0, len(cols)*2-1)
+	colStyle := lipgloss.NewStyle().Width(sectionWidth)
+	for i, col := range cols {
+		if i > 0 {
+			colStrs = append(colStrs, strings.Repeat(" ", columnGap))
+		}
+		var colLines []string
+		for j, sec := range col {
+			if j > 0 {
+				for s := 0; s < chosenSpacer; s++ {
+					colLines = append(colLines, "")
+				}
+			}
+			colLines = append(colLines, sec...)
+		}
+		colStrs = append(colStrs, colStyle.Render(strings.Join(colLines, "\n")))
+	}
+	body := lipgloss.JoinHorizontal(lipgloss.Top, colStrs...)
+
+	if bestHeight > contentHeight {
+		bodyLines := strings.Split(body, "\n")
+		keep := max(1, contentHeight-1)
+		if keep < len(bodyLines) {
+			bodyLines = bodyLines[:keep]
+			bodyLines = append(bodyLines, m.subtle("  … resize terminal to see all"))
+		}
+		body = strings.Join(bodyLines, "\n")
+	}
+
+	content := strings.Join([]string{title, "", body, "", footer}, "\n")
+
+	modalWidth := min(width, 88)
+	want := sectionWidth*columns + columnGap*(columns-1) + hFrame
+	if want > modalWidth {
+		modalWidth = min(width, want)
+	}
+	return m.theme.Modal.Width(modalWidth).Render(content)
+}
+
+func balancedHeight(sections [][]string, columns, spacer int) int {
+	if columns < 1 {
+		columns = 1
+	}
+	heights := make([]int, columns)
+	for _, sec := range sections {
+		idx := 0
+		for i := 1; i < columns; i++ {
+			if heights[i] < heights[idx] {
+				idx = i
+			}
+		}
+		if heights[idx] > 0 {
+			heights[idx] += spacer
+		}
+		heights[idx] += len(sec)
+	}
+	maxH := 0
+	for _, h := range heights {
+		if h > maxH {
+			maxH = h
+		}
+	}
+	return maxH
+}
+
+func distributeSections(sections [][]string, columns, spacer int) [][][]string {
+	if columns < 1 {
+		columns = 1
+	}
+	cols := make([][][]string, columns)
+	heights := make([]int, columns)
+	for _, sec := range sections {
+		idx := 0
+		for i := 1; i < columns; i++ {
+			if heights[i] < heights[idx] {
+				idx = i
+			}
+		}
+		if heights[idx] > 0 {
+			heights[idx] += spacer
+		}
+		heights[idx] += len(sec)
+		cols[idx] = append(cols[idx], sec)
+	}
+	return cols
+}
+
 func (m Model) detailTitle() string {
+	var base string
 	switch m.feature {
 	case FeatureChat:
-		return m.spaceLabel(m.selectedSpace())
+		base = m.spaceLabel(m.selectedSpace())
 	case FeatureMail:
-		return fallback(m.selectedMail().Subject, "Mail")
+		base = fallback(m.selectedMail().Subject, "Mail")
 	case FeatureCalendar:
-		return fallback(m.selectedEvent().Summary, "Calendar")
+		base = fallback(m.selectedEvent().Summary, "Calendar")
 	case FeatureMeet:
-		return fallback(lastSegment(m.selectedMeet().Name), "Meet")
+		base = fallback(lastSegment(m.selectedMeet().Name), "Meet")
 	default:
-		return "gws"
+		base = "gws"
 	}
+	if m.cfg.VimMode && m.focusedPane == paneDetail && m.detailVisual {
+		if m.detailVisualLine {
+			base += "  -- VISUAL LINE --"
+		} else {
+			base += "  -- VISUAL --"
+		}
+	}
+	return base
 }
 
 func (m Model) detailContent() string {
@@ -357,7 +628,8 @@ func (m Model) chatDetail() string {
 			lastDay = day
 		}
 		name := m.senderLabel(msg)
-		if msg.SenderID == "users/me" || name == "You" {
+		isSelf := m.isSelfMessage(msg, name)
+		if isSelf {
 			name = m.accent(name)
 		} else {
 			name = m.senderColor(msg.SenderID, name)
@@ -366,21 +638,47 @@ func (m Model) chatDetail() string {
 		if msg.Pending {
 			status = " " + m.subtle("(sending)")
 		}
-		lines = append(lines, fmt.Sprintf("%s    %s%s", name, msg.CreateTime.Format("15:04"), status))
+		block := []string{fmt.Sprintf("%s    %s%s", name, msg.CreateTime.Format("15:04"), status)}
 		prefix := "  "
 		if msg.ParentID != "" {
 			prefix = "  " + m.icon("↪", ">") + " "
 		}
+		textWidth := m.detailTextWidth()
+		prefixW := lipgloss.Width(prefix)
+		wrapWidth := max(10, textWidth-prefixW)
 		for _, line := range strings.Split(msg.Text, "\n") {
 			if strings.HasPrefix(line, "```") {
-				lines = append(lines, m.theme.Code.Width(max(12, m.detail.Width-4)).Render(line))
+				block = append(block, m.theme.Code.Width(max(12, textWidth-2)).Render(line))
 				continue
 			}
-			lines = append(lines, prefix+line)
+			for _, sub := range strings.Split(ansi.Wrap(line, wrapWidth, " -"), "\n") {
+				block = append(block, prefix+sub)
+			}
 		}
+		if isSelf {
+			for _, bl := range block {
+				lines = append(lines, rightAlign(bl, textWidth))
+			}
+		} else {
+			lines = append(lines, block...)
+		}
+		lines = append(lines, m.renderAttachments(msg.Attachments)...)
 		lines = append(lines, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) isSelfMessage(msg api.ChatMessage, displayName string) bool {
+	if msg.SenderID == "users/me" {
+		return true
+	}
+	if displayName == "You" {
+		return true
+	}
+	if userID := api.UserIDFromName(msg.SenderID); userID != "" && m.selfUserIDs[userID] {
+		return true
+	}
+	return false
 }
 
 func (m Model) mailDetail() string {
@@ -401,6 +699,10 @@ func (m Model) mailDetail() string {
 		} else {
 			lines = append(lines, line)
 		}
+	}
+	if attachmentLines := m.renderAttachments(thread.Attachments); len(attachmentLines) > 0 {
+		lines = append(lines, "", m.subtle("Attachments"))
+		lines = append(lines, attachmentLines...)
 	}
 	if thread.QuotedLines > 0 {
 		lines = append(lines, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
@@ -433,39 +735,69 @@ func (m Model) calendarDetail() string {
 func (m Model) meetDetail() string {
 	space := m.selectedMeet()
 	if space.Name == "" {
-		return centerText("No Meet spaces. Press n to create.", m.detail.Width)
+		return centerText("No Meet spaces yet. Press n then Enter to create one.", m.detail.Width)
 	}
-	recording := "off"
-	if space.Recording {
-		recording = "on"
+	conference := "none"
+	if space.IsActive() {
+		conference = "active"
+		if space.ActiveParticipants > 0 {
+			conference = fmt.Sprintf("active (%d people)", space.ActiveParticipants)
+		}
 	}
 	lines := []string{
-		"Link:       " + space.MeetingURI,
-		"People:     " + fmt.Sprintf("%d active", space.ActiveParticipants),
-		"Created:    " + space.Created.Format("02 Jan 2006"),
-		"Type:       " + fallback(space.Type, "open"),
-		"Recording:  " + recording,
+		"Link:       " + fallback(space.MeetingURI, "-"),
+		"Code:       " + fallback(space.MeetingCode, "-"),
+		"Resource:   " + space.Name,
+		"Access:     " + fallback(space.AccessType(), "-"),
+		"Conference: " + conference,
+	}
+	if !space.Created.IsZero() {
+		lines = append(lines, "Created:    "+space.Created.Format("02 Jan 2006"))
+	}
+	lines = append(lines,
 		"",
 		"─── Actions ───",
 		"",
 		m.subtle("[J]oin  [C]opy link  [E]nd  n new space"),
-	}
+	)
 	return strings.Join(lines, "\n")
 }
 
+func (m Model) paneHints() string {
+	switch m.focusedPane {
+	case paneDetail:
+		if m.cfg.VimMode {
+			if m.detailVisual {
+				return "motions extend  y yank  Esc cancel"
+			}
+			return "h/j/k/l cursor  w/b/e word  v visual  V line"
+		}
+		return "j/k scroll  g/G top/bot  i compose"
+	case paneAction:
+		return "Enter send  Esc cancel"
+	default:
+		return "j/k move  Enter open  i compose  / search"
+	}
+}
+
 func (m Model) actionTitle() string {
+	base := ""
 	switch m.feature {
 	case FeatureChat:
-		return "message · Enter send · Shift+Enter newline"
+		base = "message · Enter send · Shift+Enter newline"
 	case FeatureMail:
-		return "quick reply · c compose · R reply"
+		base = "quick reply · c compose · R reply"
 	case FeatureCalendar:
-		return "quick add · Enter create"
+		base = "quick add · Enter create"
 	case FeatureMeet:
-		return "create space · Enter create"
+		base = "create space · Enter create"
 	default:
-		return "action"
+		base = "action"
 	}
+	if m.cfg.VimMode && m.focusedPane == paneAction {
+		return "-- " + m.vimComposer.String() + " -- · " + base
+	}
+	return base
 }
 
 func (m Model) actionPlaceholder() string {
@@ -477,7 +809,7 @@ func (m Model) actionPlaceholder() string {
 	case FeatureCalendar:
 		return "Type quick-add text here with i, or press c for full event."
 	case FeatureMeet:
-		return "Press n, type a space name, Enter to create."
+		return "Press n then Enter to create a new Meet space."
 	default:
 		return ""
 	}
@@ -557,6 +889,14 @@ func fitLines(lines []string, width, height int) string {
 
 func centerText(value string, width int) string {
 	pad := max(0, (width-lipgloss.Width(value))/2)
+	return strings.Repeat(" ", pad) + value
+}
+
+func rightAlign(value string, width int) string {
+	pad := width - lipgloss.Width(value)
+	if pad <= 0 {
+		return value
+	}
 	return strings.Repeat(" ", pad) + value
 }
 

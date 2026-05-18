@@ -129,13 +129,14 @@ func (c *FixtureClient) SendChatMessage(_ context.Context, spaceName, text strin
 	}
 	c.seq++
 	msg := ChatMessage{
-		ID:         fmt.Sprintf("msg-%d", c.seq),
-		Name:       fmt.Sprintf("%s/messages/msg-%d", spaceName, c.seq),
-		Space:      spaceName,
-		SenderID:   "users/me",
-		SenderName: "You",
-		Text:       text,
-		CreateTime: time.Now(),
+		ID:          fmt.Sprintf("msg-%d", c.seq),
+		Name:        fmt.Sprintf("%s/messages/msg-%d", spaceName, c.seq),
+		Space:       spaceName,
+		SenderID:    "users/me",
+		SenderName:  "You",
+		Text:        text,
+		Attachments: ImageAttachmentsFromText(text),
+		CreateTime:  time.Now(),
 	}
 	c.messages[spaceName] = append(c.messages[spaceName], msg)
 	return msg, nil
@@ -181,6 +182,10 @@ func (c *FixtureClient) ChatMembers(_ context.Context, spaceName string) ([]Spac
 
 func (c *FixtureClient) PeopleGet(_ context.Context, userID string) (Person, error) {
 	return Person{UserID: userID}, nil
+}
+
+func (c *FixtureClient) DownloadAttachment(context.Context, Attachment, string) error {
+	return errors.New("fixture mode cannot download attachments; use an authenticated upstream gws CLI")
 }
 
 func (c *FixtureClient) MailLabels(context.Context) ([]MailLabel, error) {

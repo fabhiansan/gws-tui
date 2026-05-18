@@ -30,14 +30,20 @@ func TestLoadConfigTOMLSubset(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte("initial_feature = \"meet\"\nno_icons = true\nnotify_sound = false\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("initial_feature = \"meet\"\nno_icons = true\nnotify_sound = false\ninline_images = false\ncache_path = \"~/custom-gws-cache.json\"\nimage_cache_dir = \"~/custom-gws-images\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.InitialFeature != "meet" || !cfg.NoIcons || cfg.NotifySound {
+	if cfg.InitialFeature != "meet" || !cfg.NoIcons || cfg.NotifySound || cfg.InlineImages {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+	if filepath.Base(cfg.CachePath) != "custom-gws-cache.json" {
+		t.Fatalf("unexpected cache path: %q", cfg.CachePath)
+	}
+	if filepath.Base(cfg.ImageCacheDir) != "custom-gws-images" {
+		t.Fatalf("unexpected image cache dir: %q", cfg.ImageCacheDir)
 	}
 }

@@ -17,8 +17,12 @@ type Config struct {
 	NotifyDesktop      bool
 	NotifySound        bool
 	NotifySoundFile    string
+	InlineImages       bool
+	VimMode            bool
 	ConfigPath         string
 	StatePath          string
+	CachePath          string
+	ImageCacheDir      string
 	DraftDir           string
 	LogPath            string
 	AllowFixtureNotice bool
@@ -35,8 +39,12 @@ func LoadConfig() (Config, error) {
 		NotifyDesktop:      true,
 		NotifySound:        true,
 		NotifySoundFile:    "/System/Library/Sounds/Glass.aiff",
+		InlineImages:       true,
+		VimMode:            true,
 		ConfigPath:         filepath.Join(configBase, "tui.toml"),
 		StatePath:          filepath.Join(configBase, "tui-state.json"),
+		CachePath:          filepath.Join(cacheBase, "tui-cache.json"),
+		ImageCacheDir:      filepath.Join(cacheBase, "images"),
 		DraftDir:           filepath.Join(cacheBase, "drafts"),
 		LogPath:            filepath.Join(cacheBase, "tui.log"),
 		AllowFixtureNotice: true,
@@ -76,8 +84,16 @@ func LoadConfig() (Config, error) {
 			cfg.NotifySound = parseBool(value)
 		case "notify_sound_file":
 			cfg.NotifySoundFile = value
+		case "inline_images":
+			cfg.InlineImages = parseBool(value)
+		case "vim_mode", "vim":
+			cfg.VimMode = parseBool(value)
 		case "state_path":
 			cfg.StatePath = expandHome(value)
+		case "cache_path":
+			cfg.CachePath = expandHome(value)
+		case "image_cache_dir":
+			cfg.ImageCacheDir = expandHome(value)
 		case "draft_dir":
 			cfg.DraftDir = expandHome(value)
 		case "log_path":

@@ -2,16 +2,62 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/mail"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type CommandClient struct {
-	path string
+	path     string
+	subMu    sync.Mutex
+	lastSeen map[string]time.Time
+}
+
+type rawChatAttachment struct {
+	Name              string `json:"name"`
+	ContentName       string `json:"contentName"`
+	ContentType       string `json:"contentType"`
+	ThumbnailURI      string `json:"thumbnailUri"`
+	DownloadURI       string `json:"downloadUri"`
+	AttachmentDataRef struct {
+		ResourceName string `json:"resourceName"`
+	} `json:"attachmentDataRef"`
+}
+
+type rawGmailHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type rawGmailPart struct {
+	Filename string           `json:"filename"`
+	MimeType string           `json:"mimeType"`
+	Headers  []rawGmailHeader `json:"headers"`
+	Body     struct {
+		AttachmentID string `json:"attachmentId"`
+		Data         string `json:"data"`
+		Size         int    `json:"size"`
+	} `json:"body"`
+	Parts []rawGmailPart `json:"parts"`
+}
+
+type rawGmailMessage struct {
+	ID           string       `json:"id"`
+	ThreadID     string       `json:"threadId"`
+	LabelIDs     []string     `json:"labelIds"`
+	Snippet      string       `json:"snippet"`
+	InternalDate string       `json:"internalDate"`
+	Payload      rawGmailPart `json:"payload"`
 }
 
 func NewCommandClient(path string) *CommandClient {
@@ -42,7 +88,7 @@ func (c *CommandClient) ChatSpaces(ctx context.Context) (Page[Space], error) {
 }
 
 func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken string) (Page[ChatMessage], error) {
-	params := map[string]any{"parent": spaceName, "pageSize": 50}
+	params := map[string]any{"parent": spaceName, "pageSize": 50, "orderBy": "createTime DESC"}
 	if pageToken != "" {
 		params["pageToken"] = pageToken
 	}
@@ -60,6 +106,8 @@ func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken s
 			Thread struct {
 				Name string `json:"name"`
 			} `json:"thread"`
+			Attachment  []rawChatAttachment `json:"attachment"`
+			Attachments []rawChatAttachment `json:"attachments"`
 		} `json:"messages"`
 		NextPageToken string `json:"nextPageToken"`
 	}
@@ -74,17 +122,26 @@ func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken s
 		if text == "" {
 			text = msg.Argument
 		}
+		attachments := MergeAttachments(
+			chatAttachments(msg.Attachment),
+			chatAttachments(msg.Attachments),
+			ImageAttachmentsFromText(text),
+		)
 		items = append(items, ChatMessage{
-			ID:         lastSegment(msg.Name),
-			Name:       msg.Name,
-			Space:      spaceName,
-			SenderID:   msg.Sender.Name,
-			SenderName: fallback(msg.Sender.DisplayName, msg.Sender.Name),
-			Text:       text,
-			CreateTime: created,
-			ThreadID:   msg.Thread.Name,
+			ID:          lastSegment(msg.Name),
+			Name:        msg.Name,
+			Space:       spaceName,
+			SenderID:    msg.Sender.Name,
+			SenderName:  fallback(msg.Sender.DisplayName, msg.Sender.Name),
+			Text:        text,
+			Attachments: attachments,
+			CreateTime:  created,
+			ThreadID:    msg.Thread.Name,
 		})
 	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].CreateTime.Before(items[j].CreateTime)
+	})
 	return Page[ChatMessage]{Items: items, NextPageToken: raw.NextPageToken}, nil
 }
 
@@ -104,12 +161,53 @@ func (c *CommandClient) SendChatMessage(ctx context.Context, spaceName, text str
 		return ChatMessage{}, err
 	}
 	created, _ := time.Parse(time.RFC3339, raw.CreateTime)
-	return ChatMessage{ID: lastSegment(raw.Name), Name: raw.Name, Space: spaceName, SenderID: raw.Sender.Name, SenderName: fallback(raw.Sender.DisplayName, "You"), Text: fallback(raw.Text, text), CreateTime: created}, nil
+	bodyText := fallback(raw.Text, text)
+	return ChatMessage{ID: lastSegment(raw.Name), Name: raw.Name, Space: spaceName, SenderID: raw.Sender.Name, SenderName: fallback(raw.Sender.DisplayName, "You"), Text: bodyText, Attachments: ImageAttachmentsFromText(bodyText), CreateTime: created}, nil
 }
 
 func (c *CommandClient) SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error) {
-	ch := make(chan ChatMessage)
-	close(ch)
+	ch := make(chan ChatMessage, 1)
+	c.subMu.Lock()
+	if c.lastSeen == nil {
+		c.lastSeen = make(map[string]time.Time)
+	}
+	last, ok := c.lastSeen[spaceName]
+	if !ok {
+		last = time.Now()
+		c.lastSeen[spaceName] = last
+	}
+	c.subMu.Unlock()
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				page, err := c.ChatMessages(ctx, spaceName, "")
+				if err != nil {
+					continue
+				}
+				for _, msg := range page.Items {
+					if !msg.CreateTime.After(last) {
+						continue
+					}
+					c.subMu.Lock()
+					if msg.CreateTime.After(c.lastSeen[spaceName]) {
+						c.lastSeen[spaceName] = msg.CreateTime
+					}
+					c.subMu.Unlock()
+					select {
+					case ch <- msg:
+					case <-ctx.Done():
+					}
+					return
+				}
+			}
+		}
+	}()
 	return ch, nil
 }
 
@@ -204,6 +302,189 @@ func UserIDFromName(name string) string {
 	return name
 }
 
+func chatAttachments(raw []rawChatAttachment) []Attachment {
+	attachments := make([]Attachment, 0, len(raw))
+	for _, item := range raw {
+		id := item.Name
+		if id == "" {
+			id = item.AttachmentDataRef.ResourceName
+		}
+		attachments = append(attachments, Attachment{
+			ID:           id,
+			ResourceName: item.AttachmentDataRef.ResourceName,
+			Name:         item.ContentName,
+			ContentType:  item.ContentType,
+			ThumbnailURL: item.ThumbnailURI,
+			DownloadURL:  item.DownloadURI,
+		})
+	}
+	return NormalizeAttachments(attachments)
+}
+
+func (c *CommandClient) DownloadAttachment(ctx context.Context, attachment Attachment, outputPath string) error {
+	resourceName := attachment.MediaResourceName()
+	if resourceName == "" {
+		return errors.New("attachment media resource is missing")
+	}
+	if outputPath == "" {
+		return errors.New("output path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(outputPath), ".gws-media-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+
+	params, _ := json.Marshal(map[string]string{"resourceName": resourceName, "alt": "media"})
+	command := exec.CommandContext(ctx, c.path, "chat", "media", "download", "--params", string(params), "--output", filepath.Base(tmpPath))
+	command.Dir = filepath.Dir(tmpPath)
+	payload, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gws media download failed: %s", strings.TrimSpace(string(payload)))
+	}
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func flattenGmailHeaders(headers []rawGmailHeader) map[string]string {
+	out := make(map[string]string, len(headers))
+	for _, h := range headers {
+		out[strings.ToLower(h.Name)] = h.Value
+	}
+	return out
+}
+
+func parseFromHeader(value string) (name, email string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	if addr, err := mail.ParseAddress(value); err == nil {
+		name = addr.Name
+		if name == "" {
+			name = addr.Address
+		}
+		return name, addr.Address
+	}
+	if lt := strings.LastIndex(value, "<"); lt >= 0 {
+		if gt := strings.LastIndex(value, ">"); gt > lt {
+			email = strings.TrimSpace(value[lt+1 : gt])
+			name = strings.Trim(strings.TrimSpace(value[:lt]), "\"")
+			if name == "" {
+				name = email
+			}
+			return
+		}
+	}
+	return value, value
+}
+
+func parseGmailDate(internal, header string) time.Time {
+	if internal != "" {
+		if ms, err := strconv.ParseInt(internal, 10, 64); err == nil {
+			return time.UnixMilli(ms)
+		}
+	}
+	if header != "" {
+		if t, err := mail.ParseDate(header); err == nil {
+			return t
+		}
+	}
+	return time.Now()
+}
+
+func gmailBody(part rawGmailPart) string {
+	mime := strings.ToLower(part.MimeType)
+	if strings.HasPrefix(mime, "text/plain") {
+		if decoded := decodeGmailData(part.Body.Data); decoded != "" {
+			return decoded
+		}
+	}
+	var plain, html string
+	for _, child := range part.Parts {
+		body := gmailBody(child)
+		if body == "" {
+			continue
+		}
+		childMime := strings.ToLower(child.MimeType)
+		switch {
+		case plain == "" && strings.HasPrefix(childMime, "text/plain"):
+			plain = body
+		case html == "" && strings.HasPrefix(childMime, "text/html"):
+			html = body
+		case plain == "" && html == "":
+			plain = body
+		}
+	}
+	if plain != "" {
+		return plain
+	}
+	if html != "" {
+		return html
+	}
+	if strings.HasPrefix(mime, "text/") {
+		return decodeGmailData(part.Body.Data)
+	}
+	return ""
+}
+
+func decodeGmailData(data string) string {
+	if data == "" {
+		return ""
+	}
+	if decoded, err := base64.URLEncoding.DecodeString(data); err == nil {
+		return string(decoded)
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(data); err == nil {
+		return string(decoded)
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(data); err == nil {
+		return string(decoded)
+	}
+	return ""
+}
+
+func containsLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
+		}
+	}
+	return false
+}
+
+func gmailAttachments(root rawGmailPart) []Attachment {
+	var attachments []Attachment
+	var walk func(rawGmailPart)
+	walk = func(part rawGmailPart) {
+		if part.Filename != "" || strings.HasPrefix(strings.ToLower(part.MimeType), "image/") {
+			attachments = append(attachments, Attachment{
+				ID:          part.Body.AttachmentID,
+				Name:        part.Filename,
+				ContentType: part.MimeType,
+			})
+		}
+		for _, child := range part.Parts {
+			walk(child)
+		}
+	}
+	walk(root)
+	return NormalizeAttachments(attachments)
+}
+
 func (c *CommandClient) MailLabels(context.Context) ([]MailLabel, error) {
 	return defaultMailLabels(), nil
 }
@@ -221,30 +502,78 @@ func (c *CommandClient) MailThreads(ctx context.Context, q MailQuery) (Page[Mail
 	payload, _ := json.Marshal(params)
 	var raw struct {
 		Messages []struct {
-			ID       string   `json:"id"`
-			ThreadID string   `json:"threadId"`
-			Snippet  string   `json:"snippet"`
-			LabelIDs []string `json:"labelIds"`
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
 		} `json:"messages"`
 		NextPageToken string `json:"nextPageToken"`
 	}
-	err := c.runJSON(ctx, &raw, "gmail", "users", "messages", "list", "--params", string(payload), "--format", "json")
-	if err != nil {
+	if err := c.runJSON(ctx, &raw, "gmail", "users", "messages", "list", "--params", string(payload), "--format", "json"); err != nil {
 		return Page[MailThread]{}, err
 	}
-	items := make([]MailThread, 0, len(raw.Messages))
-	for _, msg := range raw.Messages {
-		items = append(items, MailThread{
-			ID:      fallback(msg.ThreadID, msg.ID),
-			Sender:  "Gmail",
-			Subject: fallback(msg.Snippet, "(no subject)"),
-			Snippet: msg.Snippet,
-			Date:    time.Now(),
-			Body:    msg.Snippet,
-			Labels:  msg.LabelIDs,
-		})
+
+	items := make([]MailThread, len(raw.Messages))
+	const maxConcurrent = 6
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
+	for i, msg := range raw.Messages {
+		i, msg := i, msg
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			thread, err := c.fetchMailMessage(ctx, msg.ID, msg.ThreadID)
+			if err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				return
+			}
+			items[i] = thread
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return Page[MailThread]{}, firstErr
 	}
 	return Page[MailThread]{Items: items, NextPageToken: raw.NextPageToken}, nil
+}
+
+func (c *CommandClient) fetchMailMessage(ctx context.Context, messageID, threadID string) (MailThread, error) {
+	params, _ := json.Marshal(map[string]any{
+		"userId": "me",
+		"id":     messageID,
+		"format": "full",
+	})
+	var raw rawGmailMessage
+	if err := c.runJSON(ctx, &raw, "gmail", "users", "messages", "get", "--params", string(params), "--format", "json"); err != nil {
+		return MailThread{}, err
+	}
+	headers := flattenGmailHeaders(raw.Payload.Headers)
+	senderName, senderEmail := parseFromHeader(headers["from"])
+	body := gmailBody(raw.Payload)
+	snippet := raw.Snippet
+	if snippet == "" {
+		snippet = firstLine(body)
+	}
+	return MailThread{
+		ID:          fallback(threadID, raw.ThreadID),
+		Sender:      fallback(senderName, fallback(senderEmail, "(unknown)")),
+		SenderEmail: senderEmail,
+		Subject:     fallback(headers["subject"], "(no subject)"),
+		Snippet:     snippet,
+		Date:        parseGmailDate(raw.InternalDate, headers["date"]),
+		Body:        body,
+		Attachments: MergeAttachments(gmailAttachments(raw.Payload), ImageAttachmentsFromText(body)),
+		Unread:      containsLabel(raw.LabelIDs, "UNREAD"),
+		Starred:     containsLabel(raw.LabelIDs, "STARRED"),
+		Labels:      raw.LabelIDs,
+	}, nil
 }
 
 func (c *CommandClient) SendMail(ctx context.Context, draft MailDraft) (MailThread, error) {
@@ -363,31 +692,28 @@ func (c *CommandClient) DeleteEvent(context.Context, string) error {
 	return errors.New("delete not wired")
 }
 
-func (c *CommandClient) MeetSpaces(ctx context.Context) (Page[MeetSpace], error) {
-	var raw struct {
-		Spaces        []MeetSpace `json:"spaces"`
-		Items         []MeetSpace `json:"items"`
-		NextPageToken string      `json:"nextPageToken"`
-	}
-	err := c.runJSON(ctx, &raw, "meet", "spaces", "list", "--format", "json")
-	if err != nil {
-		return Page[MeetSpace]{}, err
-	}
-	items := raw.Spaces
-	if len(items) == 0 {
-		items = raw.Items
-	}
-	return Page[MeetSpace]{Items: items, NextPageToken: raw.NextPageToken}, nil
+func (c *CommandClient) MeetSpaces(_ context.Context) (Page[MeetSpace], error) {
+	// gws CLI exposes only create/get/endActiveConference/patch on meet
+	// spaces — there is no `list` endpoint in the Meet API v2. Spaces
+	// created during the session are tracked client-side instead.
+	return Page[MeetSpace]{}, nil
 }
 
-func (c *CommandClient) CreateMeetSpace(ctx context.Context, title string) (MeetSpace, error) {
+func (c *CommandClient) CreateMeetSpace(ctx context.Context, _ string) (MeetSpace, error) {
 	var raw MeetSpace
 	err := c.runJSON(ctx, &raw, "meet", "spaces", "create", "--json", "{}", "--format", "json")
 	return raw, err
 }
 
-func (c *CommandClient) EndMeetSpace(context.Context, string) error {
-	return errors.New("end meet not wired")
+func (c *CommandClient) EndMeetSpace(ctx context.Context, name string) error {
+	if name == "" {
+		return errors.New("meet space name is required")
+	}
+	params, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	return c.runVoid(ctx, "meet", "spaces", "endActiveConference", "--params", string(params), "--format", "json")
 }
 func (c *CommandClient) Close() error { return nil }
 
@@ -405,6 +731,23 @@ func (c *CommandClient) runJSON(ctx context.Context, out any, args ...string) er
 	}
 	if err := json.Unmarshal(payload, out); err != nil {
 		return fmt.Errorf("decode %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+// runVoid runs a gws subcommand and ignores its stdout. Use for endpoints
+// that return google.protobuf.Empty (e.g. endActiveConference) where parsing
+// the response would fail or yield no useful data.
+func (c *CommandClient) runVoid(ctx context.Context, args ...string) error {
+	if c.path == "" {
+		return errors.New("gws path is empty")
+	}
+	command := exec.CommandContext(ctx, c.path, args...)
+	if _, err := command.Output(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(exit.Stderr)))
+		}
+		return err
 	}
 	return nil
 }

@@ -59,6 +59,10 @@ func (c *HybridClient) PeopleGet(ctx context.Context, userID string) (Person, er
 	return c.primary.PeopleGet(ctx, userID)
 }
 
+func (c *HybridClient) DownloadAttachment(ctx context.Context, attachment Attachment, outputPath string) error {
+	return c.primary.DownloadAttachment(ctx, attachment, outputPath)
+}
+
 func (c *HybridClient) MailLabels(ctx context.Context) ([]MailLabel, error) {
 	return withFallback(ctx, c.primary.MailLabels, c.fallback.MailLabels)
 }

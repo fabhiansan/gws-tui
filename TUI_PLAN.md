@@ -528,14 +528,17 @@ Lua plugin smoke test passes.
 Implemented in this repository:
 
 - `cmd/tui.go`, `cmd/root.go`, and `cmd/delegate.go` add the `gws tui`
-  entrypoint, `--feature`, `--auth`, `--no-icons`, `--no-color`, and
-  `--version`.
+  entrypoint, `--feature`, `--auth`, `--no-icons`, `--no-color`,
+  `--no-images`, and `--version`.
 - `internal/api/` provides a reusable Workspace client boundary, command-backed
   adapter for an installed `gws`, fixture fallback, realtime fixture events, and
   golden JSON compatibility coverage.
 - `internal/tui/` provides the Bubble Tea root model, feature router, Chat,
   Mail, Calendar, Meet views, composers, quick actions, config reload, state
-  persistence, draft autosave, desktop notification helpers, and logging.
+  persistence, draft autosave, Kitty inline image previews using virtual
+  placement with text fallback, media-resource keyed Chat image caching,
+  authenticated Chat media download through the upstream CLI, desktop
+  notification helpers, and logging.
 - `internal/tui/theme/` contains the Lip Gloss palette and reusable styles.
 - `testdata/cli_golden/` and `cmd/root_test.go` cover compatibility snapshots
   for the CLI JSON shapes used by the Lua plugin.
@@ -619,9 +622,8 @@ Defaults in parens; flag if you want to change them.
 ## 9. Out of scope (deferred to v2+)
 
 - Slash commands in chat composer.
-- File uploads / attachments.
+- File uploads and full non-image attachment management.
 - @-mention completion popover.
-- Inline image previews (kitty/sixel).
 - Threaded reply UI (collapse/expand).
 - Drive / Docs features.
 - Per-user themes / config hot-reload.

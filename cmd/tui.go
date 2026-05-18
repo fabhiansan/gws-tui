@@ -20,6 +20,8 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	auth := flags.Bool("auth", false, "show the auth screen before loading the workspace")
 	noIcons := flags.Bool("no-icons", false, "disable Nerd Font/Unicode icons")
 	noColor := flags.Bool("no-color", false, "disable color styling")
+	noImages := flags.Bool("no-images", false, "disable inline image previews")
+	noVim := flags.Bool("no-vim", false, "disable vim mode keybindings in the composer")
 	version := flags.Bool("version", false, "print TUI build version")
 	fixtures := flags.Bool("fixtures", false, "force fixture data instead of the installed gws CLI")
 
@@ -46,6 +48,12 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	if *noColor {
 		cfg.NoColor = true
 	}
+	if *noImages {
+		cfg.InlineImages = false
+	}
+	if *noVim {
+		cfg.VimMode = false
+	}
 	if err := tui.SetupLogging(cfg.LogPath); err != nil {
 		fmt.Fprintf(stderr, "gws tui: logging: %v\n", err)
 		return 3
@@ -70,7 +78,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 		UpstreamHint: upstreamDescription(),
 	})
 
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(context.Background()))
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(context.Background()))
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(stderr, "gws tui: %v\n", err)
 		return 5

@@ -37,6 +37,7 @@ gws tui --feature meet
 gws tui --auth
 gws tui --no-icons
 gws tui --no-color
+gws tui --no-images
 gws tui --version
 ```
 
@@ -54,7 +55,7 @@ Global:
 - `Enter`/`o`: open selected item
 - `/`: search
 - `m`: load more
-- `r`: refresh
+- `r`: refresh current feature
 - `q`: quit
 
 Chat:
@@ -63,7 +64,7 @@ Chat:
 - `Enter`: send
 - `Shift+Enter`: newline
 - `s`: toggle live subscription marker
-- `R`: reply prefix
+- `R`: refresh all workspace data
 
 Mail:
 
@@ -107,13 +108,24 @@ no_color = false
 notify_desktop = true
 notify_sound = true
 notify_sound_file = "/System/Library/Sounds/Glass.aiff"
+inline_images = true
 state_path = "~/.config/gws/tui-state.json"
+cache_path = "~/.cache/gws/tui-cache.json"
+image_cache_dir = "~/.cache/gws/images"
 draft_dir = "~/.cache/gws/drafts"
 log_path = "~/.cache/gws/tui.log"
 ```
 
-State is written to `~/.config/gws/tui-state.json`. Draft compose snapshots are
-autosaved every five seconds under `~/.cache/gws/drafts`.
+State is written to `~/.config/gws/tui-state.json`. Workspace list/detail data
+is cached in `~/.cache/gws/tui-cache.json` so the TUI can restart without
+refetching every pane; press `r` to refresh from Google Workspace. Draft compose
+snapshots are autosaved every five seconds under `~/.cache/gws/drafts`.
+When running in Kitty, image attachments and direct image URLs in chat/mail can
+render inline after being cached under `~/.cache/gws/images`; use
+`--no-images` or `inline_images = false` to fall back to text-only attachment
+links. Authenticated Google Chat attachments are downloaded through the
+upstream `gws chat media download` command so existing Workspace credentials are
+used instead of browser cookies.
 
 ## Compatibility
 
