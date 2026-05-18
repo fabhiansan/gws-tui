@@ -19,7 +19,7 @@ func newDetailVimModel(t *testing.T, lines int) *Model {
 	}
 	return &Model{
 		cfg:             Config{VimMode: true, NoColor: true, NoIcons: true},
-		theme:           theme.New(true),
+		theme:           theme.New("", true),
 		detail:          vp,
 		focusedPane:     paneDetail,
 		detailLines:     plain,
@@ -237,8 +237,11 @@ func TestDecorateDetailMarksCursorLine(t *testing.T) {
 		t.Fatalf("plain lines unexpected: %+v", plain)
 	}
 	lines := strings.Split(decorated, "\n")
-	if !strings.Contains(lines[1], "b") || strings.HasPrefix(lines[1], "  ") {
-		t.Fatalf("cursor line should have a non-blank marker prefix: %q", lines[1])
+	if !strings.Contains(lines[1], "b") {
+		t.Fatalf("cursor line should still contain 'b': %q", lines[1])
+	}
+	if len(lines[1]) <= len(lines[0]) {
+		t.Fatalf("cursor line should be padded to full width vs non-cursor: %q vs %q", lines[1], lines[0])
 	}
 	if !strings.HasPrefix(lines[0], "  ") || !strings.HasPrefix(lines[2], "  ") {
 		t.Fatalf("non-cursor lines should keep blank prefix: %q %q", lines[0], lines[2])

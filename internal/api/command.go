@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"os"
 	"os/exec"
@@ -165,7 +167,24 @@ func (c *CommandClient) SendChatMessage(ctx context.Context, spaceName, text str
 	return ChatMessage{ID: lastSegment(raw.Name), Name: raw.Name, Space: spaceName, SenderID: raw.Sender.Name, SenderName: fallback(raw.Sender.DisplayName, "You"), Text: bodyText, Attachments: ImageAttachmentsFromText(bodyText), CreateTime: created}, nil
 }
 
+// SubscribeChat opens a long-running stream of new chat messages for the given
+// space. When `GWS_EVENTS_PROJECT` or `GWS_EVENTS_SUBSCRIPTION` is configured,
+// it spawns `gws events +subscribe` and forwards CloudEvents NDJSON as they
+// arrive; otherwise it falls back to a 5-second polling loop so environments
+// without Pub/Sub plumbing keep working.
 func (c *CommandClient) SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error) {
+	if spaceName == "" {
+		return nil, errors.New("space name required")
+	}
+	project := strings.TrimSpace(os.Getenv("GWS_EVENTS_PROJECT"))
+	subscription := strings.TrimSpace(os.Getenv("GWS_EVENTS_SUBSCRIPTION"))
+	if project != "" || subscription != "" {
+		return c.subscribeChatStream(ctx, spaceName, project, subscription), nil
+	}
+	return c.subscribeChatPoll(ctx, spaceName), nil
+}
+
+func (c *CommandClient) subscribeChatPoll(ctx context.Context, spaceName string) <-chan ChatMessage {
 	ch := make(chan ChatMessage, 1)
 	c.subMu.Lock()
 	if c.lastSeen == nil {
@@ -208,7 +227,169 @@ func (c *CommandClient) SubscribeChat(ctx context.Context, spaceName string) (<-
 			}
 		}
 	}()
-	return ch, nil
+	return ch
+}
+
+func (c *CommandClient) subscribeChatStream(ctx context.Context, spaceName, project, subscription string) <-chan ChatMessage {
+	ch := make(chan ChatMessage, 16)
+	go func() {
+		defer close(ch)
+		backoff := time.Second
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			err := c.runChatEventStream(ctx, spaceName, project, subscription, ch)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+				}
+				continue
+			}
+			backoff = time.Second
+			// Stream exited cleanly (helper finished a batch). Re-subscribe.
+		}
+	}()
+	return ch
+}
+
+func (c *CommandClient) runChatEventStream(ctx context.Context, spaceName, project, subscription string, out chan<- ChatMessage) error {
+	if c.path == "" {
+		return errors.New("gws path is empty")
+	}
+	args := []string{
+		"events", "+subscribe",
+		"--target", "//chat.googleapis.com/" + spaceName,
+		"--event-types", "google.workspace.chat.message.v1.created",
+		"--format", "json",
+	}
+	if subscription != "" {
+		args = append(args, "--subscription", subscription)
+	} else {
+		args = append(args, "--project", project)
+	}
+
+	cmd := exec.CommandContext(ctx, c.path, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		msg, ok := parseChatCloudEvent(scanner.Bytes(), spaceName)
+		if !ok {
+			continue
+		}
+		select {
+		case out <- msg:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// parseChatCloudEvent decodes a single CloudEvent NDJSON line emitted by
+// `gws events +subscribe` for the Workspace Chat API. It returns the
+// corresponding ChatMessage when the event carries an inline message payload.
+func parseChatCloudEvent(line []byte, defaultSpace string) (ChatMessage, bool) {
+	line = bytesTrimSpace(line)
+	if len(line) == 0 || line[0] != '{' {
+		return ChatMessage{}, false
+	}
+	var env struct {
+		Type    string `json:"type"`
+		Subject string `json:"subject"`
+		Data    struct {
+			Message struct {
+				Name       string `json:"name"`
+				Text       string `json:"text"`
+				CreateTime string `json:"createTime"`
+				Sender     struct {
+					Name        string `json:"name"`
+					DisplayName string `json:"displayName"`
+				} `json:"sender"`
+				Space struct {
+					Name string `json:"name"`
+				} `json:"space"`
+				Attachments []rawChatAttachment `json:"attachments"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(line, &env); err != nil {
+		return ChatMessage{}, false
+	}
+	raw := env.Data.Message
+	if raw.Name == "" {
+		return ChatMessage{}, false
+	}
+	space := raw.Space.Name
+	if space == "" {
+		if i := strings.Index(raw.Name, "/messages/"); i > 0 {
+			space = raw.Name[:i]
+		}
+	}
+	if space == "" {
+		space = defaultSpace
+	}
+	created, _ := time.Parse(time.RFC3339, raw.CreateTime)
+	attachments := make([]Attachment, 0, len(raw.Attachments))
+	for _, a := range raw.Attachments {
+		attachments = append(attachments, Attachment{
+			ID:           lastSegment(a.Name),
+			ResourceName: a.AttachmentDataRef.ResourceName,
+			Name:         a.ContentName,
+			ContentType:  a.ContentType,
+			DownloadURL:  a.DownloadURI,
+			ThumbnailURL: a.ThumbnailURI,
+		})
+	}
+	attachments = append(attachments, ImageAttachmentsFromText(raw.Text)...)
+	return ChatMessage{
+		ID:          lastSegment(raw.Name),
+		Name:        raw.Name,
+		Space:       space,
+		SenderID:    raw.Sender.Name,
+		SenderName:  fallback(raw.Sender.DisplayName, raw.Sender.Name),
+		Text:        raw.Text,
+		Attachments: attachments,
+		CreateTime:  created,
+	}, true
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\r' || b[0] == '\n') {
+		b = b[1:]
+	}
+	for len(b) > 0 {
+		last := b[len(b)-1]
+		if last != ' ' && last != '\t' && last != '\r' && last != '\n' {
+			break
+		}
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func (c *CommandClient) ChatMembers(ctx context.Context, spaceName string) ([]SpaceMember, error) {

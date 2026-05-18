@@ -26,11 +26,12 @@ func TestLoadConfigTOMLSubset(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", root)
 	t.Setenv("XDG_CACHE_HOME", root)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	configPath := filepath.Join(root, "gws", "tui.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte("initial_feature = \"meet\"\nno_icons = true\nnotify_sound = false\ninline_images = false\ncache_path = \"~/custom-gws-cache.json\"\nimage_cache_dir = \"~/custom-gws-images\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("initial_feature = \"meet\"\nno_icons = true\nnotify_sound = false\ninline_images = false\ndaemon = true\ndaemon_autospawn = false\ndaemon_socket = \"$XDG_RUNTIME_DIR/gws/custom.sock\"\ncache_path = \"~/custom-gws-cache.json\"\nimage_cache_dir = \"~/custom-gws-images\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig()
@@ -45,5 +46,11 @@ func TestLoadConfigTOMLSubset(t *testing.T) {
 	}
 	if filepath.Base(cfg.ImageCacheDir) != "custom-gws-images" {
 		t.Fatalf("unexpected image cache dir: %q", cfg.ImageCacheDir)
+	}
+	if !cfg.Daemon || cfg.DaemonAutospawn {
+		t.Fatalf("unexpected daemon flags: daemon=%v autospawn=%v", cfg.Daemon, cfg.DaemonAutospawn)
+	}
+	if filepath.Base(cfg.DaemonSocket) != "custom.sock" {
+		t.Fatalf("unexpected daemon socket: %q", cfg.DaemonSocket)
 	}
 }

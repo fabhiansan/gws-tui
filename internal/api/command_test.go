@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMain(m *testing.M) {
@@ -35,6 +36,91 @@ func TestCommandClientChatMessagesLoadsLatestPageChronologically(t *testing.T) {
 	}
 }
 
+func TestCommandClientSubscribeChatStreamsCloudEvents(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+	t.Setenv("GWS_EVENTS_PROJECT", "test-project")
+
+	client := NewCommandClient(os.Args[0])
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := client.SubscribeChat(ctx, "spaces/engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case msg, ok := <-ch:
+		if !ok {
+			t.Fatal("subscription channel closed before any message")
+		}
+		if msg.ID != "stream-1" {
+			t.Fatalf("unexpected message id: %q", msg.ID)
+		}
+		if msg.Space != "spaces/engineering" {
+			t.Fatalf("unexpected space: %q", msg.Space)
+		}
+		if msg.Text != "hello via stream" {
+			t.Fatalf("unexpected text: %q", msg.Text)
+		}
+		if msg.SenderName != "Alice" {
+			t.Fatalf("unexpected sender: %q", msg.SenderName)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for streamed chat event")
+	}
+}
+
+func emitFakeChatEventStream() {
+	target := ""
+	for i, arg := range os.Args {
+		if arg == "--target" && i+1 < len(os.Args) {
+			target = os.Args[i+1]
+			break
+		}
+	}
+	if target != "//chat.googleapis.com/spaces/engineering" {
+		fmt.Fprintf(os.Stderr, "unexpected target: %q\n", target)
+		os.Exit(2)
+	}
+	hasProject := false
+	hasSubscription := false
+	for i, arg := range os.Args {
+		if arg == "--project" && i+1 < len(os.Args) {
+			hasProject = true
+		}
+		if arg == "--subscription" && i+1 < len(os.Args) {
+			hasSubscription = true
+		}
+	}
+	if !hasProject && !hasSubscription {
+		fmt.Fprintln(os.Stderr, "events +subscribe missing --project/--subscription")
+		os.Exit(2)
+	}
+	event := map[string]any{
+		"type":    "google.workspace.chat.message.v1.created",
+		"subject": "spaces/engineering/messages/stream-1",
+		"data": map[string]any{
+			"message": map[string]any{
+				"name":       "spaces/engineering/messages/stream-1",
+				"text":       "hello via stream",
+				"createTime": "2026-05-18T10:00:00+07:00",
+				"sender":     map[string]any{"name": "users/alice", "displayName": "Alice"},
+				"space":      map[string]any{"name": "spaces/engineering"},
+			},
+		},
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "marshal event: %v\n", err)
+		os.Exit(2)
+	}
+	fmt.Println(string(payload))
+	// Block until killed so the parent context cancellation closes us. This
+	// mirrors `gws events +subscribe` which is a long-running stream.
+	select {}
+}
+
 func TestCommandClientDownloadAttachmentUsesMediaResourceName(t *testing.T) {
 	t.Setenv("GWS_FAKE_COMMAND", "1")
 
@@ -58,6 +144,12 @@ func TestCommandClientDownloadAttachmentUsesMediaResourceName(t *testing.T) {
 }
 
 func fakeCommand() {
+	// `events +subscribe` does not take --params; handle it before requiring one.
+	if len(os.Args) >= 3 && os.Args[1] == "events" && os.Args[2] == "+subscribe" {
+		emitFakeChatEventStream()
+		return
+	}
+
 	paramsIndex := -1
 	for i, arg := range os.Args {
 		if arg == "--params" && i+1 < len(os.Args) {

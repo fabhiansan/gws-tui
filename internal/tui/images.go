@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,12 +22,32 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi/kitty"
 	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"golang.org/x/image/draw"
 )
 
 const (
 	maxInlineImageBytes = int64(10 << 20)
 	inlineImageRows     = 8
+
+	// Approximate pixel dimensions of one terminal cell. Used to derive a
+	// downscale budget so the bitmap we hand to Kitty stays close to what's
+	// actually visible on screen — a 4000×3000 PNG displayed in 8 rows is
+	// otherwise transmitted at full resolution on every redraw and tanks
+	// scroll perf.
+	kittyCellPxW = 10
+	kittyCellPxH = 20
 )
+
+type inlineImageRender struct {
+	file        string
+	source      string
+	columns     int
+	rows        int
+	size        int64
+	modTime     time.Time
+	full        string
+	placeholder string
+}
 
 func (m *Model) imageDownloadCmdsForWorkspace() []tea.Cmd {
 	var cmds []tea.Cmd
@@ -93,16 +111,29 @@ func (m *Model) imageDownloadCmdsForAttachments(attachments []api.Attachment) []
 			continue
 		}
 		if local, ok := localImagePath(source); ok {
-			m.imageFiles[source] = local
+			if m.imageFiles[source] != local {
+				m.imageFiles[source] = local
+				m.imageVersion++
+			}
 			continue
 		}
 		if attachment.MediaResourceName() == "" && !isRemoteImageSource(source) {
 			continue
 		}
-		cachePath := imageCachePath(m.cfg.ImageCacheDir, attachment)
+		cachePath := attachment.CachePath(m.cfg.ImageCacheDir)
 		if fileExists(cachePath) {
-			m.imageFiles[source] = cachePath
-			delete(m.imageErrors, source)
+			changed := false
+			if m.imageFiles[source] != cachePath {
+				m.imageFiles[source] = cachePath
+				changed = true
+			}
+			if m.imageErrors[source] != "" {
+				delete(m.imageErrors, source)
+				changed = true
+			}
+			if changed {
+				m.imageVersion++
+			}
 			continue
 		}
 		if m.imageErrors[source] != "" {
@@ -113,6 +144,11 @@ func (m *Model) imageDownloadCmdsForAttachments(attachments []api.Attachment) []
 		}
 		m.imageLoading[source] = true
 		delete(m.imageErrors, source)
+		m.imageVersion++
+		if m.cfg.Daemon {
+			// Daemon owns the download; we just wait for image.cached.
+			continue
+		}
 		cmds = append(cmds, downloadImageCmd(m.ctx, m.client, attachment, cachePath))
 	}
 	return cmds
@@ -134,24 +170,56 @@ func downloadImageCmd(ctx context.Context, client api.WorkspaceClient, attachmen
 	}
 }
 
-func (m Model) renderAttachments(attachments []api.Attachment) []string {
+// attachmentLineRange records which lines of the attachment block belong to
+// which image attachment, so the chat-history Enter handler can look up the
+// attachment under the vim cursor without re-walking message attachments.
+// `start` is relative to the first attachment line returned alongside.
+type attachmentLineRange struct {
+	start      int
+	rows       int
+	attachment api.Attachment
+}
+
+func (m *Model) renderAttachments(attachments []api.Attachment) []string {
+	lines, _ := m.renderAttachmentsTracked(attachments)
+	return lines
+}
+
+func (m *Model) renderAttachmentsTracked(attachments []api.Attachment) ([]string, []attachmentLineRange) {
 	attachments = api.NormalizeAttachments(attachments)
 	if len(attachments) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	width := max(16, m.detail.Width-4)
 	lines := make([]string, 0, len(attachments)*2)
+	var ranges []attachmentLineRange
 	for _, attachment := range attachments {
 		source := attachment.PreviewSource()
 		label := attachment.DisplayName()
 		if attachment.IsImage() {
+			// Line offset within the attLines result (after detailContent
+			// joins+splits, internal "\n" inside the kitty preview entry
+			// expand into separate detailLines entries — so we have to
+			// count real lines, not slice indices).
+			start := countDisplayLines(lines)
 			lines = append(lines, m.subtle("  [image] "+truncate(label, width-10)))
 			if preview, ok := m.renderInlineImage(attachment); ok {
 				lines = append(lines, preview)
+				rows := 1 + strings.Count(preview, "\n") + 1
+				ranges = append(ranges, attachmentLineRange{
+					start:      start,
+					rows:       rows,
+					attachment: attachment,
+				})
 				continue
 			}
 			lines = append(lines, m.subtle("  "+truncate(imageFallback(source, m.imageLoading[source], m.imageErrors[source]), width)))
+			ranges = append(ranges, attachmentLineRange{
+				start:      start,
+				rows:       2,
+				attachment: attachment,
+			})
 			continue
 		}
 
@@ -161,10 +229,24 @@ func (m Model) renderAttachments(attachments []api.Attachment) []string {
 		}
 		lines = append(lines, m.subtle("  "+truncate(fallback, width)))
 	}
-	return lines
+	return lines, ranges
 }
 
-func (m Model) renderInlineImage(attachment api.Attachment) (string, bool) {
+// countDisplayLines reports how many lines a slice of strings will occupy
+// once joined with "\n" and split again — the form detailContent feeds into
+// decorateDetail. A multi-line slice entry (the kitty image preview is one
+// such entry, holding inlineImageRows newline-separated placeholder rows)
+// expands into multiple detailLines entries, so a plain len(slice) lookup
+// loses the real cursor line.
+func countDisplayLines(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += strings.Count(l, "\n") + 1
+	}
+	return n
+}
+
+func (m *Model) renderInlineImage(attachment api.Attachment) (string, bool) {
 	if !m.cfg.InlineImages || !isKittyTerminal() {
 		return "", false
 	}
@@ -174,11 +256,149 @@ func (m Model) renderInlineImage(attachment api.Attachment) (string, bool) {
 		return "", false
 	}
 	cols := min(48, max(16, m.detail.Width-6))
-	rendered, err := kittyImage(local, source, cols, inlineImageRows)
-	if err != nil {
+	rendered, ok := m.cachedKittyImage(local, source, cols, inlineImageRows)
+	if !ok {
 		return "", false
 	}
 	return rendered, true
+}
+
+// cachedKittyImage returns the cached kitty escape sequence for an image, or
+// an empty string when the frame hasn't been precomputed yet. It never blocks
+// on decode/encode — those run via precomputeImageFrameCmd outside View.
+func (m *Model) cachedKittyImage(file, source string, columns, rows int) (string, bool) {
+	stat, err := os.Stat(file)
+	if err != nil {
+		return "", false
+	}
+	key := inlineImageRenderKey(file, source, columns, rows)
+	if cached, ok := m.imageRenders[key]; ok &&
+		cached.size == stat.Size() &&
+		cached.modTime.Equal(stat.ModTime()) {
+		// Always re-emit the APC transmission. Kitty treats a retransmit
+		// under the same image ID as a no-op for display purposes, but
+		// it's required because bubbletea's viewport content is the only
+		// source of truth for the next frame — if we returned the
+		// placeholder alone, a resize, redraw, or kitty cache eviction
+		// would leave the cells empty.
+		return cached.full, true
+	}
+	return "", false
+}
+
+// imageFrameReadyMsg carries a precomputed kitty frame ready to be cached
+// on the model. Emitted by precomputeImageFrameCmd.
+type imageFrameReadyMsg struct {
+	key         string
+	file        string
+	source      string
+	columns     int
+	rows        int
+	size        int64
+	modTime     time.Time
+	full        string
+	placeholder string
+	err         error
+}
+
+// precomputeImageFrameCmd does the expensive decode+kitty-encode work in a
+// goroutine so View() can stay responsive. The result is fed back to Update
+// via imageFrameReadyMsg.
+func precomputeImageFrameCmd(file, source string, columns, rows int) tea.Cmd {
+	return func() tea.Msg {
+		stat, err := os.Stat(file)
+		if err != nil {
+			return imageFrameReadyMsg{file: file, source: source, columns: columns, rows: rows, err: err}
+		}
+		full, placeholder, err := kittyImageFrame(file, source, columns, rows)
+		if err != nil {
+			return imageFrameReadyMsg{file: file, source: source, columns: columns, rows: rows, err: err}
+		}
+		return imageFrameReadyMsg{
+			key:         inlineImageRenderKey(file, source, columns, rows),
+			file:        file,
+			source:      source,
+			columns:     columns,
+			rows:        rows,
+			size:        stat.Size(),
+			modTime:     stat.ModTime(),
+			full:        full,
+			placeholder: placeholder,
+		}
+	}
+}
+
+// precomputeFrameCmdsForAttachments enumerates image attachments and queues
+// precompute commands for any whose frames are not yet cached or in-flight.
+func (m *Model) precomputeFrameCmdsForAttachments(attachments []api.Attachment) []tea.Cmd {
+	if !m.cfg.InlineImages || !isKittyTerminal() || m.detail.Width <= 0 {
+		return nil
+	}
+	cols := min(48, max(16, m.detail.Width-6))
+	rows := inlineImageRows
+	var cmds []tea.Cmd
+	for _, attachment := range api.NormalizeAttachments(attachments) {
+		if !attachment.IsImage() {
+			continue
+		}
+		source := attachment.PreviewSource()
+		if source == "" {
+			continue
+		}
+		file, ok := m.previewImagePath(source)
+		if !ok {
+			continue
+		}
+		key := inlineImageRenderKey(file, source, cols, rows)
+		if _, ok := m.imageRenders[key]; ok {
+			continue
+		}
+		if m.imageFramePend[key] {
+			continue
+		}
+		m.imageFramePend[key] = true
+		cmds = append(cmds, precomputeImageFrameCmd(file, source, cols, rows))
+	}
+	return cmds
+}
+
+func (m *Model) precomputeFrameCmdsForChat(messages []api.ChatMessage) []tea.Cmd {
+	var attachments []api.Attachment
+	for _, message := range messages {
+		attachments = append(attachments, message.Attachments...)
+	}
+	return m.precomputeFrameCmdsForAttachments(attachments)
+}
+
+func (m *Model) precomputeFrameCmdsForMail(threads []api.MailThread) []tea.Cmd {
+	var attachments []api.Attachment
+	for _, thread := range threads {
+		attachments = append(attachments, thread.Attachments...)
+	}
+	return m.precomputeFrameCmdsForAttachments(attachments)
+}
+
+// precomputeFrameCmdsForCurrentDetail picks up the attachments currently
+// visible in the detail pane and queues precompute for them. Called after
+// events that introduce new image paths (download finished, frame ready,
+// space switched).
+func (m *Model) precomputeFrameCmdsForCurrentDetail() []tea.Cmd {
+	switch m.feature {
+	case FeatureChat:
+		return m.precomputeFrameCmdsForChat(m.chatMessages)
+	case FeatureMail:
+		thread := m.selectedMail()
+		if thread.ID == "" {
+			return nil
+		}
+		return m.precomputeFrameCmdsForMail([]api.MailThread{thread})
+	default:
+		return nil
+	}
+}
+
+func inlineImageRenderKey(file, source string, columns, rows int) string {
+	return fmt.Sprintf("%s\x00%s\x00%d\x00%d", source, file, columns, rows)
 }
 
 func (m Model) previewImagePath(source string) (string, bool) {
@@ -194,7 +414,7 @@ func (m Model) previewImagePath(source string) (string, bool) {
 	if m.cfg.ImageCacheDir == "" || !isRemoteImageSource(source) {
 		return "", false
 	}
-	cached := imageCachePath(m.cfg.ImageCacheDir, api.Attachment{URL: source})
+	cached := api.Attachment{URL: source}.CachePath(m.cfg.ImageCacheDir)
 	if fileExists(cached) {
 		return cached, true
 	}
@@ -202,11 +422,17 @@ func (m Model) previewImagePath(source string) (string, bool) {
 }
 
 func kittyImage(file, source string, columns, rows int) (string, error) {
+	full, _, err := kittyImageFrame(file, source, columns, rows)
+	return full, err
+}
+
+func kittyImageFrame(file, source string, columns, rows int) (string, string, error) {
 	imageID := kittyImageID(source, columns, rows)
 	img, err := decodeImage(file)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	img = downscaleForCells(img, columns, rows)
 	bounds := img.Bounds()
 	var buf bytes.Buffer
 	// Kitty 0.46 silently refuses Unicode-placeholder display for f=100
@@ -231,10 +457,50 @@ func kittyImage(file, source string, columns, rows int) (string, error) {
 		Chunk:            true,
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	buf.WriteString(kittyPlaceholderGrid(imageID, columns, rows))
-	return buf.String(), nil
+	placeholder := kittyPlaceholderGrid(imageID, columns, rows)
+	buf.WriteString(placeholder)
+	return buf.String(), placeholder, nil
+}
+
+// downscaleForCells shrinks src so it fits inside the Kitty cell grid at
+// roughly one bitmap pixel per terminal subcell. Aspect ratio is preserved
+// (Kitty stretches into the requested Columns/Rows regardless, so we keep
+// the source aspect to avoid double-distortion). If the source is already
+// at or below the budget we return it unchanged.
+func downscaleForCells(src image.Image, columns, rows int) image.Image {
+	if columns <= 0 || rows <= 0 {
+		return src
+	}
+	bounds := src.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+	if srcW <= 0 || srcH <= 0 {
+		return src
+	}
+	targetW := columns * kittyCellPxW
+	targetH := rows * kittyCellPxH
+	scaleW := float64(targetW) / float64(srcW)
+	scaleH := float64(targetH) / float64(srcH)
+	scale := scaleW
+	if scaleH < scale {
+		scale = scaleH
+	}
+	if scale >= 1.0 {
+		return src
+	}
+	dstW := int(float64(srcW) * scale)
+	dstH := int(float64(srcH) * scale)
+	if dstW < 1 {
+		dstW = 1
+	}
+	if dstH < 1 {
+		dstH = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, bounds, draw.Over, nil)
+	return dst
 }
 
 func decodeImage(file string) (image.Image, error) {
@@ -346,19 +612,6 @@ func downloadImage(ctx context.Context, client api.WorkspaceClient, attachment a
 	return nil
 }
 
-func imageCachePath(dir string, attachment api.Attachment) string {
-	source := attachment.PreviewSource()
-	if source == "" {
-		source = attachment.MediaResourceName()
-	}
-	sum := sha256.Sum256([]byte(source))
-	ext := imageExt(attachment)
-	if ext == "" {
-		ext = ".png"
-	}
-	return filepath.Join(dir, hex.EncodeToString(sum[:])+ext)
-}
-
 func localImagePath(source string) (string, bool) {
 	if source == "" {
 		return "", false
@@ -398,39 +651,6 @@ func imageFallback(source string, loading bool, downloadErr string) string {
 		return "preview failed: " + downloadErr
 	default:
 		return "preview unavailable: " + source
-	}
-}
-
-func imageExt(attachment api.Attachment) string {
-	if ext := extFromContentType(attachment.ContentType); ext != "" {
-		return ext
-	}
-	source := attachment.PreviewSource()
-	if parsed, err := url.Parse(source); err == nil && parsed.Scheme != "" {
-		if ext := extFromContentType(parsed.Query().Get("content_type")); ext != "" {
-			return ext
-		}
-		return path.Ext(parsed.Path)
-	}
-	return filepath.Ext(source)
-}
-
-func extFromContentType(contentType string) string {
-	switch strings.ToLower(strings.TrimSpace(contentType)) {
-	case "image/png":
-		return ".png"
-	case "image/jpeg", "image/jpg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	case "image/bmp":
-		return ".bmp"
-	case "image/svg+xml":
-		return ".svg"
-	default:
-		return ""
 	}
 }
 

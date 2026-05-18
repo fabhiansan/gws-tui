@@ -86,6 +86,9 @@ func (m Model) View() string {
 		help := m.renderHelp(max(50, width-4), max(10, height-2))
 		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, help)
 	}
+	if m.imageViewer != nil {
+		return m.renderImageViewer(width, height)
+	}
 	if m.modal != nil {
 		modal := m.renderModal(max(40, width-14))
 		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
@@ -113,7 +116,7 @@ func (m Model) mainView(width, height int) string {
 	if m.focusedPane == paneDetail {
 		detailStyle = m.theme.Active
 	}
-	detail := detailStyle.Width(rightW).Height(detailContentH).Render(m.title(" "+m.detailTitle()+" ") + "\n" + m.detail.View())
+	detail := paneWithTitle(detailStyle, m.title(" [2]-"+m.detailTitle()+" "), m.detail.View(), rightW, detailContentH)
 	action := m.renderAction(rightW, actionContentH)
 	right := lipgloss.JoinVertical(lipgloss.Left, detail, action)
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
@@ -122,12 +125,8 @@ func (m Model) mainView(width, height int) string {
 }
 
 func (m Model) authView(width, height int) string {
-	lines := []string{
-		m.title("gws · sign in"),
-		"",
-		"Signing you into Google Workspace...",
-		"",
-	}
+	var lines []string
+	lines = append(lines, "Signing you into Google Workspace...", "")
 	if m.auth.Valid() {
 		lines = append(lines, "✓ Token cache found")
 	} else {
@@ -146,17 +145,26 @@ func (m Model) authView(width, height int) string {
 		"",
 		"Press r to retry · q to quit",
 	)
-	box := m.theme.Active.Width(min(74, width-4)).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	content := strings.Join(lines, "\n")
+	boxWidth := min(74, width-4)
+	box := m.theme.Active.Width(boxWidth).Render(content)
+	titled := paneWithTitle(m.theme.Active, m.title(" gws · sign in "), content, boxWidth, lipgloss.Height(box))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, titled)
 }
 
 func (m Model) renderList(width, height int) string {
 	var title string
 	var lines []string
+	selStart, selEnd := -1, -1
 	switch m.feature {
 	case FeatureChat:
-		title = fmt.Sprintf(" Spaces (%d) ", len(m.spaces))
-		for i, space := range m.spaces {
+		spaces := m.visibleSpaces()
+		if strings.TrimSpace(m.search) != "" {
+			title = fmt.Sprintf(" [1]-Spaces (%d/%d) /%s ", len(spaces), len(m.spaces), m.search)
+		} else {
+			title = fmt.Sprintf(" [1]-Spaces (%d) ", len(spaces))
+		}
+		for i, space := range spaces {
 			marker := "  "
 			if space.Live {
 				marker = m.live(m.icon("●", "*")) + " "
@@ -165,13 +173,15 @@ func (m Model) renderList(width, height int) string {
 			}
 			name := truncate(m.spaceLabel(space), width-8)
 			if i == m.selected[FeatureChat] {
-				lines = append(lines, m.accent(m.icon("▎", "|")+" ")+marker+name)
+				selStart = len(lines)
+				lines = append(lines, "  "+marker+name)
+				selEnd = len(lines) - 1
 			} else {
 				lines = append(lines, "  "+marker+name)
 			}
 		}
 	case FeatureMail:
-		title = fmt.Sprintf(" Inbox (%d) ", len(m.mailThreads))
+		title = fmt.Sprintf(" [1]-Inbox (%d) ", len(m.mailThreads))
 		for i, thread := range m.mailThreads {
 			marker := "  "
 			if thread.Unread {
@@ -181,13 +191,17 @@ func (m Model) renderList(width, height int) string {
 				marker = m.warn(m.icon("★", "*")) + " "
 			}
 			prefix := "  "
-			if i == m.selected[FeatureMail] {
-				prefix = m.accent(m.icon("▎", "|") + " ")
+			selected := i == m.selected[FeatureMail]
+			if selected {
+				selStart = len(lines)
 			}
 			lines = append(lines, prefix+marker+truncate(thread.Sender, width-8))
 			subject := truncate(thread.Subject+"  "+relative(thread.Date), width-6)
 			lines = append(lines, "    "+subject)
 			lines = append(lines, m.subtle("    "+strings.Repeat("─", max(1, width-8))))
+			if selected {
+				selEnd = len(lines) - 1
+			}
 		}
 		if len(m.mailLabels) > 0 {
 			var tabs []string
@@ -200,7 +214,7 @@ func (m Model) renderList(width, height int) string {
 			lines = append(lines, "", m.subtle("["+truncate(strings.Join(tabs, "  "), width-8)+"]"))
 		}
 	case FeatureCalendar:
-		title = fmt.Sprintf(" This week (%d) ", len(m.events))
+		title = fmt.Sprintf(" [1]-This week (%d) ", len(m.events))
 		lastDay := ""
 		for i, event := range sortedEvents(m.events) {
 			day := event.Start.Format("Mon 02 Jan")
@@ -210,16 +224,19 @@ func (m Model) renderList(width, height int) string {
 			}
 			prefix := "  "
 			if i == m.selected[FeatureCalendar] {
-				prefix = m.accent(m.icon("▎", "|") + " ")
+				selStart = len(lines)
 			}
 			lines = append(lines, prefix+event.Start.Format("15:04")+"  "+truncate(event.Summary, width-12))
+			if i == m.selected[FeatureCalendar] {
+				selEnd = len(lines) - 1
+			}
 		}
 	case FeatureMeet:
-		title = fmt.Sprintf(" Meet spaces (%d) ", len(m.meetSpaces))
+		title = fmt.Sprintf(" [1]-Meet spaces (%d) ", len(m.meetSpaces))
 		for i, space := range m.meetSpaces {
 			prefix := "  "
 			if i == m.selected[FeatureMeet] {
-				prefix = m.accent(m.icon("▎", "|") + " ")
+				selStart = len(lines)
 			}
 			status := ""
 			if space.IsActive() {
@@ -230,76 +247,177 @@ func (m Model) renderList(width, height int) string {
 				label = space.MeetingCode
 			}
 			lines = append(lines, prefix+truncate(label, width-14)+status)
+			if i == m.selected[FeatureMeet] {
+				selEnd = len(lines) - 1
+			}
 		}
 	}
 	if len(lines) == 0 {
 		lines = []string{"", "  No items yet."}
 	}
 	innerW := max(1, width-m.theme.Pane.GetHorizontalPadding())
-	body := m.title(title) + "\n" + fitLines(lines, innerW, max(1, height-1))
+	viewportH := max(1, height)
+	if selStart >= 0 && selEnd >= selStart {
+		for i := selStart; i <= selEnd && i < len(lines); i++ {
+			lines[i] = m.theme.Selected.Width(innerW).Render(truncate(lines[i], innerW))
+		}
+	}
+	offset := computeListOffset(len(lines), viewportH, selStart, selEnd)
+	visible := lines
+	if offset > 0 && offset < len(lines) {
+		visible = lines[offset:]
+	}
+	body := fitLines(visible, innerW, viewportH)
 	style := m.theme.Pane
 	if m.focusedPane == paneList {
 		style = m.theme.Active
 	}
-	return style.Width(width).Height(height).Render(body)
+	return paneWithTitle(style, m.title(title), body, width, height)
+}
+
+func computeListOffset(total, viewportH, selStart, selEnd int) int {
+	if total <= viewportH || selEnd < 0 {
+		return 0
+	}
+	offset := 0
+	if selEnd >= viewportH {
+		offset = selEnd - viewportH + 1
+	}
+	if selStart >= 0 && selStart < offset {
+		offset = selStart
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if maxOffset := total - viewportH; offset > maxOffset {
+		offset = maxOffset
+	}
+	return offset
 }
 
 func (m Model) renderAction(width, height int) string {
 	focused := m.focusedPane == paneAction
-	title := " " + m.actionTitle() + " "
+	title := " [3]-" + m.actionTitle() + " "
 	content := ""
 	if focused {
 		content = m.input.View()
 	} else {
 		content = m.subtle(m.actionPlaceholder())
 	}
-	style := m.theme.Input.Width(width).Height(height)
+	style := m.theme.Input
 	if !focused {
 		style = style.BorderForeground(lipgloss.Color(m.theme.Subtle))
 	}
-	return style.Render(m.title(title) + "\n" + content)
+	return paneWithTitle(style, m.title(title), content, width, height)
+}
+
+func (m Model) featureLabel(f Feature) string {
+	switch f {
+	case FeatureChat:
+		return "Chat"
+	case FeatureMail:
+		return "Mail"
+	case FeatureCalendar:
+		return "Calendar"
+	case FeatureMeet:
+		return "Meet"
+	default:
+		return string(f)
+	}
+}
+
+func (m Model) featureIcon(f Feature) string {
+	switch f {
+	case FeatureChat:
+		return m.icon("◉", "c")
+	case FeatureMail:
+		return m.icon("✉", "m")
+	case FeatureCalendar:
+		return m.icon("◫", "k")
+	case FeatureMeet:
+		return m.icon("◎", "v")
+	default:
+		return m.icon("◦", "-")
+	}
 }
 
 func (m Model) renderStatus(width int) string {
+	brand := m.theme.StatusBrand.Render(" gws ")
+
 	tabs := make([]string, 0, len(featureOrder))
+	tabSep := m.theme.StatusSeparator.Render("│")
 	for i, feature := range featureOrder {
-		label := fmt.Sprintf("%d %s", i+1, strings.Title(string(feature)))
+		label := fmt.Sprintf("%s %s ^%d", m.featureIcon(feature), m.featureLabel(feature), i+1)
 		if feature == m.feature {
 			tabs = append(tabs, m.theme.ActiveTab.Render(label))
 		} else {
 			tabs = append(tabs, m.theme.Tab.Render(label))
 		}
 	}
-	left := strings.Join(tabs, "")
+	tabsRendered := strings.Join(tabs, tabSep)
+	left := brand + tabsRendered
+
+	if m.err != "" {
+		errSeg := m.theme.StatusError.Render(fmt.Sprintf(" ! %s · x dismiss ", m.err))
+		gap := width - lipgloss.Width(left) - lipgloss.Width(errSeg)
+		if gap < 1 {
+			errSeg = m.theme.StatusError.Render(" ! " + truncate(m.err, max(10, width-lipgloss.Width(left)-12)) + " · x ")
+			gap = width - lipgloss.Width(left) - lipgloss.Width(errSeg)
+		}
+		filler := m.theme.Status.Render(strings.Repeat(" ", max(1, gap)))
+		return m.theme.Status.Width(width).Render(left + filler + errSeg)
+	}
+
+	segments := make([]string, 0, 5)
+
+	if m.loading {
+		segments = append(segments, m.theme.StatusSegmentAlt.Render(m.spinner.View()+" loading"))
+	}
+
+	if m.toast != "" {
+		segments = append(segments, m.theme.StatusAccent.Render(" "+m.toast+" "))
+	}
+
 	liveCount := 0
 	for _, space := range m.spaces {
 		if space.Live {
 			liveCount++
 		}
 	}
-	right := fmt.Sprintf("%s %d live   %s   H/L pane  ? help  q quit", m.live(m.icon("●", "*")), liveCount, m.paneHints())
-	if m.loading {
-		right = m.spinner.View() + " loading   " + right
+	liveLabel := fmt.Sprintf("%s %d live", m.icon("●", "*"), liveCount)
+	if liveCount > 0 {
+		segments = append(segments, m.theme.StatusAccent.Render(" "+liveLabel+" "))
+	} else {
+		segments = append(segments, m.theme.StatusSegmentAlt.Render(liveLabel))
 	}
-	if m.toast != "" {
-		right = m.toast + "   " + right
-	}
-	if m.err != "" {
-		right = "error: " + m.err + "   x dismiss"
-	}
+
+	segments = append(segments, m.theme.StatusSegment.Render(m.paneHints()))
+	segments = append(segments, m.theme.StatusSegmentAlt.Render("? help"))
+	segments = append(segments, m.theme.StatusSegment.Render("q quit"))
+
+	rightSep := m.theme.StatusSeparator.Render(" ")
+	right := strings.Join(segments, rightSep)
+
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
-		right = truncate(right, max(10, width-lipgloss.Width(left)-2))
+		minSegments := []string{}
+		if liveCount > 0 {
+			minSegments = append(minSegments, m.theme.StatusAccent.Render(" "+liveLabel+" "))
+		}
+		minSegments = append(minSegments, m.theme.StatusSegment.Render("? q"))
+		right = strings.Join(minSegments, rightSep)
 		gap = width - lipgloss.Width(left) - lipgloss.Width(right)
 	}
-	return m.theme.Status.Width(width).Render(left + strings.Repeat(" ", max(1, gap)) + right)
+
+	filler := m.theme.Status.Render(strings.Repeat(" ", max(1, gap)))
+	return m.theme.Status.Width(width).Render(left + filler + right)
 }
 
 func (m Model) renderModal(width int) string {
 	if m.modal == nil {
 		return ""
 	}
-	lines := []string{m.title(" " + m.modal.title + " "), ""}
+	var lines []string
 	for i, field := range m.modal.fields {
 		cursor := "  "
 		if i == m.modal.focus {
@@ -322,7 +440,11 @@ func (m Model) renderModal(width int) string {
 	if !m.modal.savedAt.IsZero() {
 		lines = append(lines, "", m.subtle("autosaved "+m.modal.savedAt.Format("15:04:05")))
 	}
-	return m.theme.Modal.Width(min(width, 88)).Render(strings.Join(lines, "\n"))
+	modalWidth := min(width, 88)
+	content := strings.Join(lines, "\n")
+	box := m.theme.Modal.Width(modalWidth).Render(content)
+	height := lipgloss.Height(box)
+	return paneWithTitle(m.theme.Modal, m.title(" "+m.modal.title+" "), content, modalWidth, height)
 }
 
 func (m Model) renderHelp(width, height int) string {
@@ -339,15 +461,15 @@ func (m Model) renderHelp(width, height int) string {
 			{"?", "toggle this help"},
 			{"q · Ctrl+C", "quit"},
 			{"Tab · S-Tab", "cycle features"},
-			{"1 / 2 / 3 / 4", "chat / mail / calendar / meet"},
+			{"Ctrl+1..4", "chat / mail / calendar / meet"},
 			{"r", "refresh current feature"},
 			{"Ctrl+R", "reload config"},
 			{"x", "dismiss error / toast"},
 		}},
 		{"Pane focus", []binding{
-			{"H · Ctrl+H", "focus list pane"},
-			{"L · Ctrl+L", "focus detail pane"},
-			{"i", "focus action (input)"},
+			{"1 · H · Ctrl+H", "focus list pane"},
+			{"2 · L · Ctrl+L", "focus detail pane"},
+			{"3 · i", "focus action (input)"},
 			{"Esc", "back to list"},
 		}},
 		{"List pane", []binding{
@@ -452,7 +574,7 @@ func (m Model) renderHelp(width, height int) string {
 	title := m.title(" gws · keybindings ")
 	footer := m.subtle("Press ? or Esc to close")
 
-	chrome := m.theme.Modal.GetVerticalFrameSize() + 4
+	chrome := m.theme.Modal.GetVerticalFrameSize() + 2
 	contentHeight := max(1, height-chrome)
 
 	columnGap := 3
@@ -515,14 +637,15 @@ func (m Model) renderHelp(width, height int) string {
 		body = strings.Join(bodyLines, "\n")
 	}
 
-	content := strings.Join([]string{title, "", body, "", footer}, "\n")
+	content := strings.Join([]string{body, "", footer}, "\n")
 
 	modalWidth := min(width, 88)
 	want := sectionWidth*columns + columnGap*(columns-1) + hFrame
 	if want > modalWidth {
 		modalWidth = min(width, want)
 	}
-	return m.theme.Modal.Width(modalWidth).Render(content)
+	box := m.theme.Modal.Width(modalWidth).Render(content)
+	return paneWithTitle(m.theme.Modal, title, content, modalWidth, lipgloss.Height(box))
 }
 
 func balancedHeight(sections [][]string, columns, spacer int) int {
@@ -597,7 +720,7 @@ func (m Model) detailTitle() string {
 	return base
 }
 
-func (m Model) detailContent() string {
+func (m *Model) detailContent() string {
 	switch m.feature {
 	case FeatureChat:
 		return m.chatDetail()
@@ -612,16 +735,20 @@ func (m Model) detailContent() string {
 	}
 }
 
-func (m Model) chatDetail() string {
+func (m *Model) chatDetail() string {
 	if m.chatLoading && m.chatLoadSpace == m.selectedSpace().Name {
 		return centerText("Loading messages...", m.detail.Width)
 	}
-	if len(m.chatMessages) == 0 {
+	messages := m.visibleChatMessages()
+	if len(messages) == 0 {
+		if strings.TrimSpace(m.search) != "" && len(m.chatMessages) > 0 {
+			return centerText(fmt.Sprintf("No messages match /%s", m.search), m.detail.Width)
+		}
 		return centerText("No messages in this space yet. Press i to write.", m.detail.Width)
 	}
 	var lines []string
 	lastDay := ""
-	for _, msg := range m.chatMessages {
+	for _, msg := range messages {
 		day := msg.CreateTime.Format("Mon, 02 Jan 2006")
 		if day != lastDay {
 			lines = append(lines, m.subtle("─── "+friendlyDay(msg.CreateTime)+" ───"))
@@ -662,10 +789,24 @@ func (m Model) chatDetail() string {
 		} else {
 			lines = append(lines, block...)
 		}
-		lines = append(lines, m.renderAttachments(msg.Attachments)...)
+		lines = m.appendAttachmentLines(lines, msg.Attachments)
 		lines = append(lines, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// appendAttachmentLines renders msg.Attachments and records each image's
+// line range in m.detailImageAt so the vim cursor can resolve "which image
+// is under me" when Enter is pressed in the detail pane.
+func (m *Model) appendAttachmentLines(lines []string, attachments []api.Attachment) []string {
+	attLines, ranges := m.renderAttachmentsTracked(attachments)
+	base := countDisplayLines(lines)
+	for _, r := range ranges {
+		for i := 0; i < r.rows; i++ {
+			m.detailImageAt[base+r.start+i] = r.attachment
+		}
+	}
+	return append(lines, attLines...)
 }
 
 func (m Model) isSelfMessage(msg api.ChatMessage, displayName string) bool {
@@ -681,7 +822,7 @@ func (m Model) isSelfMessage(msg api.ChatMessage, displayName string) bool {
 	return false
 }
 
-func (m Model) mailDetail() string {
+func (m *Model) mailDetail() string {
 	thread := m.selectedMail()
 	if thread.ID == "" {
 		return centerText("No mail in this label.", m.detail.Width)
@@ -700,9 +841,15 @@ func (m Model) mailDetail() string {
 			lines = append(lines, line)
 		}
 	}
-	if attachmentLines := m.renderAttachments(thread.Attachments); len(attachmentLines) > 0 {
+	if attLines, ranges := m.renderAttachmentsTracked(thread.Attachments); len(attLines) > 0 {
 		lines = append(lines, "", m.subtle("Attachments"))
-		lines = append(lines, attachmentLines...)
+		base := countDisplayLines(lines)
+		for _, r := range ranges {
+			for i := 0; i < r.rows; i++ {
+				m.detailImageAt[base+r.start+i] = r.attachment
+			}
+		}
+		lines = append(lines, attLines...)
 	}
 	if thread.QuotedLines > 0 {
 		lines = append(lines, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
@@ -819,6 +966,51 @@ func (m Model) title(value string) string {
 	return m.theme.Title.Render(value)
 }
 
+func paneWithTitle(style lipgloss.Style, title, content string, width, height int) string {
+	box := style.Width(width).Height(height).Render(content)
+	if title == "" {
+		return box
+	}
+	nl := strings.Index(box, "\n")
+	if nl == -1 {
+		return box
+	}
+	topLine := box[:nl]
+	rest := box[nl:]
+
+	plainTop := ansi.Strip(topLine)
+	plainRunes := []rune(plainTop)
+	plainWidth := lipgloss.Width(plainTop)
+	titleWidth := lipgloss.Width(title)
+	if len(plainRunes) < 4 || plainWidth < titleWidth+4 {
+		return box
+	}
+
+	leftCorner := string(plainRunes[0])
+	rightCorner := string(plainRunes[len(plainRunes)-1])
+	borderChar := string(plainRunes[1])
+	innerWidth := len(plainRunes) - 2
+
+	titlePos := (innerWidth - titleWidth) / 2
+	if titlePos < 1 {
+		titlePos = 1
+	}
+	rightPad := innerWidth - titlePos - titleWidth
+	if rightPad < 1 {
+		rightPad = 1
+		titlePos = innerWidth - titleWidth - rightPad
+		if titlePos < 1 {
+			return box
+		}
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(style.GetBorderTopForeground())
+	leftPart := borderStyle.Render(leftCorner + strings.Repeat(borderChar, titlePos))
+	rightPart := borderStyle.Render(strings.Repeat(borderChar, rightPad) + rightCorner)
+
+	return leftPart + title + rightPart + rest
+}
+
 func (m Model) accent(value string) string {
 	if m.cfg.NoColor {
 		return value
@@ -847,16 +1039,45 @@ func (m Model) icon(unicode, ascii string) string {
 	return unicode
 }
 
-func (m Model) senderColor(key, value string) string {
+var senderPalette = []string{
+	"#06B6D4", // cyan
+	"#22C55E", // green
+	"#F59E0B", // amber
+	"#EC4899", // pink
+	"#8B5CF6", // violet
+	"#14B8A6", // teal
+	"#EF4444", // red
+	"#3B82F6", // blue
+	"#84CC16", // lime
+	"#F97316", // orange
+	"#A855F7", // purple
+	"#0EA5E9", // sky
+	"#F43F5E", // rose
+	"#10B981", // emerald
+	"#EAB308", // yellow
+	"#6366F1", // indigo
+}
+
+func (m *Model) senderColor(key, value string) string {
 	if m.cfg.NoColor {
 		return value
 	}
-	palette := []string{"#06B6D4", "#22C55E", "#F59E0B", "#EC4899", "#8B5CF6", "#14B8A6"}
-	hash := 0
-	for _, r := range key {
-		hash = (hash*33 + int(r)) % len(palette)
+	spaceName := m.selectedSpace().Name
+	if m.senderColorSpace != spaceName {
+		m.senderColorSpace = spaceName
+		m.senderColorIdx = map[string]int{}
+		m.senderColorNext = 0
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(palette[hash])).Render(value)
+	if m.senderColorIdx == nil {
+		m.senderColorIdx = map[string]int{}
+	}
+	idx, ok := m.senderColorIdx[key]
+	if !ok {
+		idx = m.senderColorNext % len(senderPalette)
+		m.senderColorIdx[key] = idx
+		m.senderColorNext++
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(senderPalette[idx])).Render(value)
 }
 
 func (m Model) subtle(value string) string {

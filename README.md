@@ -35,32 +35,51 @@ gws tui --feature mail
 gws tui --feature calendar
 gws tui --feature meet
 gws tui --auth
+gws tui --fixtures
+gws tui --daemon
+gws tui --no-daemon
 gws tui --no-icons
 gws tui --no-color
 gws tui --no-images
+gws tui --no-vim
 gws tui --version
+gws daemon start
+gws daemon start --detach
+gws daemon status
+gws daemon stop
+gws daemon restart
+gws daemon logs
 ```
 
 Set `GWS_TUI_USE_FIXTURES=1` to force deterministic fixture data. Without that
 flag, the TUI tries the installed Google Workspace CLI first and falls back to
-fixtures if auth/API calls fail.
+fixtures if auth/API calls fail. Run `gws tui --help` or `gws daemon --help`
+for the live flag list.
 
 ## Keys
 
+Press `?` in the app for the complete keybinding reference. The list below
+covers the high-frequency actions.
+
 Global:
 
-- `1`/`2`/`3`/`4`: switch Chat, Mail, Calendar, Meet
+- `?`: toggle help
+- `Ctrl+1`/`Ctrl+2`/`Ctrl+3`/`Ctrl+4`: switch Chat, Mail, Calendar, Meet
 - `Tab` / `Shift+Tab`: cycle features
+- `1`/`H`/`Ctrl+H`: focus list pane
+- `2`/`L`/`Ctrl+L`: focus detail pane
+- `3`/`i`: focus action pane
 - `j`/`k`: move
 - `Enter`/`o`: open selected item
 - `/`: search
 - `m`: load more
 - `r`: refresh current feature
+- `Ctrl+R`: reload config
+- `Esc`: return focus to the list pane
 - `q`: quit
 
 Chat:
 
-- `i`: focus composer
 - `Enter`: send
 - `Shift+Enter`: newline
 - `s`: toggle live subscription marker
@@ -86,20 +105,22 @@ Calendar:
 
 Meet:
 
-- `n`: create new space from action pane
+- `n`: create new space
 - `J`: join in browser
 - `C`: copy link
 - `E`: end active conference
 
 ## Config
 
-Config is read from:
+Config is read from the first path that exists:
 
 ```text
+$GOOGLE_WORKSPACE_CLI_CONFIG_DIR/tui.toml
+$XDG_CONFIG_HOME/gws/tui.toml
 ~/.config/gws/tui.toml
 ```
 
-Supported keys:
+The example below shows the default keys and default path layout:
 
 ```toml
 initial_feature = "chat"
@@ -109,6 +130,12 @@ notify_desktop = true
 notify_sound = true
 notify_sound_file = "/System/Library/Sounds/Glass.aiff"
 inline_images = true
+vim_mode = true
+daemon = false
+daemon_socket = "$XDG_RUNTIME_DIR/gws/daemon.sock"
+daemon_autospawn = true
+daemon_log = "~/.cache/gws/daemon.log"
+daemon_pid_file = "$XDG_RUNTIME_DIR/gws/daemon.pid"
 state_path = "~/.config/gws/tui-state.json"
 cache_path = "~/.cache/gws/tui-cache.json"
 image_cache_dir = "~/.cache/gws/images"
@@ -116,16 +143,45 @@ draft_dir = "~/.cache/gws/drafts"
 log_path = "~/.cache/gws/tui.log"
 ```
 
-State is written to `~/.config/gws/tui-state.json`. Workspace list/detail data
-is cached in `~/.cache/gws/tui-cache.json` so the TUI can restart without
-refetching every pane; press `r` to refresh from Google Workspace. Draft compose
-snapshots are autosaved every five seconds under `~/.cache/gws/drafts`.
+By default, state is written under the resolved config dir as
+`tui-state.json`. Workspace list/detail data is cached under the resolved cache
+dir as `tui-cache.json` so the TUI can restart without refetching every pane;
+press `r` to refresh from Google Workspace. Draft compose snapshots are
+autosaved every five seconds under the resolved `draft_dir`.
+
 When running in Kitty, image attachments and direct image URLs in chat/mail can
-render inline after being cached under `~/.cache/gws/images`; use
-`--no-images` or `inline_images = false` to fall back to text-only attachment
-links. Authenticated Google Chat attachments are downloaded through the
-upstream `gws chat media download` command so existing Workspace credentials are
-used instead of browser cookies.
+render inline after being cached under `image_cache_dir`; use `--no-images` or
+`inline_images = false` to fall back to text-only attachment links.
+Authenticated Google Chat attachments are downloaded through the upstream
+`gws chat media download` command so existing Workspace credentials are used
+instead of browser cookies.
+
+## Daemon Mode
+
+Daemon mode is optional. `gws tui` remains standalone by default. Use:
+
+```sh
+gws daemon start --detach
+gws tui --daemon
+gws daemon status
+gws daemon logs
+gws daemon stop
+```
+
+When `daemon = true` or `--daemon` is set, the TUI attaches to a per-user Unix
+socket and becomes a thin client. Workspace calls, cache writes, chat polling,
+desktop notifications, attachment downloads, and draft autosave are owned by
+the daemon. UI state such as selection, scroll, focus, search, and vim mode
+stays local to each TUI session.
+
+If `$XDG_RUNTIME_DIR` is unavailable, the socket and PID file fall back under
+`~/.cache/gws`. `daemon_autospawn = true` makes `gws tui --daemon` start the
+daemon automatically when the socket is missing. `gws daemon start` keeps the
+server in the foreground for a service manager, while `gws daemon start
+--detach` backgrounds it and returns immediately. `gws daemon logs` prints the
+most recent daemon log lines from `daemon_log`. Example service files live in
+`docs/launchd/` and `docs/systemd/`; edit the binary path before installing
+them.
 
 ## Compatibility
 
@@ -153,3 +209,5 @@ Manual smoke remains required before a release:
 2. Put it on `PATH` ahead of the old `gws`, or set the plugin to use it.
 3. Run `:GwsOpen` in Neovim and verify existing plugin flows still work.
 4. Run `gws tui` and verify Chat, Mail, Calendar, and Meet screens open.
+5. Run `gws daemon start --detach && gws tui --daemon`, then open a second TUI
+   and verify both clients receive live chat events.

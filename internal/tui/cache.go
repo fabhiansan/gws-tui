@@ -1,99 +1,30 @@
 package tui
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"time"
+import "github.com/fabhiantomaoludyo/gws-tui/internal/api"
 
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
-)
+const workspaceCacheVersion = api.WorkspaceSnapshotVersion
 
-const workspaceCacheVersion = 2
-
-type workspaceCache struct {
-	Version             int                                  `json:"version"`
-	SavedAt             time.Time                            `json:"saved_at"`
-	Auth                api.AuthStatus                       `json:"auth,omitempty"`
-	Spaces              []api.Space                          `json:"spaces,omitempty"`
-	ChatMessagesBySpace map[string]api.Page[api.ChatMessage] `json:"chat_messages_by_space,omitempty"`
-	MailLabels          []api.MailLabel                      `json:"mail_labels,omitempty"`
-	MailThreads         api.Page[api.MailThread]             `json:"mail_threads,omitempty"`
-	Events              api.Page[api.CalendarEvent]          `json:"events,omitempty"`
-	MeetSpaces          []api.MeetSpace                      `json:"meet_spaces,omitempty"`
-	UserLabels          map[string]string                    `json:"user_labels,omitempty"`
-	MembersBySpace      map[string][]api.SpaceMember         `json:"members_by_space,omitempty"`
-	SelfUserIDs         map[string]bool                      `json:"self_user_ids,omitempty"`
-	PeopleAPIDown       bool                                 `json:"people_api_down,omitempty"`
-}
+type workspaceCache = api.WorkspaceSnapshot
 
 func loadWorkspaceCache(path string) (workspaceCache, bool) {
-	if path == "" {
-		return newWorkspaceCache(), false
-	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return newWorkspaceCache(), false
-	}
-	var cache workspaceCache
-	if json.Unmarshal(payload, &cache) != nil || cache.Version != workspaceCacheVersion {
-		return newWorkspaceCache(), false
-	}
-	cache.ensureMaps()
-	if cache.SavedAt.IsZero() || !cache.hasData() {
-		return cache, false
-	}
-	return cache, true
+	return api.LoadWorkspaceSnapshot(path)
 }
 
 func saveWorkspaceCache(path string, cache workspaceCache) error {
-	if path == "" {
-		return nil
-	}
-	cache.Version = workspaceCacheVersion
-	cache.SavedAt = time.Now()
-	cache.ensureMaps()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	payload, err := json.MarshalIndent(cache, "", "  ")
+	lock, err := api.TryLockWorkspaceSnapshot(path)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(payload, '\n'), 0o600)
+	defer lock.Release()
+	return api.SaveWorkspaceSnapshot(path, cache)
 }
 
 func newWorkspaceCache() workspaceCache {
-	cache := workspaceCache{Version: workspaceCacheVersion}
-	cache.ensureMaps()
-	return cache
-}
-
-func (c *workspaceCache) ensureMaps() {
-	if c.ChatMessagesBySpace == nil {
-		c.ChatMessagesBySpace = map[string]api.Page[api.ChatMessage]{}
-	}
-	if c.UserLabels == nil {
-		c.UserLabels = map[string]string{}
-	}
-	if c.MembersBySpace == nil {
-		c.MembersBySpace = map[string][]api.SpaceMember{}
-	}
-	if c.SelfUserIDs == nil {
-		c.SelfUserIDs = map[string]bool{}
-	}
-}
-
-func (c workspaceCache) hasData() bool {
-	return len(c.Spaces) > 0 ||
-		len(c.MailLabels) > 0 ||
-		len(c.MailThreads.Items) > 0 ||
-		len(c.Events.Items) > 0 ||
-		len(c.MeetSpaces) > 0
+	return api.NewWorkspaceSnapshot()
 }
 
 func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
-	cache.ensureMaps()
+	cache.EnsureMaps()
 	m.cache = cache
 	m.auth = cache.Auth
 	m.spaces = cache.Spaces
@@ -120,7 +51,7 @@ func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
 }
 
 func (m *Model) applyCachedSelectedChat() bool {
-	m.cache.ensureMaps()
+	m.cache.EnsureMaps()
 	space := m.selectedSpace()
 	if space.Name == "" {
 		m.chatMessages = nil
@@ -156,7 +87,7 @@ func (m *Model) rememberChatPage(spaceName string, page api.Page[api.ChatMessage
 	if spaceName == "" {
 		return
 	}
-	m.cache.ensureMaps()
+	m.cache.EnsureMaps()
 	m.cache.ChatMessagesBySpace[spaceName] = page
 }
 
@@ -164,7 +95,7 @@ func (m *Model) rememberChatMessage(message api.ChatMessage) {
 	if message.ID == "" || message.Space == "" {
 		return
 	}
-	m.cache.ensureMaps()
+	m.cache.EnsureMaps()
 	page := m.cache.ChatMessagesBySpace[message.Space]
 	for i := range page.Items {
 		if page.Items[i].ID == message.ID {
@@ -178,6 +109,9 @@ func (m *Model) rememberChatMessage(message api.ChatMessage) {
 }
 
 func (m *Model) persistWorkspaceCache() {
+	if m.cfg.Daemon {
+		return
+	}
 	m.cache.Version = workspaceCacheVersion
 	m.cache.Auth = m.auth
 	m.cache.Spaces = m.spaces

@@ -22,6 +22,8 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	noColor := flags.Bool("no-color", false, "disable color styling")
 	noImages := flags.Bool("no-images", false, "disable inline image previews")
 	noVim := flags.Bool("no-vim", false, "disable vim mode keybindings in the composer")
+	daemonMode := flags.Bool("daemon", false, "connect to the background daemon")
+	noDaemon := flags.Bool("no-daemon", false, "force standalone single-process mode")
 	version := flags.Bool("version", false, "print TUI build version")
 	fixtures := flags.Bool("fixtures", false, "force fixture data instead of the installed gws CLI")
 
@@ -54,28 +56,49 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	if *noVim {
 		cfg.VimMode = false
 	}
+	if *daemonMode {
+		cfg.Daemon = true
+	}
+	if *noDaemon {
+		cfg.Daemon = false
+	}
 	if err := tui.SetupLogging(cfg.LogPath); err != nil {
 		fmt.Fprintf(stderr, "gws tui: logging: %v\n", err)
 		return 3
 	}
 
-	upstream, _ := findUpstreamGWS()
-	forceFixtures := *fixtures || shouldUseFixtures() || upstream == ""
-	client := api.NewDefaultClient(api.ClientOptions{
-		UpstreamPath:  upstream,
-		ForceFixture:  forceFixtures,
-		FixtureReason: upstreamDescription(),
-	})
+	var snapshot *api.WorkspaceSnapshot
+	var client api.WorkspaceClient
+	upstreamHint := upstreamDescription()
+	if cfg.Daemon {
+		remote, daemonSnapshot, err := connectDaemonClient(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gws tui: daemon: %v\n", err)
+			return 5
+		}
+		client = remote
+		snapshot = daemonSnapshot
+		upstreamHint = "daemon " + cfg.DaemonSocket
+	} else {
+		upstream, _ := findUpstreamGWS()
+		forceFixtures := *fixtures || shouldUseFixtures() || upstream == ""
+		client = api.NewDefaultClient(api.ClientOptions{
+			UpstreamPath:  upstream,
+			ForceFixture:  forceFixtures,
+			FixtureReason: upstreamDescription(),
+		})
+	}
 	defer client.Close()
 
 	model := tui.New(tui.Options{
-		Client:       client,
-		Config:       cfg,
-		ForceAuth:    *auth,
-		Version:      Version,
-		Commit:       Commit,
-		BuildDate:    Date,
-		UpstreamHint: upstreamDescription(),
+		Client:          client,
+		Config:          cfg,
+		InitialSnapshot: snapshot,
+		ForceAuth:       *auth,
+		Version:         Version,
+		Commit:          Commit,
+		BuildDate:       Date,
+		UpstreamHint:    upstreamHint,
 	})
 
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(context.Background()))

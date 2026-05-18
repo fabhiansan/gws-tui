@@ -12,8 +12,14 @@ import (
 
 type Config struct {
 	InitialFeature     string
+	Theme              string
 	NoIcons            bool
 	NoColor            bool
+	Daemon             bool
+	DaemonSocket       string
+	DaemonAutospawn    bool
+	DaemonLog          string
+	DaemonPIDFile      string
 	NotifyDesktop      bool
 	NotifySound        bool
 	NotifySoundFile    string
@@ -36,6 +42,11 @@ func LoadConfig() (Config, error) {
 
 	cfg := Config{
 		InitialFeature:     "chat",
+		Theme:              "catppuccin",
+		DaemonSocket:       defaultDaemonSocket(cacheBase),
+		DaemonAutospawn:    true,
+		DaemonLog:          filepath.Join(cacheBase, "daemon.log"),
+		DaemonPIDFile:      defaultDaemonPIDFile(cacheBase),
 		NotifyDesktop:      true,
 		NotifySound:        true,
 		NotifySoundFile:    "/System/Library/Sounds/Glass.aiff",
@@ -74,10 +85,22 @@ func LoadConfig() (Config, error) {
 		switch key {
 		case "initial_feature", "feature":
 			cfg.InitialFeature = normalizeFeature(value)
+		case "theme":
+			cfg.Theme = strings.ToLower(strings.TrimSpace(value))
 		case "no_icons":
 			cfg.NoIcons = parseBool(value)
 		case "no_color":
 			cfg.NoColor = parseBool(value)
+		case "daemon":
+			cfg.Daemon = parseBool(value)
+		case "daemon_socket":
+			cfg.DaemonSocket = expandPath(value)
+		case "daemon_autospawn":
+			cfg.DaemonAutospawn = parseBool(value)
+		case "daemon_log":
+			cfg.DaemonLog = expandPath(value)
+		case "daemon_pid_file":
+			cfg.DaemonPIDFile = expandPath(value)
 		case "notify_desktop":
 			cfg.NotifyDesktop = parseBool(value)
 		case "notify_sound":
@@ -89,15 +112,15 @@ func LoadConfig() (Config, error) {
 		case "vim_mode", "vim":
 			cfg.VimMode = parseBool(value)
 		case "state_path":
-			cfg.StatePath = expandHome(value)
+			cfg.StatePath = expandPath(value)
 		case "cache_path":
-			cfg.CachePath = expandHome(value)
+			cfg.CachePath = expandPath(value)
 		case "image_cache_dir":
-			cfg.ImageCacheDir = expandHome(value)
+			cfg.ImageCacheDir = expandPath(value)
 		case "draft_dir":
-			cfg.DraftDir = expandHome(value)
+			cfg.DraftDir = expandPath(value)
 		case "log_path":
-			cfg.LogPath = expandHome(value)
+			cfg.LogPath = expandPath(value)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -131,12 +154,35 @@ func gwsDirs() (configBase, cacheBase string, err error) {
 	return configBase, cacheBase, nil
 }
 
+func defaultDaemonSocket(cacheBase string) string {
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		return filepath.Join(runtimeDir, "gws", "daemon.sock")
+	}
+	return filepath.Join(cacheBase, "daemon.sock")
+}
+
+func defaultDaemonPIDFile(cacheBase string) string {
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		return filepath.Join(runtimeDir, "gws", "daemon.pid")
+	}
+	return filepath.Join(cacheBase, "daemon.pid")
+}
+
 func parseBool(value string) bool {
 	parsed, err := strconv.ParseBool(strings.ToLower(value))
 	if err != nil {
 		return false
 	}
 	return parsed
+}
+
+func expandPath(value string) string {
+	return expandHome(os.Expand(value, func(key string) string {
+		if out, ok := os.LookupEnv(key); ok {
+			return out
+		}
+		return "$" + key
+	}))
 }
 
 func expandHome(value string) string {

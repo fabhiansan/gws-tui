@@ -39,13 +39,14 @@ const (
 )
 
 type Options struct {
-	Client       api.WorkspaceClient
-	Config       Config
-	ForceAuth    bool
-	Version      string
-	Commit       string
-	BuildDate    string
-	UpstreamHint string
+	Client          api.WorkspaceClient
+	Config          Config
+	InitialSnapshot *api.WorkspaceSnapshot
+	ForceAuth       bool
+	Version         string
+	Commit          string
+	BuildDate       string
+	UpstreamHint    string
 }
 
 type Model struct {
@@ -84,6 +85,7 @@ type Model struct {
 	chatLoadID    int
 	chatLoadSpace string
 	seenMessages  map[string]bool
+	realtimeRetry time.Duration
 
 	mailLabels  []api.MailLabel
 	mailThreads []api.MailThread
@@ -102,6 +104,10 @@ type Model struct {
 	selfUserIDs    map[string]bool
 	peopleAPIDown  bool
 
+	senderColorIdx   map[string]int
+	senderColorNext  int
+	senderColorSpace string
+
 	selected        map[Feature]int
 	persisted       persistedState
 	cache           workspaceCache
@@ -109,6 +115,10 @@ type Model struct {
 	imageFiles      map[string]string
 	imageLoading    map[string]bool
 	imageErrors     map[string]string
+	imageRenders    map[string]inlineImageRender
+	imageFramePend  map[string]bool
+	imageVersion    int
+	imagePlacement  int
 	modal           *composeModal
 	helpVisible     bool
 	vimComposer     vimMode
@@ -126,6 +136,10 @@ type Model struct {
 	detailLines      []string
 	detailLineCount  int
 	detailKey        string
+	detailRenderKey  string
+	detailImageAt    map[int]api.Attachment
+
+	imageViewer *imageViewerState
 }
 
 type loadedMsg struct {
@@ -201,6 +215,11 @@ type imageCachedMsg struct {
 	err    error
 }
 
+type daemonEventMsg struct {
+	event api.DaemonEvent
+	err   error
+}
+
 type userResolvedMsg struct {
 	userID    string
 	label     string
@@ -226,7 +245,15 @@ func New(opts Options) Model {
 	cfg := opts.Config
 	cfg.InitialFeature = normalizeFeature(cfg.InitialFeature)
 	persisted := loadPersistedState(cfg.StatePath)
-	cache, cacheLoaded := loadWorkspaceCache(cfg.CachePath)
+	cache := newWorkspaceCache()
+	cacheLoaded := false
+	if opts.InitialSnapshot != nil {
+		cache = *opts.InitialSnapshot
+		cache.EnsureMaps()
+		cacheLoaded = cache.HasData()
+	} else if !cfg.Daemon {
+		cache, cacheLoaded = loadWorkspaceCache(cfg.CachePath)
+	}
 	feature := Feature(cfg.InitialFeature)
 	if persisted.LastFeature != "" && cfg.InitialFeature == "chat" {
 		feature = Feature(normalizeFeature(persisted.LastFeature))
@@ -246,7 +273,7 @@ func New(opts Options) Model {
 	model := Model{
 		client:         opts.Client,
 		cfg:            cfg,
-		theme:          theme.New(cfg.NoColor),
+		theme:          theme.New(cfg.Theme, cfg.NoColor),
 		ctx:            ctx,
 		cancel:         cancel,
 		feature:        feature,
@@ -266,6 +293,7 @@ func New(opts Options) Model {
 		membersBySpace: map[string][]api.SpaceMember{},
 		pendingMembers: map[string]bool{},
 		selfUserIDs:    map[string]bool{},
+		senderColorIdx: map[string]int{},
 		selected: map[Feature]int{
 			FeatureChat:     persisted.Selections[string(FeatureChat)],
 			FeatureMail:     persisted.Selections[string(FeatureMail)],
@@ -275,9 +303,12 @@ func New(opts Options) Model {
 		persisted:    persisted,
 		cache:        cache,
 		cacheLoaded:  cacheLoaded,
-		imageFiles:   map[string]string{},
-		imageLoading: map[string]bool{},
-		imageErrors:  map[string]string{},
+		imageFiles:     map[string]string{},
+		imageLoading:   map[string]bool{},
+		imageErrors:    map[string]string{},
+		imageRenders:   map[string]inlineImageRender{},
+		imageFramePend: map[string]bool{},
+		detailImageAt:  map[int]api.Attachment{},
 	}
 	if cacheLoaded {
 		model.hydrateWorkspaceCache(cache)
@@ -290,6 +321,11 @@ func (m Model) Init() tea.Cmd {
 	cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
 	if !m.cacheLoaded {
 		cmds = append(cmds, m.loadAllCmd(), m.whoamiCmd())
+	} else if m.cfg.Daemon {
+		cmds = append(cmds, m.subscribeCmd())
+	}
+	if m.cfg.Daemon {
+		cmds = append(cmds, m.daemonEventCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -322,6 +358,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resize()
+		cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -353,6 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.enrichSpacesCmds()...)
 		cmds = append(cmds, m.enrichSendersCmds()...)
 		cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
+		cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	case chatLoadedMsg:
 		if msg.loadID != m.chatLoadID || msg.spaceName != m.selectedSpace().Name {
 			break
@@ -376,6 +414,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.persistWorkspaceCache()
 		cmds = append(cmds, m.enrichSendersCmds()...)
 		cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
+		cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
 	case featureLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -474,11 +513,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case realtimeMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
-			cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+			if m.realtimeRetry == 0 {
+				m.realtimeRetry = time.Second
+			} else {
+				m.realtimeRetry = minDuration(30*time.Second, m.realtimeRetry*2)
+			}
+			delay := m.realtimeRetry
+			cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg {
 				return realtimeMsg{}
 			}))
 			break
 		}
+		m.realtimeRetry = 0
 		if msg.message.ID != "" && !m.seenMessages[msg.message.ID] {
 			m.seenMessages[msg.message.ID] = true
 			m.rememberChatMessage(msg.message)
@@ -490,7 +536,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
-			if m.feature != FeatureChat || !m.isSelectedSpace(msg.message.Space) {
+			if !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(msg.message.Space)) {
 				notify.Send("gws chat", msg.message.SenderName+": "+msg.message.Text, notify.Options{
 					Desktop:   m.cfg.NotifyDesktop,
 					Sound:     m.cfg.NotifySound,
@@ -505,9 +551,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && msg.source != "" && msg.path != "" {
 			m.imageFiles[msg.source] = msg.path
 			delete(m.imageErrors, msg.source)
+			m.imageVersion++
+			cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 		} else if msg.err != nil && msg.source != "" {
 			m.imageErrors[msg.source] = msg.err.Error()
+			m.imageVersion++
 		}
+	case imageFrameReadyMsg:
+		delete(m.imageFramePend, msg.key)
+		if msg.err == nil && msg.key != "" {
+			m.imageRenders[msg.key] = inlineImageRender{
+				file:        msg.file,
+				source:      msg.source,
+				columns:     msg.columns,
+				rows:        msg.rows,
+				size:        msg.size,
+				modTime:     msg.modTime,
+				full:        msg.full,
+				placeholder: msg.placeholder,
+			}
+			m.imagePlacement++
+			m.imageVersion++
+		}
+	case daemonEventMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+				return daemonEventMsg{}
+			}))
+			break
+		}
+		if msg.event.Topic == "image.cached" {
+			var payload struct {
+				Source string `json:"source"`
+				Path   string `json:"path"`
+			}
+			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Source != "" && payload.Path != "" {
+				m.imageFiles[payload.Source] = payload.Path
+				delete(m.imageErrors, payload.Source)
+				delete(m.imageLoading, payload.Source)
+				m.imageVersion++
+				cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
+			}
+		}
+		cmds = append(cmds, m.daemonEventCmd())
 	case selfResolvedMsg:
 		if msg.apiAbsent {
 			m.peopleAPIDown = true
@@ -556,6 +643,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		cmds = append(cmds, m.autosaveTick())
+	case imageViewerOpenErrMsg:
+		m.toast = "open: " + msg.err
 	case tea.MouseMsg:
 		next, cmd := m.updateMouse(msg)
 		m = next
@@ -578,6 +667,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.imageViewer != nil {
+		return m.updateImageViewer(msg)
+	}
 	if m.helpVisible {
 		switch msg.String() {
 		case "?", "esc", "q":
@@ -600,6 +692,20 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if m.vimComposer == vimModeNormal && key == "/" {
 				m.openSearchModal()
 				return m, nil
+			}
+			if m.vimComposer == vimModeNormal && m.vimPending == "" {
+				switch key {
+				case "1":
+					m.focusedPane = paneList
+					m.input.Blur()
+					return m, nil
+				case "2":
+					m.focusedPane = paneDetail
+					m.input.Blur()
+					return m, nil
+				case "3":
+					return m, nil
+				}
 			}
 			if m.vimComposerKey(msg) {
 				return m, nil
@@ -652,14 +758,25 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "shift+tab":
 		m.feature = m.nextFeature(-1)
 		m.toast = string(m.feature)
-	case "1":
+	case "ctrl+1":
 		m.feature = FeatureChat
-	case "2":
+	case "ctrl+2":
 		m.feature = FeatureMail
-	case "3":
+	case "ctrl+3":
 		m.feature = FeatureCalendar
-	case "4":
+	case "ctrl+4":
 		m.feature = FeatureMeet
+	case "1":
+		m.focusedPane = paneList
+		return m, nil
+	case "2":
+		m.focusedPane = paneDetail
+		return m, nil
+	case "3":
+		m.focusedPane = paneAction
+		m.input.Focus()
+		m.vimComposer = vimModeInsert
+		return m, nil
 	case "j", "down":
 		if m.focusedPane == paneDetail {
 			m.detail.LineDown(1)
@@ -707,6 +824,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.selected[m.feature] = m.listLen() - 1
 		return m.loadSelectedChat()
 	case "enter", "o":
+		if m.focusedPane == paneDetail {
+			if att, ok := m.detailImageAt[m.detailCursor]; ok {
+				m.openImageViewer(att)
+				return m, nil
+			}
+		}
 		m.toast = m.openHint()
 	case "i":
 		m.focusedPane = paneAction
@@ -726,7 +849,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "p":
 		return m.pasteIntoComposer()
 	case "r":
-		m.imageErrors = map[string]string{}
+		if len(m.imageErrors) > 0 {
+			m.imageErrors = map[string]string{}
+			m.imageVersion++
+		}
 		return m.refreshCurrentFeature()
 	case "ctrl+r":
 		cfg, err := LoadConfig()
@@ -735,7 +861,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cfg = cfg
-		m.theme = theme.New(cfg.NoColor)
+		m.theme = theme.New(cfg.Theme, cfg.NoColor)
 		m.toast = "config reloaded"
 	case "/":
 		m.openSearchModal()
@@ -759,7 +885,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.openMailCompose(&thread, true)
 		} else if m.feature == FeatureChat {
 			m.loading = true
-			m.imageErrors = map[string]string{}
+			if len(m.imageErrors) > 0 {
+				m.imageErrors = map[string]string{}
+				m.imageVersion++
+			}
 			return m, m.loadAllCmd()
 		}
 	case "f":
@@ -1115,9 +1244,34 @@ func (m Model) subscribeCmd() tea.Cmd {
 			return realtimeMsg{}
 		case msg, ok := <-ch:
 			if !ok {
-				return realtimeMsg{}
+				return realtimeMsg{err: api.ErrRemoteClosed}
 			}
 			return realtimeMsg{message: msg}
+		}
+	}
+}
+
+func (m Model) daemonEventCmd() tea.Cmd {
+	subscriber, ok := m.client.(interface {
+		SubscribeEvents(context.Context, []string) (<-chan api.DaemonEvent, error)
+	})
+	if !ok {
+		return nil
+	}
+	topics := []string{"image.cached", "notify", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
+	return func() tea.Msg {
+		ch, err := subscriber.SubscribeEvents(m.ctx, topics)
+		if err != nil {
+			return daemonEventMsg{err: err}
+		}
+		select {
+		case <-m.ctx.Done():
+			return daemonEventMsg{}
+		case event, ok := <-ch:
+			if !ok {
+				return daemonEventMsg{err: api.ErrRemoteClosed}
+			}
+			return daemonEventMsg{event: event}
 		}
 	}
 }
@@ -1153,9 +1307,9 @@ func (m *Model) resize() {
 		detailWidth = max(10, detailWidth-2)
 	}
 	m.detail.Width = detailWidth
-	m.detail.Height = max(3, detailHeight-1)
+	m.detail.Height = max(3, detailHeight)
 	m.input.SetWidth(max(10, right-actionHPad))
-	m.input.SetHeight(max(2, actionHeight-1))
+	m.input.SetHeight(max(2, actionHeight))
 }
 
 func (m *Model) clampSelections() {
@@ -1207,7 +1361,7 @@ func (m Model) loadSelectedChat() (Model, tea.Cmd) {
 		m.loading = false
 		m.chatLoading = false
 		m.chatLoadSpace = ""
-		return m, nil
+		return m, tea.Batch(m.precomputeFrameCmdsForChat(m.chatMessages)...)
 	}
 
 	m.chatLoadID++
@@ -1235,7 +1389,7 @@ func (m Model) listLen() int {
 func (m Model) listLenFor(feature Feature) int {
 	switch feature {
 	case FeatureChat:
-		return len(m.spaces)
+		return len(m.visibleSpaces())
 	case FeatureMail:
 		return len(m.mailThreads)
 	case FeatureCalendar:
@@ -1247,11 +1401,44 @@ func (m Model) listLenFor(feature Feature) int {
 	}
 }
 
+func (m Model) visibleSpaces() []api.Space {
+	if strings.TrimSpace(m.search) == "" {
+		return m.spaces
+	}
+	needle := strings.ToLower(strings.TrimSpace(m.search))
+	filtered := make([]api.Space, 0, len(m.spaces))
+	for _, space := range m.spaces {
+		if strings.Contains(strings.ToLower(m.spaceLabel(space)), needle) {
+			filtered = append(filtered, space)
+		}
+	}
+	return filtered
+}
+
+func (m Model) visibleChatMessages() []api.ChatMessage {
+	if strings.TrimSpace(m.search) == "" {
+		return m.chatMessages
+	}
+	needle := strings.ToLower(strings.TrimSpace(m.search))
+	filtered := make([]api.ChatMessage, 0, len(m.chatMessages))
+	for _, msg := range m.chatMessages {
+		if strings.Contains(strings.ToLower(msg.Text), needle) {
+			filtered = append(filtered, msg)
+			continue
+		}
+		if strings.Contains(strings.ToLower(m.senderLabel(msg)), needle) {
+			filtered = append(filtered, msg)
+		}
+	}
+	return filtered
+}
+
 func (m Model) selectedSpace() api.Space {
-	if len(m.spaces) == 0 {
+	visible := m.visibleSpaces()
+	if len(visible) == 0 {
 		return api.Space{}
 	}
-	return m.spaces[clamp(m.selected[FeatureChat], len(m.spaces))]
+	return visible[clamp(m.selected[FeatureChat], len(visible))]
 }
 
 func (m Model) isSelectedSpace(space string) bool {
@@ -1534,12 +1721,17 @@ func (m *Model) updateDetailContent() {
 	prevLast := m.detailLineCount - 1
 	wasAtLastLine := prevLast >= 0 && m.detailCursor >= prevLast
 
-	key := m.detailKeyForSelection()
-	keyChanged := key != m.detailKey
+	selectionKey := m.detailKeyForSelection()
+	keyChanged := selectionKey != m.detailKey
 	if keyChanged {
 		m.detailResetCursor()
-		m.detailKey = key
+		m.detailKey = selectionKey
 		wasAtLastLine = false
+	}
+
+	renderKey := m.detailRenderFingerprint()
+	if renderKey == m.detailRenderKey {
+		return
 	}
 
 	// Chat history reads bottom-up (oldest → newest), so whenever a chat is
@@ -1547,12 +1739,20 @@ func (m *Model) updateDetailContent() {
 	// messages should already be in view without manual scrolling.
 	pinToBottom := m.feature == FeatureChat && keyChanged
 
+	if m.detailImageAt == nil {
+		m.detailImageAt = map[int]api.Attachment{}
+	} else {
+		for k := range m.detailImageAt {
+			delete(m.detailImageAt, k)
+		}
+	}
 	decorated, plain := m.decorateDetail(m.detailContent())
 	m.detailLines = plain
 	m.detailLineCount = len(plain)
 	m.detailClampCursor()
 
 	m.detail.SetContent(decorated)
+	m.detailRenderKey = renderKey
 	if wasAtBottom || pinToBottom {
 		m.detail.GotoBottom()
 	}
@@ -1561,6 +1761,118 @@ func (m *Model) updateDetailContent() {
 			m.detailCursor = m.detailLineCount - 1
 		}
 		m.detailEnsureCursorVisible()
+	}
+}
+
+func (m Model) detailRenderFingerprint() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "feature=%s|selection=%s|width=%d|height=%d|focus=%d|vim=%t|color=%t|icons=%t|inline=%t|image=%d|placement=%d",
+		m.feature,
+		m.detailKeyForSelection(),
+		m.detail.Width,
+		m.detail.Height,
+		m.focusedPane,
+		m.cfg.VimMode,
+		!m.cfg.NoColor,
+		!m.cfg.NoIcons,
+		m.cfg.InlineImages,
+		m.imageVersion,
+		m.imagePlacement,
+	)
+	if m.detailVimEnabled() {
+		fmt.Fprintf(&b, "|cursor=%d:%d|anchor=%d:%d|visual=%t|visualLine=%t",
+			m.detailCursor,
+			m.detailCol,
+			m.detailAnchor,
+			m.detailAnchorCol,
+			m.detailVisual,
+			m.detailVisualLine,
+		)
+	}
+
+	switch m.feature {
+	case FeatureChat:
+		space := m.selectedSpace()
+		fmt.Fprintf(&b, "|chatLoading=%t|chatLoadSpace=%s|space=%s|messages=%d",
+			m.chatLoading,
+			m.chatLoadSpace,
+			space.Name,
+			len(m.chatMessages),
+		)
+		for _, msg := range m.chatMessages {
+			label := m.senderLabel(msg)
+			fmt.Fprintf(&b, "|msg=%s,%s,%s,%t,%t,%d,%s,%s",
+				msg.ID,
+				msg.ParentID,
+				msg.SenderID,
+				m.isSelfMessage(msg, label),
+				msg.Pending,
+				msg.CreateTime.UnixNano(),
+				label,
+				msg.Text,
+			)
+			writeAttachmentFingerprint(&b, msg.Attachments)
+		}
+	case FeatureMail:
+		thread := m.selectedMail()
+		fmt.Fprintf(&b, "|mail=%s,%s,%s,%s,%d,%t,%t,%d",
+			thread.ID,
+			thread.Sender,
+			thread.Subject,
+			thread.Body,
+			thread.Date.UnixNano(),
+			thread.Unread,
+			thread.Starred,
+			thread.QuotedLines,
+		)
+		writeAttachmentFingerprint(&b, thread.Attachments)
+	case FeatureCalendar:
+		event := m.selectedEvent()
+		fmt.Fprintf(&b, "|event=%s,%s,%s,%d,%d,%s,%s,%s,%s",
+			event.ID,
+			event.Summary,
+			event.Description,
+			event.Start.UnixNano(),
+			event.End.UnixNano(),
+			event.Location,
+			event.HangoutLink,
+			event.RSVP,
+			strings.Join(event.Attendees, ","),
+		)
+	case FeatureMeet:
+		space := m.selectedMeet()
+		activeConference := ""
+		if space.ActiveConference != nil {
+			activeConference = space.ActiveConference.ConferenceRecord
+		}
+		fmt.Fprintf(&b, "|meet=%s,%s,%s,%d,%s,%d,%t,%t,%s",
+			space.Name,
+			space.MeetingURI,
+			space.MeetingCode,
+			space.Created.UnixNano(),
+			space.AccessType(),
+			space.ActiveParticipants,
+			space.Recording,
+			space.Active,
+			activeConference,
+		)
+	}
+	return b.String()
+}
+
+func writeAttachmentFingerprint(b *strings.Builder, attachments []api.Attachment) {
+	normalized := api.NormalizeAttachments(attachments)
+	fmt.Fprintf(b, "|attachments=%d", len(normalized))
+	for _, attachment := range normalized {
+		fmt.Fprintf(b, ",%s,%s,%s,%s,%s,%s,%s",
+			attachment.ID,
+			attachment.MediaResourceName(),
+			attachment.PreviewSource(),
+			attachment.DisplayName(),
+			attachment.ContentType,
+			attachment.DownloadURL,
+			attachment.ThumbnailURL,
+		)
 	}
 }
 
@@ -1628,6 +1940,13 @@ func min(a, b int) int {
 	return b
 }
 
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func splitCSV(value string) []string {
 	var out []string
 	for _, part := range strings.Split(value, ",") {
@@ -1648,6 +1967,17 @@ func sortedEvents(events []api.CalendarEvent) []api.CalendarEvent {
 func (m Model) saveDraft() error {
 	if m.modal == nil {
 		return nil
+	}
+	if m.cfg.Daemon {
+		saver, ok := m.client.(interface {
+			DraftSave(context.Context, string, map[string]any) error
+		})
+		if !ok {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Second)
+		defer cancel()
+		return saver.DraftSave(ctx, m.modal.id, m.modal.snapshot())
 	}
 	if err := os.MkdirAll(m.cfg.DraftDir, 0o755); err != nil {
 		return err

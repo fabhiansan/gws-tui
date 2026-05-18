@@ -163,9 +163,12 @@ func (m Model) updateModal(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "enter":
 		if m.modal.fields[m.modal.focus].Multiline {
 			m.modal.fields[m.modal.focus].Value += "\n"
-		} else {
-			m.modal.focus = (m.modal.focus + 1) % len(m.modal.fields)
+			return m, nil
 		}
+		if len(m.modal.fields) == 1 {
+			return m.submitModal()
+		}
+		m.modal.focus = (m.modal.focus + 1) % len(m.modal.fields)
 		return m, nil
 	case "backspace", "ctrl+h":
 		value := []rune(m.modal.fields[m.modal.focus].Value)
@@ -191,18 +194,25 @@ func (m Model) submitModal() (Model, tea.Cmd) {
 		query := strings.TrimSpace(modal.field("query"))
 		m.search = query
 		m.modal = nil
-		m.loading = true
-		return m, func() tea.Msg {
-			switch m.feature {
-			case FeatureMail:
+		switch m.feature {
+		case FeatureMail:
+			m.loading = true
+			return m, func() tea.Msg {
 				page, err := m.client.MailThreads(m.ctx, api.MailQuery{Label: "All Mail", Search: query})
 				return loadedMsg{threads: page, labels: m.mailLabels, spaces: api.Page[api.Space]{Items: m.spaces}, messages: api.Page[api.ChatMessage]{Items: m.chatMessages, NextPageToken: m.chatOlder}, events: api.Page[api.CalendarEvent]{Items: m.events, NextPageToken: m.calendarNext}, meet: api.Page[api.MeetSpace]{Items: m.meetSpaces}, auth: m.auth, err: err}
-			case FeatureCalendar:
+			}
+		case FeatureCalendar:
+			m.loading = true
+			return m, func() tea.Msg {
 				page, err := m.client.CalendarEvents(m.ctx, api.CalendarQuery{Search: query})
 				return loadedMsg{events: page, labels: m.mailLabels, spaces: api.Page[api.Space]{Items: m.spaces}, messages: api.Page[api.ChatMessage]{Items: m.chatMessages, NextPageToken: m.chatOlder}, threads: api.Page[api.MailThread]{Items: m.mailThreads, NextPageToken: m.mailNext}, meet: api.Page[api.MeetSpace]{Items: m.meetSpaces}, auth: m.auth, err: err}
-			default:
-				return loadedMsg{auth: m.auth, spaces: api.Page[api.Space]{Items: m.spaces}, messages: api.Page[api.ChatMessage]{Items: m.chatMessages, NextPageToken: m.chatOlder}, labels: m.mailLabels, threads: api.Page[api.MailThread]{Items: m.mailThreads, NextPageToken: m.mailNext}, events: api.Page[api.CalendarEvent]{Items: m.events, NextPageToken: m.calendarNext}, meet: api.Page[api.MeetSpace]{Items: m.meetSpaces}}
 			}
+		case FeatureChat:
+			m.clampSelections()
+			return m.loadSelectedChat()
+		default:
+			m.clampSelections()
+			return m, nil
 		}
 	case modalMail:
 		draft := api.MailDraft{

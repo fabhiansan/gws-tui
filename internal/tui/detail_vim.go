@@ -111,6 +111,10 @@ func (m *Model) decorateDetail(content string) (string, []string) {
 		} else if selected {
 			mark = selectMark
 		}
+		if cursorCol >= 0 && !m.detailVisual {
+			out[i] = blank + m.renderCursorLine(plain[i], cursorCol)
+			continue
+		}
 		out[i] = mark + m.renderDetailTextLine(plain[i], cursorCol, selectionStart, selectionEnd, selected)
 	}
 	return strings.Join(out, "\n"), plain
@@ -186,6 +190,26 @@ func (m *Model) detailSelectionColumnsFor(lines []string, line int, start, end d
 		return 0, min(end.col, last), true
 	}
 	return 0, last, true
+}
+
+func (m Model) renderCursorLine(line string, cursorCol int) string {
+	runes := []rune(line)
+	width := m.detailTextWidth()
+	bg := m.theme.Selected
+	cursor := m.detailCursorStyle()
+	var out strings.Builder
+	for col := 0; col < width; col++ {
+		cell := " "
+		if col < len(runes) {
+			cell = string(runes[col])
+		}
+		if col == cursorCol {
+			out.WriteString(cursor.Render(cell))
+		} else {
+			out.WriteString(bg.Render(cell))
+		}
+	}
+	return out.String()
 }
 
 func (m Model) renderDetailTextLine(line string, cursorCol, selectionStart, selectionEnd int, selected bool) string {

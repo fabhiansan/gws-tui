@@ -27,6 +27,9 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "tui" {
 		return runTUI(args[1:], stdout, stderr)
 	}
+	if args[0] == "daemon" {
+		return runDaemon(args[1:], stdout, stderr)
+	}
 
 	if shouldUseFixtures() {
 		return runFixtureCommand(context.Background(), args, stdout, stderr)
@@ -44,7 +47,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `gws — Google Workspace CLI + terminal UI
 
 USAGE:
-    gws tui [--feature chat|mail|calendar|meet] [--auth] [--no-icons] [--no-color] [--no-images]
+    gws tui [--feature chat|mail|calendar|meet] [--daemon|--no-daemon] [--auth] [--no-icons] [--no-color] [--no-images]
+    gws daemon start [--detach]
+    gws daemon stop|status|logs|restart
     gws <existing gws command> ...
 
 The TUI is implemented locally. Non-TUI commands are delegated to an installed

@@ -1,0 +1,209 @@
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
+)
+
+const WorkspaceSnapshotVersion = 2
+
+var ErrSnapshotLockBusy = errors.New("workspace snapshot lock is held by another process")
+
+type WorkspaceSnapshot struct {
+	ProtocolVersion     int                          `json:"protocol_version"`
+	Version             int                          `json:"version"`
+	SavedAt             time.Time                    `json:"saved_at"`
+	Auth                AuthStatus                   `json:"auth,omitempty"`
+	Spaces              []Space                      `json:"spaces,omitempty"`
+	ChatMessagesBySpace map[string]Page[ChatMessage] `json:"chat_messages_by_space,omitempty"`
+	MailLabels          []MailLabel                  `json:"mail_labels,omitempty"`
+	MailThreads         Page[MailThread]             `json:"mail_threads,omitempty"`
+	Events              Page[CalendarEvent]          `json:"events,omitempty"`
+	MeetSpaces          []MeetSpace                  `json:"meet_spaces,omitempty"`
+	UserLabels          map[string]string            `json:"user_labels,omitempty"`
+	MembersBySpace      map[string][]SpaceMember     `json:"members_by_space,omitempty"`
+	SelfUserIDs         map[string]bool              `json:"self_user_ids,omitempty"`
+	PeopleAPIDown       bool                         `json:"people_api_down,omitempty"`
+}
+
+func NewWorkspaceSnapshot() WorkspaceSnapshot {
+	snapshot := WorkspaceSnapshot{
+		ProtocolVersion: ProtocolVersion,
+		Version:         WorkspaceSnapshotVersion,
+	}
+	snapshot.EnsureMaps()
+	return snapshot
+}
+
+func LoadWorkspaceSnapshot(path string) (WorkspaceSnapshot, bool) {
+	if path == "" {
+		return NewWorkspaceSnapshot(), false
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return NewWorkspaceSnapshot(), false
+	}
+	var snapshot WorkspaceSnapshot
+	if json.Unmarshal(payload, &snapshot) != nil || snapshot.Version != WorkspaceSnapshotVersion {
+		return NewWorkspaceSnapshot(), false
+	}
+	snapshot.EnsureMaps()
+	if snapshot.ProtocolVersion == 0 {
+		snapshot.ProtocolVersion = ProtocolVersion
+	}
+	if snapshot.SavedAt.IsZero() || !snapshot.HasData() {
+		return snapshot, false
+	}
+	return snapshot, true
+}
+
+func SaveWorkspaceSnapshot(path string, snapshot WorkspaceSnapshot) error {
+	if path == "" {
+		return nil
+	}
+	snapshot.ProtocolVersion = ProtocolVersion
+	snapshot.Version = WorkspaceSnapshotVersion
+	snapshot.SavedAt = time.Now()
+	snapshot.EnsureMaps()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(payload, '\n'), 0o600)
+}
+
+type SnapshotLock struct {
+	file *os.File
+	path string
+}
+
+func LockWorkspaceSnapshot(path string) (*SnapshotLock, error) {
+	return lockWorkspaceSnapshot(path, false)
+}
+
+func TryLockWorkspaceSnapshot(path string) (*SnapshotLock, error) {
+	return lockWorkspaceSnapshot(path, true)
+}
+
+func lockWorkspaceSnapshot(path string, nonblock bool) (*SnapshotLock, error) {
+	if path == "" {
+		return nil, nil
+	}
+	lockPath := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	flag := syscall.LOCK_EX
+	if nonblock {
+		flag |= syscall.LOCK_NB
+	}
+	if err := syscall.Flock(int(file.Fd()), flag); err != nil {
+		_ = file.Close()
+		if nonblock && errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrSnapshotLockBusy
+		}
+		return nil, err
+	}
+	return &SnapshotLock{file: file, path: lockPath}, nil
+}
+
+func (l *SnapshotLock) Release() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	return l.file.Close()
+}
+
+func (s *WorkspaceSnapshot) EnsureMaps() {
+	if s.ChatMessagesBySpace == nil {
+		s.ChatMessagesBySpace = map[string]Page[ChatMessage]{}
+	}
+	if s.UserLabels == nil {
+		s.UserLabels = map[string]string{}
+	}
+	if s.MembersBySpace == nil {
+		s.MembersBySpace = map[string][]SpaceMember{}
+	}
+	if s.SelfUserIDs == nil {
+		s.SelfUserIDs = map[string]bool{}
+	}
+	if s.ProtocolVersion == 0 {
+		s.ProtocolVersion = ProtocolVersion
+	}
+	if s.Version == 0 {
+		s.Version = WorkspaceSnapshotVersion
+	}
+}
+
+func (s WorkspaceSnapshot) HasData() bool {
+	return len(s.Spaces) > 0 ||
+		len(s.MailLabels) > 0 ||
+		len(s.MailThreads.Items) > 0 ||
+		len(s.Events.Items) > 0 ||
+		len(s.MeetSpaces) > 0
+}
+
+// Clone returns a deep copy of the snapshot. Maps and the top-level slices of
+// each owned collection are duplicated so the result can be marshalled or
+// otherwise read concurrently with mutations on the original.
+func (s WorkspaceSnapshot) Clone() WorkspaceSnapshot {
+	out := s
+	if s.Spaces != nil {
+		out.Spaces = append([]Space(nil), s.Spaces...)
+	}
+	if s.ChatMessagesBySpace != nil {
+		out.ChatMessagesBySpace = make(map[string]Page[ChatMessage], len(s.ChatMessagesBySpace))
+		for k, page := range s.ChatMessagesBySpace {
+			if page.Items != nil {
+				page.Items = append([]ChatMessage(nil), page.Items...)
+			}
+			out.ChatMessagesBySpace[k] = page
+		}
+	}
+	if s.MailLabels != nil {
+		out.MailLabels = append([]MailLabel(nil), s.MailLabels...)
+	}
+	if s.MailThreads.Items != nil {
+		out.MailThreads.Items = append([]MailThread(nil), s.MailThreads.Items...)
+	}
+	if s.Events.Items != nil {
+		out.Events.Items = append([]CalendarEvent(nil), s.Events.Items...)
+	}
+	if s.MeetSpaces != nil {
+		out.MeetSpaces = append([]MeetSpace(nil), s.MeetSpaces...)
+	}
+	if s.UserLabels != nil {
+		out.UserLabels = make(map[string]string, len(s.UserLabels))
+		for k, v := range s.UserLabels {
+			out.UserLabels[k] = v
+		}
+	}
+	if s.MembersBySpace != nil {
+		out.MembersBySpace = make(map[string][]SpaceMember, len(s.MembersBySpace))
+		for k, members := range s.MembersBySpace {
+			if members != nil {
+				members = append([]SpaceMember(nil), members...)
+			}
+			out.MembersBySpace[k] = members
+		}
+	}
+	if s.SelfUserIDs != nil {
+		out.SelfUserIDs = make(map[string]bool, len(s.SelfUserIDs))
+		for k, v := range s.SelfUserIDs {
+			out.SelfUserIDs[k] = v
+		}
+	}
+	return out
+}

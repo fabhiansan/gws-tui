@@ -200,6 +200,50 @@ func TestChatSelectionUsesCachedMessages(t *testing.T) {
 	}
 }
 
+func TestUpdateDetailContentSkipsUnchangedDetailRender(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: api.NewFixtureClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+		},
+	})
+	model.width = 100
+	model.height = 32
+	model.resize()
+	model.spaces = []api.Space{{Name: "spaces/engineering", DisplayName: "#engineering"}}
+	model.selected[FeatureChat] = 0
+	model.chatMessages = []api.ChatMessage{{
+		ID:         "msg-1",
+		Space:      "spaces/engineering",
+		SenderID:   "users/alice",
+		SenderName: "Alice",
+		Text:       "initial message",
+		CreateTime: time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC),
+	}}
+
+	model.updateDetailContent()
+	firstKey := model.detailRenderKey
+	model.detail.SetContent("sentinel")
+	model.toast = "status changed"
+	model.updateDetailContent()
+	if model.detailRenderKey != firstKey {
+		t.Fatalf("status-only update should keep render key: got %q want %q", model.detailRenderKey, firstKey)
+	}
+	if !strings.Contains(model.detail.View(), "sentinel") {
+		t.Fatalf("unchanged detail should not be rebuilt, view=%q", model.detail.View())
+	}
+
+	model.chatMessages[0].Text = "changed message"
+	model.updateDetailContent()
+	if strings.Contains(model.detail.View(), "sentinel") || !strings.Contains(model.detail.View(), "changed message") {
+		t.Fatalf("changed detail data should rebuild viewport, view=%q", model.detail.View())
+	}
+}
+
 func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
 	client := &countingWorkspaceClient{WorkspaceClient: api.NewFixtureClient()}
 	model := New(Options{

@@ -1,0 +1,12 @@
+[Unit]
+Description=gws TUI daemon
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/go/bin/gws daemon start
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

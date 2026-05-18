@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -50,6 +52,32 @@ func (a Attachment) MediaResourceName() string {
 		return a.ID
 	}
 	return ""
+}
+
+// CachePath returns the deterministic on-disk cache path for an attachment's
+// image, shared by the daemon (writer) and TUI (reader) so both agree on
+// where a cached file lives without coordination beyond the content itself.
+func (a Attachment) CachePath(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	a = normalizeAttachment(a)
+	source := a.PreviewSource()
+	if source == "" {
+		source = a.MediaResourceName()
+	}
+	if source == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(source))
+	ext := extFromContentType(a.ContentType)
+	if ext == "" {
+		ext = sourceExt(source)
+	}
+	if ext == "" {
+		ext = ".png"
+	}
+	return filepath.Join(dir, hex.EncodeToString(sum[:])+ext)
 }
 
 func (a Attachment) IsImage() bool {
