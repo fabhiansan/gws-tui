@@ -1,0 +1,12 @@
+{
+  "auth_method": "fixture",
+  "client_config_exists": true,
+  "credential_source": "fixture data",
+  "encrypted_credentials_exists": false,
+  "encryption_valid": true,
+  "keyring_backend": "fixture",
+  "plain_credentials_exists": false,
+  "project_id": "fixture-project",
+  "storage": "memory",
+  "token_cache_exists": true
+}

@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "id": "msg-1",
+      "name": "spaces/engineering/messages/msg-1",
+      "space": "spaces/engineering",
+      "senderId": "users/alice",
+      "senderName": "Alice",
+      "text": "anyone seen the latest design?",
+      "createTime": "2026-05-18T07:30:00+07:00",
+      "threadId": "thread-1"
+    },
+    {
+      "id": "msg-2",
+      "name": "spaces/engineering/messages/msg-2",
+      "space": "spaces/engineering",
+      "senderId": "users/bob",
+      "senderName": "Bob",
+      "text": "yeah, looks great\n\n```go\nfmt.Println(\"ship it\")\n```",
+      "createTime": "2026-05-18T07:40:00+07:00",
+      "threadId": "thread-1",
+      "parentId": "msg-1"
+    },
+    {
+      "id": "msg-3",
+      "name": "spaces/engineering/messages/msg-3",
+      "space": "spaces/engineering",
+      "senderId": "users/me",
+      "senderName": "You",
+      "text": "shipping today",
+      "createTime": "2026-05-18T07:50:00+07:00"
+    }
+  ],
+  "nextPageToken": "older"
+}

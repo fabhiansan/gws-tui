@@ -1,0 +1,43 @@
+package tui
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestPersistedStateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := persistedState{
+		LastFeature: "mail",
+		LastSpace:   "spaces/engineering",
+		Selections:  map[string]int{"chat": 2, "mail": 1},
+	}
+	if err := savePersistedState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded := loadPersistedState(path)
+	if loaded.LastFeature != state.LastFeature || loaded.LastSpace != state.LastSpace || loaded.Selections["chat"] != 2 {
+		t.Fatalf("unexpected state: %#v", loaded)
+	}
+}
+
+func TestLoadConfigTOMLSubset(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("XDG_CACHE_HOME", root)
+	configPath := filepath.Join(root, "gws", "tui.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("initial_feature = \"meet\"\nno_icons = true\nnotify_sound = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InitialFeature != "meet" || !cfg.NoIcons || cfg.NotifySound {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}

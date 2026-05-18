@@ -1,0 +1,31 @@
+{
+  "messages": [
+    {
+      "id": "mail-1",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Sending the latest deck for Q4.",
+      "threadId": "mail-1"
+    },
+    {
+      "id": "mail-2",
+      "labelIds": [
+        "INBOX"
+      ],
+      "snippet": "Want to grab lunch after standup?",
+      "threadId": "mail-2"
+    },
+    {
+      "id": "mail-3",
+      "labelIds": [
+        "INBOX",
+        "STARRED"
+      ],
+      "snippet": "Review requested on google-workspace/tui.",
+      "threadId": "mail-3"
+    }
+  ],
+  "nextPageToken": "next"
+}

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="720" viewBox="0 0 1180 720" role="img" aria-label="gws tui chat screen">
+  <rect width="1180" height="720" fill="#101014"/>
+  <rect x="36" y="32" width="318" height="604" rx="14" fill="#111827" stroke="#7D56F4" stroke-width="2"/>
+  <rect x="378" y="32" width="766" height="430" rx="14" fill="#111827" stroke="#7D56F4" stroke-width="2"/>
+  <rect x="378" y="482" width="766" height="154" rx="14" fill="#111827" stroke="#7D56F4" stroke-width="2"/>
+  <rect x="36" y="658" width="1108" height="34" rx="6" fill="#7D56F4"/>
+
+  <g font-family="Menlo, Consolas, monospace" font-size="22" fill="#F9FAFB">
+    <text x="64" y="72" fill="#C4B5FD" font-weight="700">Spaces (4)</text>
+    <text x="64" y="122"><tspan fill="#7D56F4">▎</tspan> <tspan fill="#10B981">●</tspan> #engineering</text>
+    <text x="84" y="164"><tspan fill="#7D56F4">●</tspan> #design</text>
+    <text x="84" y="206">  #random</text>
+    <text x="84" y="248"><tspan fill="#10B981">●</tspan> @alice</text>
+
+    <text x="410" y="72" fill="#C4B5FD" font-weight="700">#engineering</text>
+    <text x="410" y="122" fill="#6B7280">─── Today ───</text>
+    <text x="410" y="174" fill="#22C55E">Alice    07:30</text>
+    <text x="438" y="214">anyone seen the latest design?</text>
+    <text x="410" y="276" fill="#06B6D4">Bob      07:40</text>
+    <text x="438" y="316">↪ yeah, looks great</text>
+    <text x="438" y="358" fill="#D1D5DB">fmt.Println("ship it")</text>
+    <text x="410" y="420" fill="#C4B5FD">You      07:50</text>
+    <text x="438" y="460">shipping today</text>
+
+    <text x="410" y="526" fill="#C4B5FD" font-weight="700">message · Enter send · Shift+Enter newline</text>
+    <text x="410" y="580" fill="#6B7280">Press i, type a message, Enter to send.</text>
+
+    <text x="60" y="682">1 Chat</text>
+    <text x="170" y="682" fill="#DDD6FE">2 Mail</text>
+    <text x="280" y="682" fill="#DDD6FE">3 Calendar</text>
+    <text x="450" y="682" fill="#DDD6FE">4 Meet</text>
+    <text x="836" y="682">● 2 live   j/k move  Enter open  / search  q quit</text>
+  </g>
+</svg>

@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": "event-1",
+      "summary": "1:1 with Alice",
+      "start": "2026-05-18T14:00:00+07:00",
+      "end": "2026-05-18T14:30:00+07:00",
+      "location": "Google Meet",
+      "hangoutLink": "https://meet.google.com/abc-defg-hij",
+      "attendees": [
+        "alice@example.com",
+        "you@example.com"
+      ],
+      "description": "Weekly sync.",
+      "rsvp": "needsAction",
+      "type": "1:1"
+    },
+    {
+      "id": "event-2",
+      "summary": "Eng review",
+      "start": "2026-05-18T16:30:00+07:00",
+      "end": "2026-05-18T17:30:00+07:00",
+      "attendees": [
+        "eng@example.com"
+      ],
+      "rsvp": "accepted",
+      "type": "meeting"
+    },
+    {
+      "id": "event-3",
+      "summary": "Planning",
+      "start": "2026-05-19T11:30:00+07:00",
+      "end": "2026-05-19T12:30:00+07:00",
+      "location": "Room 4A",
+      "rsvp": "tentative",
+      "type": "meeting"
+    }
+  ],
+  "nextPageToken": "next"
+}
