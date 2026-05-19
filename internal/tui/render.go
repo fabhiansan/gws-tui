@@ -160,8 +160,8 @@ func (m Model) renderList(width, height int) string {
 	switch m.feature {
 	case FeatureChat:
 		spaces := m.visibleSpaces()
-		if strings.TrimSpace(m.search) != "" {
-			title = fmt.Sprintf(" [1]-Spaces (%d/%d) /%s ", len(spaces), len(m.spaces), m.search)
+		if m.spaceFilterActive || strings.TrimSpace(m.spaceFilter) != "" {
+			title = fmt.Sprintf(" [1]-Spaces (%d/%d) /%s ", len(spaces), len(m.spaces), m.spaceFilter)
 		} else {
 			title = fmt.Sprintf(" [1]-Spaces (%d) ", len(spaces))
 		}
@@ -718,7 +718,11 @@ func (m Model) detailTitle() string {
 	var base string
 	switch m.feature {
 	case FeatureChat:
-		base = m.spaceLabel(m.selectedSpace())
+		if m.spaceFilterActive {
+			base = "Spaces filter"
+		} else {
+			base = m.spaceLabel(m.selectedSpace())
+		}
 	case FeatureMail:
 		base = fallback(m.selectedMail().Subject, "Mail")
 	case FeatureCalendar:
@@ -754,6 +758,17 @@ func (m *Model) detailContent() string {
 }
 
 func (m *Model) chatDetail() string {
+	if m.spaceFilterActive {
+		space := m.selectedSpace()
+		if space.Name == "" {
+			return centerText(fmt.Sprintf("No spaces match /%s", m.spaceFilter), m.detail.Width)
+		}
+		label := m.spaceLabel(space)
+		if strings.TrimSpace(m.spaceFilter) == "" {
+			return centerText("Type to filter spaces. Enter opens the selected space.", m.detail.Width)
+		}
+		return centerText(fmt.Sprintf("Filtering spaces /%s · Enter opens %s", m.spaceFilter, label), m.detail.Width)
+	}
 	if m.chatLoading && m.chatLoadSpace == m.selectedSpace().Name {
 		return centerText("Loading messages...", m.detail.Width)
 	}
@@ -949,6 +964,9 @@ func (m Model) paneHints() string {
 	case paneAction:
 		return "Enter send  Esc cancel"
 	default:
+		if m.spaceFilterActive && m.feature == FeatureChat {
+			return "type filter  ↑/↓ move  Enter open  Esc clear"
+		}
 		return "j/k move  Enter open  i compose  / search"
 	}
 }

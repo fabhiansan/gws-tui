@@ -203,6 +203,95 @@ func TestChatSelectionUsesCachedMessages(t *testing.T) {
 	}
 }
 
+func TestChatSlashStartsLiveFuzzySpaceFilter(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.focusedPane = paneList
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design-reviews", DisplayName: "#Design Reviews"},
+		{Name: "spaces/release", DisplayName: "#release"},
+	}
+	model.chatMessages = []api.ChatMessage{{ID: "eng-1", Space: "spaces/engineering", Text: "current"}}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if cmd != nil {
+		t.Fatalf("opening filter should not return a command, got %v", cmd)
+	}
+	if !updated.spaceFilterActive || updated.modal != nil {
+		t.Fatalf("slash should start inline space filter, active=%v modal=%#v", updated.spaceFilterActive, updated.modal)
+	}
+
+	updated, cmd = updated.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatalf("typing filter should stay local, got command %v", cmd)
+	}
+	updated, cmd = updated.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd != nil {
+		t.Fatalf("typing fuzzy filter should stay local, got command %v", cmd)
+	}
+	matches := updated.visibleSpaces()
+	if len(matches) != 1 || matches[0].Name != "spaces/design-reviews" {
+		t.Fatalf("expected fuzzy dr to match design reviews, got %#v", matches)
+	}
+	if got := updated.selectedSpace().Name; got != "spaces/design-reviews" {
+		t.Fatalf("expected selected match to follow filter, got %q", got)
+	}
+
+	updated, cmd = updated.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should open the filtered selected space")
+	}
+	if updated.spaceFilterActive {
+		t.Fatal("enter should leave filter mode")
+	}
+	if !updated.chatLoading || updated.chatLoadSpace != "spaces/design-reviews" {
+		t.Fatalf("expected selected filtered space to load, loading=%v space=%q", updated.chatLoading, updated.chatLoadSpace)
+	}
+}
+
+func TestChatSpaceFilterEscClearsAndRestoresSelection(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.focusedPane = paneList
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design-reviews", DisplayName: "#Design Reviews"},
+	}
+	model.selected[FeatureChat] = 0
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated, _ = updated.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if got := updated.selectedSpace().Name; got != "spaces/design-reviews" {
+		t.Fatalf("filter setup selected wrong space: %q", got)
+	}
+
+	updated, cmd := updated.updateKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("esc should not load or fetch, got command %v", cmd)
+	}
+	if updated.spaceFilterActive || updated.spaceFilter != "" {
+		t.Fatalf("esc should clear filter state, active=%v query=%q", updated.spaceFilterActive, updated.spaceFilter)
+	}
+	if got := updated.selectedSpace().Name; got != "spaces/engineering" {
+		t.Fatalf("esc should restore original selection, got %q", got)
+	}
+}
+
 func TestUpdateDetailContentSkipsUnchangedDetailRender(t *testing.T) {
 	dir := t.TempDir()
 	model := New(Options{
@@ -332,6 +421,129 @@ func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
 	}
 	if model.toast != "new chat message" {
 		t.Fatalf("expected chat toast, got %q", model.toast)
+	}
+}
+
+func TestDaemonChatMessageEventHydratesOtherSpaceCache(t *testing.T) {
+	client := &countingMessagesClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design"},
+	}
+	model.selected[FeatureChat] = 0
+	model.chatMessages = []api.ChatMessage{{ID: "eng-1", Space: "spaces/engineering", Text: "current space"}}
+	model.rememberChatPage("spaces/design", api.Page[api.ChatMessage]{
+		Items:         []api.ChatMessage{{ID: "design-old", Space: "spaces/design", Text: "old cached"}},
+		NextPageToken: "older",
+	})
+	incoming := api.ChatMessage{
+		ID:         "design-new",
+		Name:       "spaces/design/messages/design-new",
+		Space:      "spaces/design",
+		SenderID:   "users/alice",
+		SenderName: "Alice",
+		Text:       "new from daemon",
+		CreateTime: time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC),
+	}
+	payload, err := json.Marshal(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := model.Update(daemonEventMsg{
+		event: api.DaemonEvent{Topic: "chat.message", Payload: payload},
+	})
+	model = updated.(Model)
+
+	if !model.spaces[1].Unread {
+		t.Fatalf("chat.message event should mark other space unread: %#v", model.spaces)
+	}
+	cached := model.cache.ChatMessagesBySpace["spaces/design"]
+	if len(cached.Items) != 2 || cached.Items[1].ID != "design-new" {
+		t.Fatalf("incoming daemon message was not cached for unopened space: %#v", cached.Items)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'j'}}))
+	model = updated.(Model)
+	if client.calls != 0 {
+		t.Fatalf("cached daemon message should avoid ChatMessages fetch, got %d calls", client.calls)
+	}
+	if len(model.chatMessages) != 2 || model.chatMessages[1].Text != "new from daemon" {
+		t.Fatalf("cached daemon message should render after opening space, got %#v", model.chatMessages)
+	}
+}
+
+func TestDaemonEventCommandReusesStreamForBufferedEvents(t *testing.T) {
+	eventCh := make(chan api.DaemonEvent, 2)
+	unusedCh := make(chan api.DaemonEvent, 1)
+	client := &rotatingEventsClient{
+		WorkspaceClient: newTestWorkspaceClient(),
+		channels:        []chan api.DaemonEvent{eventCh, unusedCh},
+	}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design"},
+	}
+	model.selected[FeatureChat] = 0
+
+	notifyPayload, err := json.Marshal(map[string]string{"space": "spaces/design"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := api.ChatMessage{
+		ID:         "design-new",
+		Name:       "spaces/design/messages/design-new",
+		Space:      "spaces/design",
+		SenderID:   "users/alice",
+		SenderName: "Alice",
+		Text:       "new from daemon",
+		CreateTime: time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC),
+	}
+	messagePayload, err := json.Marshal(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventCh <- api.DaemonEvent{Topic: "notify", Payload: notifyPayload}
+	eventCh <- api.DaemonEvent{Topic: "chat.message", Payload: messagePayload}
+
+	first := runTestCmd(t, model.daemonEventCmd()).(daemonEventMsg)
+	if first.event.Topic != "notify" {
+		t.Fatalf("expected first buffered event to be notify, got %#v", first.event)
+	}
+	updated, _ := model.Update(first)
+	model = updated.(Model)
+
+	second := runTestCmd(t, model.daemonEventCmd()).(daemonEventMsg)
+	if second.event.Topic != "chat.message" {
+		t.Fatalf("expected second buffered event to reuse existing stream, got %#v", second.event)
+	}
+	if client.calls != 1 {
+		t.Fatalf("daemon event command should reuse event stream, SubscribeEvents calls=%d", client.calls)
+	}
+	updated, _ = model.Update(second)
+	model = updated.(Model)
+
+	cached := model.cache.ChatMessagesBySpace["spaces/design"]
+	if len(cached.Items) != 1 || cached.Items[0].ID != "design-new" {
+		t.Fatalf("chat.message from reused stream was not cached: %#v", cached.Items)
 	}
 }
 
@@ -607,6 +819,39 @@ type countingMessagesClient struct {
 func (c *countingMessagesClient) ChatMessages(ctx context.Context, spaceName, pageToken string) (api.Page[api.ChatMessage], error) {
 	c.calls++
 	return c.WorkspaceClient.ChatMessages(ctx, spaceName, pageToken)
+}
+
+type rotatingEventsClient struct {
+	api.WorkspaceClient
+	channels []chan api.DaemonEvent
+	calls    int
+}
+
+func (c *rotatingEventsClient) SubscribeEvents(context.Context, []string) (<-chan api.DaemonEvent, error) {
+	if c.calls >= len(c.channels) {
+		c.channels = append(c.channels, make(chan api.DaemonEvent))
+	}
+	ch := c.channels[c.calls]
+	c.calls++
+	return ch, nil
+}
+
+func runTestCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() {
+		done <- cmd()
+	}()
+	select {
+	case msg := <-done:
+		return msg
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("command timed out")
+		return nil
+	}
 }
 
 type countingWorkspaceClient struct {

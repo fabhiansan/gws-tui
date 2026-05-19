@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -72,11 +73,14 @@ type Model struct {
 	detail  viewport.Model
 	input   textarea.Model
 
-	focusedPane pane
-	loading     bool
-	err         string
-	toast       string
-	search      string
+	focusedPane       pane
+	loading           bool
+	err               string
+	toast             string
+	search            string
+	spaceFilter       string
+	spaceFilterActive bool
+	spaceFilterOrigin string
 
 	spaces        []api.Space
 	chatMessages  []api.ChatMessage
@@ -121,6 +125,7 @@ type Model struct {
 	imagePlacement  int
 	modal           *composeModal
 	helpVisible     bool
+	daemonEvents    <-chan api.DaemonEvent
 	vimComposer     vimMode
 	vimPending      string
 	vimRegister     string
@@ -243,8 +248,9 @@ type imageCachedMsg struct {
 }
 
 type daemonEventMsg struct {
-	event api.DaemonEvent
-	err   error
+	events <-chan api.DaemonEvent
+	event  api.DaemonEvent
+	err    error
 }
 
 type userResolvedMsg struct {
@@ -574,41 +580,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.realtimeRetry = 0
-		if chatMessageKey(msg.message) != "" && !m.hasSeenChatMessage(msg.message) {
-			m.markSeenChatMessage(msg.message)
-			m.rememberChatMessage(msg.message)
-			// selfUserIDs is keyed by the bare numeric id; msg.SenderID has
-			// the "users/" resource prefix. Normalize before lookup.
-			senderBareID := api.UserIDFromName(msg.message.SenderID)
-			fromSelf := senderBareID != "" && m.selfUserIDs[senderBareID]
-			if m.isSelectedSpace(msg.message.Space) {
-				m.chatMessages, _ = upsertChatMessage(m.chatMessages, msg.message)
-				// User is actively viewing; keep the daemon's read
-				// marker in sync so the badge doesn't reappear on
-				// reconnect.
-				cmds = append(cmds, m.markChatReadCmd(msg.message.Space))
-			} else if !fromSelf {
-				for i := range m.spaces {
-					if m.spaces[i].Name == msg.message.Space {
-						m.spaces[i].Unread = true
-						break
-					}
-				}
-			}
-			m.toast = "new chat message"
-			if cmd := m.resolveUserCmd(api.UserIDFromName(msg.message.SenderID)); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
-			if !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(msg.message.Space)) {
-				notify.Send("gws chat", msg.message.SenderName+": "+msg.message.Text, notify.Options{
-					Desktop:   m.cfg.NotifyDesktop,
-					Sound:     m.cfg.NotifySound,
-					SoundFile: m.cfg.NotifySoundFile,
-				})
-			}
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.applyIncomingChatMessage(msg.message, true)...)
 		cmds = append(cmds, m.subscribeCmd())
 	case imageCachedMsg:
 		delete(m.imageLoading, msg.source)
@@ -638,7 +610,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.imageVersion++
 		}
 	case daemonEventMsg:
+		if msg.events != nil {
+			m.daemonEvents = msg.events
+		}
 		if msg.err != nil {
+			m.daemonEvents = nil
 			m.err = msg.err.Error()
 			cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 				return daemonEventMsg{}
@@ -670,6 +646,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setSpaceUnread(payload.Space, true)
 					m.toast = "new chat message"
 				}
+			}
+		}
+		if msg.event.Topic == "chat.message" {
+			var message api.ChatMessage
+			if json.Unmarshal(msg.event.Payload, &message) == nil {
+				cmds = append(cmds, m.applyIncomingChatMessage(message, false)...)
 			}
 		}
 		if msg.event.Topic == "chat.read" {
@@ -762,6 +744,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.helpVisible = false
 		}
 		return m, nil
+	}
+	if m.spaceFilterActive && m.feature == FeatureChat && m.focusedPane == paneList {
+		return m.updateSpaceFilter(msg)
 	}
 	if m.feature == FeatureChat && msg.String() == "ctrl+v" {
 		return m.handleChatPaste()
@@ -964,6 +949,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.theme = theme.New(cfg.Theme, cfg.NoColor)
 		m.toast = "config reloaded"
 	case "/":
+		if m.feature == FeatureChat && m.focusedPane == paneList {
+			m.openSpaceFilter()
+			return m, nil
+		}
 		m.openSearchModal()
 	case "m":
 		return m.loadMore()
@@ -1511,6 +1500,41 @@ func (m Model) subscribeCmd() tea.Cmd {
 	}
 }
 
+func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandaloneNotify bool) []tea.Cmd {
+	var cmds []tea.Cmd
+	if chatMessageKey(message) == "" || m.hasSeenChatMessage(message) {
+		return cmds
+	}
+	m.markSeenChatMessage(message)
+	m.rememberChatMessage(message)
+	// selfUserIDs is keyed by the bare numeric id; message.SenderID has the
+	// "users/" resource prefix. Normalize before lookup.
+	senderBareID := api.UserIDFromName(message.SenderID)
+	fromSelf := senderBareID != "" && m.selfUserIDs[senderBareID]
+	if m.isSelectedSpace(message.Space) {
+		m.chatMessages, _ = upsertChatMessage(m.chatMessages, message)
+		// User is actively viewing; keep the daemon's read marker in sync so the
+		// badge doesn't reappear on reconnect.
+		cmds = append(cmds, m.markChatReadCmd(message.Space))
+	} else if !fromSelf {
+		m.setSpaceUnread(message.Space, true)
+	}
+	m.toast = "new chat message"
+	if cmd := m.resolveUserCmd(senderBareID); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{message})...)
+	if sendStandaloneNotify && !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(message.Space)) {
+		notify.Send("gws chat", message.SenderName+": "+message.Text, notify.Options{
+			Desktop:   m.cfg.NotifyDesktop,
+			Sound:     m.cfg.NotifySound,
+			SoundFile: m.cfg.NotifySoundFile,
+		})
+	}
+	m.persistWorkspaceCache()
+	return cmds
+}
+
 func (m Model) markChatReadCmd(spaceName string) tea.Cmd {
 	if spaceName == "" || !m.cfg.Daemon {
 		return nil
@@ -1533,20 +1557,25 @@ func (m Model) daemonEventCmd() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	topics := []string{"image.cached", "notify", "chat.read", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
+	topics := []string{"image.cached", "notify", "chat.message", "chat.read", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
+	events := m.daemonEvents
 	return func() tea.Msg {
-		ch, err := subscriber.SubscribeEvents(m.ctx, topics)
-		if err != nil {
-			return daemonEventMsg{err: err}
+		ch := events
+		if ch == nil {
+			var err error
+			ch, err = subscriber.SubscribeEvents(m.ctx, topics)
+			if err != nil {
+				return daemonEventMsg{err: err}
+			}
 		}
 		select {
 		case <-m.ctx.Done():
-			return daemonEventMsg{}
+			return daemonEventMsg{events: ch}
 		case event, ok := <-ch:
 			if !ok {
 				return daemonEventMsg{err: api.ErrRemoteClosed}
 			}
-			return daemonEventMsg{event: event}
+			return daemonEventMsg{events: ch, event: event}
 		}
 	}
 }
@@ -1619,6 +1648,86 @@ func (m Model) moveSelection(delta int) (Model, tea.Cmd) {
 	return m.loadSelectedChat()
 }
 
+func (m *Model) openSpaceFilter() {
+	if !m.spaceFilterActive {
+		m.spaceFilterOrigin = m.selectedSpace().Name
+	}
+	m.spaceFilterActive = true
+	m.focusedPane = paneList
+	m.toast = ""
+}
+
+func (m Model) updateSpaceFilter(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.persist()
+		m.cancel()
+		return m, tea.Quit
+	case "esc":
+		m.spaceFilterActive = false
+		m.spaceFilter = ""
+		m.restoreSpaceFilterOrigin()
+		m.spaceFilterOrigin = ""
+		return m, nil
+	case "enter":
+		m.spaceFilterActive = false
+		m.spaceFilterOrigin = ""
+		return m.loadSelectedChat()
+	case "backspace", "ctrl+h":
+		value := []rune(m.spaceFilter)
+		if len(value) > 0 {
+			m.setSpaceFilter(string(value[:len(value)-1]))
+		}
+		return m, nil
+	case "ctrl+u":
+		m.setSpaceFilter("")
+		return m, nil
+	case "up":
+		m.moveSpaceFilterSelection(-1)
+		return m, nil
+	case "down":
+		m.moveSpaceFilterSelection(1)
+		return m, nil
+	case "space":
+		m.setSpaceFilter(m.spaceFilter + " ")
+		return m, nil
+	default:
+		if len(msg.Runes) > 0 {
+			m.setSpaceFilter(m.spaceFilter + string(msg.Runes))
+		}
+		return m, nil
+	}
+}
+
+func (m *Model) setSpaceFilter(value string) {
+	m.spaceFilter = value
+	m.selected[FeatureChat] = 0
+	m.clampSelections()
+}
+
+func (m *Model) moveSpaceFilterSelection(delta int) {
+	length := len(m.visibleSpaces())
+	if length == 0 {
+		m.selected[FeatureChat] = 0
+		return
+	}
+	m.selected[FeatureChat] = clamp(m.selected[FeatureChat]+delta, length)
+}
+
+func (m *Model) restoreSpaceFilterOrigin() {
+	if m.spaceFilterOrigin == "" {
+		m.clampSelections()
+		return
+	}
+	for index, space := range m.spaces {
+		if space.Name == m.spaceFilterOrigin {
+			m.selected[FeatureChat] = index
+			return
+		}
+	}
+	m.clampSelections()
+}
+
 func (m Model) loadSelectedChat() (Model, tea.Cmd) {
 	if m.feature != FeatureChat {
 		return m, nil
@@ -1677,17 +1786,104 @@ func (m Model) listLenFor(feature Feature) int {
 }
 
 func (m Model) visibleSpaces() []api.Space {
-	if strings.TrimSpace(m.search) == "" {
+	if strings.TrimSpace(m.spaceFilter) == "" {
 		return m.spaces
 	}
-	needle := strings.ToLower(strings.TrimSpace(m.search))
-	filtered := make([]api.Space, 0, len(m.spaces))
-	for _, space := range m.spaces {
-		if strings.Contains(strings.ToLower(m.spaceLabel(space)), needle) {
-			filtered = append(filtered, space)
+	query := strings.TrimSpace(m.spaceFilter)
+	matches := make([]spaceFilterMatch, 0, len(m.spaces))
+	for index, space := range m.spaces {
+		if score, ok := fuzzySpaceScore(m.spaceSearchText(space), query); ok {
+			matches = append(matches, spaceFilterMatch{
+				space: space,
+				score: score,
+				index: index,
+			})
 		}
 	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score < matches[j].score
+		}
+		return matches[i].index < matches[j].index
+	})
+	filtered := make([]api.Space, 0, len(matches))
+	for _, match := range matches {
+		filtered = append(filtered, match.space)
+	}
 	return filtered
+}
+
+type spaceFilterMatch struct {
+	space api.Space
+	score int
+	index int
+}
+
+func (m Model) spaceSearchText(space api.Space) string {
+	return strings.Join([]string{
+		m.spaceLabel(space),
+		space.DisplayName,
+		space.FormattedName,
+		space.Name,
+		lastSegment(space.Name),
+	}, " ")
+}
+
+func fuzzySpaceScore(candidate, query string) (int, bool) {
+	candidate = strings.ToLower(candidate)
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	if len(terms) == 0 {
+		return 0, true
+	}
+	total := 0
+	for _, term := range terms {
+		score, ok := fuzzyTermScore(candidate, term)
+		if !ok {
+			return 0, false
+		}
+		total += score
+	}
+	return total, true
+}
+
+func fuzzyTermScore(candidate, term string) (int, bool) {
+	if term == "" {
+		return 0, true
+	}
+	if idx := strings.Index(candidate, term); idx >= 0 {
+		return idx, true
+	}
+	query := []rune(term)
+	haystack := []rune(candidate)
+	queryIndex := 0
+	first := -1
+	last := -1
+	gaps := 0
+	boundaryBonus := 0
+	for index, char := range haystack {
+		if char != query[queryIndex] {
+			continue
+		}
+		if first == -1 {
+			first = index
+		}
+		if last >= 0 {
+			gaps += index - last - 1
+		}
+		if index == 0 || isFuzzyBoundary(haystack[index-1]) {
+			boundaryBonus++
+		}
+		last = index
+		queryIndex++
+		if queryIndex == len(query) {
+			return 100 + first + gaps*2 - boundaryBonus*3, true
+		}
+	}
+	return 0, false
+}
+
+func isFuzzyBoundary(char rune) bool {
+	return unicode.IsSpace(char) || char == '-' || char == '_' || char == '/' || char == '#' || char == '.' || char == ','
 }
 
 func (m Model) visibleChatMessages() []api.ChatMessage {
@@ -2188,9 +2384,11 @@ func (m Model) detailRenderFingerprint() string {
 	switch m.feature {
 	case FeatureChat:
 		space := m.selectedSpace()
-		fmt.Fprintf(&b, "|chatLoading=%t|chatLoadSpace=%s|space=%s|messages=%d",
+		fmt.Fprintf(&b, "|chatLoading=%t|chatLoadSpace=%s|spaceFilter=%t,%s|space=%s|messages=%d",
 			m.chatLoading,
 			m.chatLoadSpace,
+			m.spaceFilterActive,
+			m.spaceFilter,
 			space.Name,
 			len(m.chatMessages),
 		)
