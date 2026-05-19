@@ -138,8 +138,25 @@ type Model struct {
 	detailKey        string
 	detailRenderKey  string
 	detailImageAt    map[int]api.Attachment
+	detailMessageAt  map[int]string
+	replyThreadID    string
+	replyTargetName  string
+
+	// pendingChatAttachments holds files staged for the next chat send.
+	// Populated by Ctrl+V pasting an image; drained (and the temp files
+	// deleted) after a successful send.
+	pendingChatAttachments []pendingAttachment
 
 	imageViewer *imageViewerState
+}
+
+// pendingAttachment is a file the TUI created locally (e.g. a clipboard paste)
+// and will hand off to the workspace client on the next send. Path points to a
+// temp file we own — submitAction removes it after the upload completes.
+type pendingAttachment struct {
+	path        string
+	contentType string
+	name        string
 }
 
 type loadedMsg struct {
@@ -182,6 +199,10 @@ type chatSentMsg struct {
 	pendingID string
 	message   api.ChatMessage
 	err       error
+	// attachments carries the just-drained pending uploads so the handler
+	// can restore them when the send fails. On success the closure deletes
+	// the temp files and leaves this empty.
+	attachments []pendingAttachment
 }
 
 type mailActionMsg struct {
@@ -306,15 +327,16 @@ func New(opts Options) Model {
 			FeatureCalendar: persisted.Selections[string(FeatureCalendar)],
 			FeatureMeet:     persisted.Selections[string(FeatureMeet)],
 		},
-		persisted:      persisted,
-		cache:          cache,
-		cacheLoaded:    cacheLoaded,
-		imageFiles:     map[string]string{},
-		imageLoading:   map[string]bool{},
-		imageErrors:    map[string]string{},
-		imageRenders:   map[string]inlineImageRender{},
-		imageFramePend: map[string]bool{},
-		detailImageAt:  map[int]api.Attachment{},
+		persisted:       persisted,
+		cache:           cache,
+		cacheLoaded:     cacheLoaded,
+		imageFiles:      map[string]string{},
+		imageLoading:    map[string]bool{},
+		imageErrors:     map[string]string{},
+		imageRenders:    map[string]inlineImageRender{},
+		imageFramePend:  map[string]bool{},
+		detailImageAt:   map[int]api.Attachment{},
+		detailMessageAt: map[int]string{},
 	}
 	if cacheLoaded {
 		model.hydrateWorkspaceCache(cache)
@@ -379,11 +401,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.auth = msg.auth
 		m.authRequired = m.authRequired || msg.authRequired
 		m.spaces = msg.spaces.Items
-		m.chatMessages = msg.messages.Items
+		m.chatMessages = dedupeChatMessages(msg.messages.Items)
 		m.chatOlder = msg.messages.NextPageToken
-		for _, chat := range m.chatMessages {
-			m.seenMessages[chat.ID] = true
-		}
+		m.markSeenChatMessages(m.chatMessages)
 		m.mailLabels = msg.labels
 		m.mailThreads = msg.threads.Items
 		m.mailNext = msg.threads.NextPageToken
@@ -408,15 +428,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 			break
 		}
-		m.chatMessages = msg.messages.Items
+		m.chatMessages = dedupeChatMessages(msg.messages.Items)
 		m.chatOlder = msg.messages.NextPageToken
-		for _, chat := range m.chatMessages {
-			m.seenMessages[chat.ID] = true
-		}
+		m.markSeenChatMessages(m.chatMessages)
 		if msg.refresh {
 			m.toast = "chat refreshed"
 		}
-		m.rememberChatPage(msg.spaceName, msg.messages)
+		m.rememberChatPage(msg.spaceName, api.Page[api.ChatMessage]{
+			Items:         m.chatMessages,
+			NextPageToken: msg.messages.NextPageToken,
+		})
 		// Opening a space implicitly marks it read.
 		for i := range m.spaces {
 			if m.spaces[i].Name == msg.spaceName {
@@ -438,11 +459,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.feature {
 		case FeatureChat:
 			if messages, ok := msg.items.([]api.ChatMessage); ok {
-				m.chatMessages = append(messages, m.chatMessages...)
+				m.chatMessages = dedupeChatMessages(append(messages, m.chatMessages...))
 				m.chatOlder = msg.next
-				for _, chat := range m.chatMessages {
-					m.seenMessages[chat.ID] = true
-				}
+				m.markSeenChatMessages(m.chatMessages)
 				m.toast = "older messages loaded"
 				m.persistWorkspaceCache()
 				cmds = append(cmds, m.enrichSendersCmds()...)
@@ -496,6 +515,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.persistWorkspaceCache()
 		if msg.err == nil {
 			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
+		} else if len(msg.attachments) > 0 {
+			// Put the staged uploads back so the user can retry without
+			// re-pasting. Prepended to preserve order if they paste more.
+			m.pendingChatAttachments = append(msg.attachments, m.pendingChatAttachments...)
 		}
 	case mailActionMsg:
 		if msg.err != nil {
@@ -551,15 +574,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.realtimeRetry = 0
-		if msg.message.ID != "" && !m.seenMessages[msg.message.ID] {
-			m.seenMessages[msg.message.ID] = true
+		if chatMessageKey(msg.message) != "" && !m.hasSeenChatMessage(msg.message) {
+			m.markSeenChatMessage(msg.message)
 			m.rememberChatMessage(msg.message)
 			// selfUserIDs is keyed by the bare numeric id; msg.SenderID has
 			// the "users/" resource prefix. Normalize before lookup.
 			senderBareID := api.UserIDFromName(msg.message.SenderID)
 			fromSelf := senderBareID != "" && m.selfUserIDs[senderBareID]
 			if m.isSelectedSpace(msg.message.Space) {
-				m.chatMessages = append(m.chatMessages, msg.message)
+				m.chatMessages, _ = upsertChatMessage(m.chatMessages, msg.message)
 				// User is actively viewing; keep the daemon's read
 				// marker in sync so the badge doesn't reappear on
 				// reconnect.
@@ -740,6 +763,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.feature == FeatureChat && msg.String() == "ctrl+v" {
+		return m.handleChatPaste()
+	}
+	if m.feature == FeatureChat && msg.String() == "ctrl+x" && len(m.pendingChatAttachments) > 0 {
+		return m.clearPendingChatAttachments(), nil
+	}
 	if m.focusedPane == paneAction {
 		if m.cfg.VimMode {
 			key := msg.String()
@@ -747,6 +776,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				m.focusedPane = paneList
 				m.input.Blur()
 				m.vimPending = ""
+				m.clearReplyContext()
 				return m, nil
 			}
 			if m.vimComposer == vimModeNormal && key == "enter" {
@@ -776,6 +806,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		} else if msg.String() == "esc" {
 			m.focusedPane = paneList
 			m.input.Blur()
+			m.clearReplyContext()
 			return m, nil
 		}
 		switch msg.String() {
@@ -912,6 +943,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "p":
 		return m.pasteIntoComposer()
 	case "r":
+		if m.feature == FeatureChat {
+			if msg, ok := m.chatMessageUnderCursor(); ok {
+				m.beginThreadReply(msg)
+				return m, nil
+			}
+		}
 		if len(m.imageErrors) > 0 {
 			m.imageErrors = map[string]string{}
 			m.imageVersion++
@@ -1016,11 +1053,88 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// clearPendingChatAttachments drops every staged upload and deletes the temp
+// files. Bound to Ctrl+X so users can abort an accidental paste without having
+// to send a junk message.
+func (m Model) clearPendingChatAttachments() Model {
+	for _, att := range m.pendingChatAttachments {
+		_ = os.Remove(att.path)
+	}
+	n := len(m.pendingChatAttachments)
+	m.pendingChatAttachments = nil
+	if n == 1 {
+		m.toast = "attachment cleared"
+	} else {
+		m.toast = fmt.Sprintf("%d attachments cleared", n)
+	}
+	return m
+}
+
+// handleChatPaste runs when the user presses Ctrl+V while the chat feature is
+// active. An image on the clipboard becomes a pending attachment (and focuses
+// the composer so the next keystroke is either send-text or send-image).
+// Without an image we fall back to inserting clipboard text into the composer
+// when it is focused — that mirrors what users expect Ctrl+V to do.
+func (m Model) handleChatPaste() (Model, tea.Cmd) {
+	if m.feature != FeatureChat {
+		return m, nil
+	}
+	tmp, err := os.CreateTemp("", "gws-paste-*.png")
+	if err != nil {
+		m.toast = "paste: " + err.Error()
+		return m, nil
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		m.toast = "paste: " + err.Error()
+		return m, nil
+	}
+	mime, err := pasteImageTo(tmpPath)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		// No image on clipboard — degrade gracefully to text paste when
+		// the composer is focused, otherwise just inform the user.
+		if m.focusedPane == paneAction {
+			if text, perr := pasteText(); perr == nil && text != "" {
+				m.input.InsertString(text)
+				return m, nil
+			}
+		}
+		m.toast = "no image on clipboard"
+		return m, nil
+	}
+	name := fmt.Sprintf("paste-%d.png", time.Now().Unix())
+	m.pendingChatAttachments = append(m.pendingChatAttachments, pendingAttachment{
+		path:        tmpPath,
+		contentType: mime,
+		name:        name,
+	})
+	// Move focus to the composer so Enter sends right away — the message
+	// pane is read-only, so leaving the user there would force an extra
+	// keystroke to switch panes before sending.
+	m.focusedPane = paneAction
+	m.input.Focus()
+	if m.cfg.VimMode {
+		m.vimComposer = vimModeInsert
+	}
+	if n := len(m.pendingChatAttachments); n == 1 {
+		m.toast = "image attached - Enter to send"
+	} else {
+		m.toast = fmt.Sprintf("image attached (%d pending) - Enter to send", n)
+	}
+	return m, nil
+}
+
 func (m Model) submitAction() (Model, tea.Cmd) {
 	value := strings.TrimSpace(m.input.Value())
-	if value == "" {
+	// Chat allows sending image-only messages (paste + Enter with no text),
+	// so the empty-input early return only applies when there's also nothing
+	// pending to upload.
+	if value == "" && !(m.feature == FeatureChat && len(m.pendingChatAttachments) > 0) {
 		m.focusedPane = paneList
 		m.input.Blur()
+		m.clearReplyContext()
 		return m, nil
 	}
 	switch m.feature {
@@ -1030,6 +1144,17 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 			return m, nil
 		}
 		pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
+		threadID := m.replyThreadID
+		attachments := m.pendingChatAttachments
+		m.pendingChatAttachments = nil
+		uploads := make([]api.LocalAttachment, 0, len(attachments))
+		for _, att := range attachments {
+			uploads = append(uploads, api.LocalAttachment{
+				Path:        att.path,
+				ContentType: att.contentType,
+				Name:        att.name,
+			})
+		}
 		pending := api.ChatMessage{
 			ID:         pendingID,
 			Space:      space.Name,
@@ -1038,14 +1163,29 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 			Text:       value,
 			CreateTime: time.Now(),
 			Pending:    true,
+			ThreadID:   threadID,
 		}
-		m.chatMessages = append(m.chatMessages, pending)
+		if threadID != "" {
+			pending.ParentID = lastSegmentOfName(threadID)
+		}
+		m.chatMessages, _ = upsertChatMessage(m.chatMessages, pending)
+		m.markSeenChatMessage(pending)
 		m.input.SetValue("")
 		m.focusedPane = paneList
 		m.input.Blur()
+		m.clearReplyContext()
 		return m, func() tea.Msg {
-			msg, err := m.client.SendChatMessage(m.ctx, space.Name, value)
-			return chatSentMsg{pendingID: pendingID, message: msg, err: err}
+			msg, err := m.client.SendChatMessage(m.ctx, space.Name, value, threadID, uploads)
+			if err == nil {
+				// Keep the temp files: the returned ChatMessage now points
+				// to them via LocalPath so the inline renderer can show the
+				// just-sent image without re-downloading from upstream.
+				// They get cleaned up by the OS tmp sweep eventually.
+				return chatSentMsg{pendingID: pendingID, message: msg}
+			}
+			// On failure, hand the staged pending attachments back to the
+			// handler so the user can retry without re-pasting.
+			return chatSentMsg{pendingID: pendingID, message: msg, err: err, attachments: attachments}
 		}
 	case FeatureCalendar:
 		m.input.SetValue("")
@@ -1065,6 +1205,63 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// chatMessageUnderCursor returns the chat message the detail-pane cursor is
+// currently resting on. Returns ok=false when the cursor is off-message
+// (day separator, blank line, list pane focused) so callers can fall back to
+// other behavior — used by the `r` keybinding to choose between reply and
+// refresh without clobbering refresh in views where there's no cursor.
+func (m *Model) chatMessageUnderCursor() (api.ChatMessage, bool) {
+	if m.feature != FeatureChat || len(m.chatMessages) == 0 {
+		return api.ChatMessage{}, false
+	}
+	id, ok := m.detailMessageAt[m.detailCursor]
+	if !ok || id == "" {
+		return api.ChatMessage{}, false
+	}
+	for i := range m.chatMessages {
+		if m.chatMessages[i].ID == id {
+			return m.chatMessages[i], true
+		}
+	}
+	return api.ChatMessage{}, false
+}
+
+func (m *Model) beginThreadReply(target api.ChatMessage) {
+	thread := target.ThreadID
+	if thread == "" {
+		// No thread metadata — sending without thread context creates a
+		// new top-level message instead of failing silently.
+		m.toast = "no thread info; sending as new message"
+		thread = ""
+	}
+	m.replyThreadID = thread
+	m.replyTargetName = target.SenderName
+	m.focusedPane = paneAction
+	m.input.Placeholder = fmt.Sprintf("reply to %s (esc to cancel)", target.SenderName)
+	m.input.Focus()
+	m.vimComposer = vimModeInsert
+	if thread != "" {
+		m.toast = "replying to " + target.SenderName
+	}
+}
+
+func (m *Model) clearReplyContext() {
+	m.replyThreadID = ""
+	m.replyTargetName = ""
+	m.input.Placeholder = "message"
+}
+
+func lastSegmentOfName(value string) string {
+	if value == "" {
+		return ""
+	}
+	idx := strings.LastIndex(value, "/")
+	if idx < 0 {
+		return value
+	}
+	return value[idx+1:]
 }
 
 func (m *Model) resolveUserCmd(userID string) tea.Cmd {
@@ -1519,6 +1716,85 @@ func (m Model) selectedSpace() api.Space {
 	return visible[clamp(m.selected[FeatureChat], len(visible))]
 }
 
+func chatMessageKey(msg api.ChatMessage) string {
+	if msg.Space != "" && msg.ID != "" {
+		return msg.Space + "\x00" + msg.ID
+	}
+	if msg.Name != "" {
+		return msg.Name
+	}
+	return ""
+}
+
+func sameChatMessage(a, b api.ChatMessage) bool {
+	if key := chatMessageKey(a); key != "" && key == chatMessageKey(b) {
+		return true
+	}
+	return a.Space != "" &&
+		a.Space == b.Space &&
+		a.SenderID == b.SenderID &&
+		a.Text == b.Text &&
+		!a.CreateTime.IsZero() &&
+		a.CreateTime.Equal(b.CreateTime)
+}
+
+func upsertChatMessage(items []api.ChatMessage, msg api.ChatMessage) ([]api.ChatMessage, bool) {
+	for i := range items {
+		if sameChatMessage(items[i], msg) {
+			items[i] = msg
+			return items, false
+		}
+	}
+	return append(items, msg), true
+}
+
+func dedupeChatMessages(items []api.ChatMessage) []api.ChatMessage {
+	if len(items) < 2 {
+		return items
+	}
+	out := make([]api.ChatMessage, 0, len(items))
+	for _, msg := range items {
+		out, _ = upsertChatMessage(out, msg)
+	}
+	return out
+}
+
+func (m *Model) markSeenChatMessage(msg api.ChatMessage) {
+	if msg.ID != "" {
+		m.seenMessages[msg.ID] = true
+	}
+	if msg.Name != "" {
+		m.seenMessages[msg.Name] = true
+	}
+	if key := chatMessageKey(msg); key != "" {
+		m.seenMessages[key] = true
+	}
+}
+
+func (m *Model) markSeenChatMessages(items []api.ChatMessage) {
+	for _, msg := range items {
+		m.markSeenChatMessage(msg)
+	}
+}
+
+func (m Model) hasSeenChatMessage(msg api.ChatMessage) bool {
+	if msg.ID != "" && m.seenMessages[msg.ID] {
+		return true
+	}
+	if msg.Name != "" && m.seenMessages[msg.Name] {
+		return true
+	}
+	if key := chatMessageKey(msg); key != "" && m.seenMessages[key] {
+		return true
+	}
+	for _, existing := range m.chatMessages {
+		if sameChatMessage(existing, msg) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) isSelectedSpace(space string) bool {
 	return m.selectedSpace().Name == space
 }
@@ -1850,6 +2126,13 @@ func (m *Model) updateDetailContent() {
 	} else {
 		for k := range m.detailImageAt {
 			delete(m.detailImageAt, k)
+		}
+	}
+	if m.detailMessageAt == nil {
+		m.detailMessageAt = map[int]string{}
+	} else {
+		for k := range m.detailMessageAt {
+			delete(m.detailMessageAt, k)
 		}
 	}
 	decorated, plain := m.decorateDetail(m.detailContent())

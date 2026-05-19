@@ -308,11 +308,23 @@ func (m Model) renderAction(width, height int) string {
 	} else {
 		content = m.subtle(m.actionPlaceholder())
 	}
+	if chip := m.pendingAttachmentsChip(); chip != "" {
+		content = chip + "\n" + content
+	}
 	style := m.theme.Input
 	if !focused {
 		style = style.BorderForeground(lipgloss.Color(m.theme.Subtle))
 	}
 	return paneWithTitle(style, m.title(title), content, width, height)
+}
+
+// pendingAttachmentsChip surfaces staged chat uploads above the composer so
+// users see what will be sent on Enter even after the success toast fades.
+func (m Model) pendingAttachmentsChip() string {
+	if m.feature != FeatureChat || len(m.pendingChatAttachments) == 0 {
+		return ""
+	}
+	return m.subtle(fmt.Sprintf("[attach] %d image(s) pending - Enter to send, Ctrl+X to clear", len(m.pendingChatAttachments)))
 }
 
 func (m Model) featureLabel(f Feature) string {
@@ -520,6 +532,8 @@ func (m Model) renderHelp(width, height int) string {
 		}},
 		{"Chat", []binding{
 			{"s", "toggle live subscription"},
+			{"Ctrl+V", "attach image from clipboard"},
+			{"Ctrl+X", "clear pending attachments"},
 			{"R", "refresh all workspace data"},
 		}},
 		{"Mail", []binding{
@@ -751,7 +765,11 @@ func (m *Model) chatDetail() string {
 		return centerText("No messages in this space yet. Press i to write.", m.detail.Width)
 	}
 	textWidth := m.detailTextWidth()
-	bursts := m.groupBursts(messages)
+	// Threaded grouping: each thread starter is followed by its reply
+	// bursts in chronological order, so the chat reads as a nested
+	// conversation rather than a flat timeline. The day separator still
+	// fires on date boundaries inside the (now thread-grouped) stream.
+	bursts := m.groupThreadedBursts(messages)
 	var lines []string
 	lastDay := ""
 	for _, burst := range bursts {
@@ -761,17 +779,34 @@ func (m *Model) chatDetail() string {
 			lines = append(lines, m.subtle("─── "+friendlyDay(first.CreateTime)+" ───"))
 			lastDay = day
 		}
+		burstStart := countDisplayLines(lines)
 		if bubble := m.renderBubble(burst, textWidth); len(bubble) > 0 {
 			lines = append(lines, bubble...)
 		}
 		// Attachments and cards render outside the bubble — they read
 		// better as their own visual element, and bubbles with embedded
-		// images would have to fight inline-image sizing.
+		// images would have to fight inline-image sizing. Indent them in
+		// step with the bubble so they stay visually attached to it.
 		for _, msg := range burst.messages {
-			lines = m.appendAttachmentLines(lines, msg.Attachments)
-			if cardLines := m.renderCards(msg.Cards, textWidth); len(cardLines) > 0 {
+			lines = m.appendAttachmentLines(lines, msg.Attachments, burst.indent)
+			if cardLines := m.renderCards(msg.Cards, textWidth-burst.indent); len(cardLines) > 0 {
+				if burst.indent > 0 && !burst.isSelf {
+					pad := strings.Repeat(" ", burst.indent)
+					for i := range cardLines {
+						cardLines[i] = pad + cardLines[i]
+					}
+				}
 				lines = append(lines, cardLines...)
 			}
+		}
+		// Bind every line covered by this burst to its last message so the
+		// `r` reply binding can resolve "which message is the cursor on".
+		// Using the last message means a reply to a multi-message burst
+		// lands on the freshest one — matches user intent in practice.
+		burstEnd := countDisplayLines(lines)
+		target := burst.messages[len(burst.messages)-1].ID
+		for ln := burstStart; ln < burstEnd; ln++ {
+			m.detailMessageAt[ln] = target
 		}
 		lines = append(lines, "")
 	}
@@ -780,9 +815,17 @@ func (m *Model) chatDetail() string {
 
 // appendAttachmentLines renders msg.Attachments and records each image's
 // line range in m.detailImageAt so the vim cursor can resolve "which image
-// is under me" when Enter is pressed in the detail pane.
-func (m *Model) appendAttachmentLines(lines []string, attachments []api.Attachment) []string {
+// is under me" when Enter is pressed in the detail pane. The indent argument
+// shifts the rendered lines right so attachments under a reply bubble stay
+// visually attached to it.
+func (m *Model) appendAttachmentLines(lines []string, attachments []api.Attachment, indent int) []string {
 	attLines, ranges := m.renderAttachmentsTracked(attachments)
+	if indent > 0 {
+		pad := strings.Repeat(" ", indent)
+		for i := range attLines {
+			attLines[i] = pad + attLines[i]
+		}
+	}
 	base := countDisplayLines(lines)
 	for _, r := range ranges {
 		for i := 0; i < r.rows; i++ {

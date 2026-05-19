@@ -70,8 +70,8 @@ func (c *testWorkspaceClient) ChatMessages(_ context.Context, spaceName, pageTok
 	}, nil
 }
 
-func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text string) (api.ChatMessage, error) {
-	return api.ChatMessage{
+func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text, threadID string, _ []api.LocalAttachment) (api.ChatMessage, error) {
+	msg := api.ChatMessage{
 		ID:         "sent-1",
 		Name:       spaceName + "/messages/sent-1",
 		Space:      spaceName,
@@ -79,7 +79,12 @@ func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text
 		SenderName: "Me",
 		Text:       text,
 		CreateTime: c.now,
-	}, nil
+		ThreadID:   threadID,
+	}
+	if threadID != "" {
+		msg.ParentID = "starter"
+	}
+	return msg, nil
 }
 
 func (c *testWorkspaceClient) SubscribeChat(ctx context.Context, spaceName string) (<-chan api.ChatMessage, error) {

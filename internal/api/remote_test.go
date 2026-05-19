@@ -59,7 +59,7 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 			method: "SendChatMessage",
 			result: ChatMessage{ID: "sent-1", Space: "spaces/engineering", Text: "hello"},
 			call: func(c *RemoteClient) error {
-				got, err := c.SendChatMessage(ctx, "spaces/engineering", "hello")
+				got, err := c.SendChatMessage(ctx, "spaces/engineering", "hello", "", nil)
 				if got.ID != "sent-1" {
 					return fmt.Errorf("sent=%#v", got)
 				}

@@ -77,9 +77,9 @@ func (c *RemoteClient) ChatMessages(ctx context.Context, spaceName, pageToken st
 	return out, err
 }
 
-func (c *RemoteClient) SendChatMessage(ctx context.Context, spaceName, text string) (ChatMessage, error) {
+func (c *RemoteClient) SendChatMessage(ctx context.Context, spaceName, text, threadID string, attachments []LocalAttachment) (ChatMessage, error) {
 	var out ChatMessage
-	err := c.request(ctx, "SendChatMessage", SendChatMessageParams{SpaceName: spaceName, Text: text}, &out)
+	err := c.request(ctx, "SendChatMessage", SendChatMessageParams{SpaceName: spaceName, Text: text, ThreadID: threadID, Attachments: attachments}, &out)
 	return out, err
 }
 

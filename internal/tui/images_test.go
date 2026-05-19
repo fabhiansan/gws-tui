@@ -351,9 +351,9 @@ func TestAppendAttachmentLinesMapsSecondImagePastMultilinePreview(t *testing.T) 
 	att2 := api.Attachment{Name: "second.png", URL: src2}
 
 	lines := []string{"Alice    14:30", "  hello"}
-	lines = model.appendAttachmentLines(lines, []api.Attachment{att1})
+	lines = model.appendAttachmentLines(lines, []api.Attachment{att1}, 0)
 	lines = append(lines, "", "Bob    14:31", "  reply")
-	lines = model.appendAttachmentLines(lines, []api.Attachment{att2})
+	lines = model.appendAttachmentLines(lines, []api.Attachment{att2}, 0)
 
 	plain := strings.Split(strings.Join(lines, "\n"), "\n")
 	for line, att := range model.detailImageAt {

@@ -121,6 +121,39 @@ func emitFakeChatEventStream() {
 	select {}
 }
 
+func TestCommandClientSendChatMessageUploadsAttachments(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paste.png")
+	if err := os.WriteFile(path, []byte("fake-png-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewCommandClient(os.Args[0])
+	msg, err := client.SendChatMessage(context.Background(), "spaces/engineering", "hi", "", []LocalAttachment{{
+		Path:        path,
+		ContentType: "image/png",
+		Name:        "paste.png",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ID != "msg-with-attachment" {
+		t.Fatalf("unexpected message id: %q", msg.ID)
+	}
+	if len(msg.Attachments) == 0 {
+		t.Fatalf("expected returned message to include attachments, got none")
+	}
+	got := msg.Attachments[0]
+	if got.LocalPath != path {
+		t.Fatalf("expected LocalPath to be stamped from upload, got %q want %q", got.LocalPath, path)
+	}
+	if got.ContentType != "image/png" {
+		t.Fatalf("expected contentType image/png, got %q", got.ContentType)
+	}
+}
+
 func TestCommandClientDownloadAttachmentUsesMediaResourceName(t *testing.T) {
 	t.Setenv("GWS_FAKE_COMMAND", "1")
 
@@ -198,6 +231,89 @@ func fakeCommand() {
 				}
 			],
 			"nextPageToken": "older"
+		}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "media" &&
+		os.Args[3] == "upload":
+		if params["parent"] != "spaces/engineering" {
+			fmt.Fprintf(os.Stderr, "unexpected parent: %v\n", params["parent"])
+			os.Exit(2)
+		}
+		uploadIndex := -1
+		contentType := ""
+		for i, arg := range os.Args {
+			if arg == "--upload" && i+1 < len(os.Args) {
+				uploadIndex = i + 1
+			}
+			if arg == "--upload-content-type" && i+1 < len(os.Args) {
+				contentType = os.Args[i+1]
+			}
+		}
+		if uploadIndex == -1 {
+			fmt.Fprintln(os.Stderr, "missing --upload")
+			os.Exit(2)
+		}
+		// Upstream rejects absolute paths; assert the client passes a
+		// cwd-relative basename instead.
+		if filepath.IsAbs(os.Args[uploadIndex]) {
+			fmt.Fprintf(os.Stderr, "expected basename, got absolute path: %q\n", os.Args[uploadIndex])
+			os.Exit(2)
+		}
+		if _, err := os.Stat(os.Args[uploadIndex]); err != nil {
+			fmt.Fprintf(os.Stderr, "upload file missing: %v\n", err)
+			os.Exit(2)
+		}
+		if contentType != "image/png" {
+			fmt.Fprintf(os.Stderr, "unexpected content type: %q\n", contentType)
+			os.Exit(2)
+		}
+		fmt.Print(`{"attachmentDataRef":{"attachmentUploadToken":"upload-token-1"}}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "create":
+		jsonIndex := -1
+		for i, arg := range os.Args {
+			if arg == "--json" && i+1 < len(os.Args) {
+				jsonIndex = i + 1
+				break
+			}
+		}
+		if jsonIndex == -1 {
+			fmt.Fprintln(os.Stderr, "missing --json")
+			os.Exit(2)
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(os.Args[jsonIndex]), &body); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid body: %v\n", err)
+			os.Exit(2)
+		}
+		atts, ok := body["attachment"].([]any)
+		if !ok || len(atts) != 1 {
+			fmt.Fprintf(os.Stderr, "expected one attachment in body, got: %v\n", body["attachment"])
+			os.Exit(2)
+		}
+		first, _ := atts[0].(map[string]any)
+		ref, _ := first["attachmentDataRef"].(map[string]any)
+		if ref["attachmentUploadToken"] != "upload-token-1" {
+			fmt.Fprintf(os.Stderr, "unexpected attachmentDataRef: %v\n", ref)
+			os.Exit(2)
+		}
+		fmt.Print(`{
+			"name": "spaces/engineering/messages/msg-with-attachment",
+			"text": "hi",
+			"createTime": "2026-05-18T10:00:00+07:00",
+			"sender": {"name": "users/me", "displayName": "Me"},
+			"attachment": [{
+				"name": "spaces/engineering/messages/msg-with-attachment/attachments/att-1",
+				"contentName": "paste.png",
+				"contentType": "image/png",
+				"thumbnailUri": "https://chat.google.com/u/0/api/thumb/att-1",
+				"downloadUri": "https://chat.google.com/u/0/api/dl/att-1",
+				"attachmentDataRef": {"resourceName": "spaces/engineering/attachments/att-1"}
+			}]
 		}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "chat" &&

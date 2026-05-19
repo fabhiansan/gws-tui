@@ -71,6 +71,15 @@ func (s Space) Title() string {
 	return "unknown space"
 }
 
+// LocalAttachment is a pending upload from the TUI: a file on the local
+// filesystem the daemon should push through `chat media upload` before
+// embedding the returned resourceName in messages.create.
+type LocalAttachment struct {
+	Path        string `json:"path"`
+	ContentType string `json:"contentType,omitempty"`
+	Name        string `json:"name,omitempty"`
+}
+
 type Attachment struct {
 	ID           string `json:"id,omitempty"`
 	ResourceName string `json:"resourceName,omitempty"`
@@ -319,7 +328,7 @@ type WorkspaceClient interface {
 	AuthStatus(context.Context) (AuthStatus, error)
 	ChatSpaces(context.Context) (Page[Space], error)
 	ChatMessages(ctx context.Context, spaceName, pageToken string) (Page[ChatMessage], error)
-	SendChatMessage(ctx context.Context, spaceName, text string) (ChatMessage, error)
+	SendChatMessage(ctx context.Context, spaceName, text, threadID string, attachments []LocalAttachment) (ChatMessage, error)
 	SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error)
 	ChatMembers(ctx context.Context, spaceName string) ([]SpaceMember, error)
 	PeopleGet(ctx context.Context, userID string) (Person, error)

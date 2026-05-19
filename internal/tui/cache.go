@@ -64,11 +64,9 @@ func (m *Model) applyCachedSelectedChat() bool {
 		m.chatOlder = ""
 		return false
 	}
-	m.chatMessages = page.Items
+	m.chatMessages = dedupeChatMessages(page.Items)
 	m.chatOlder = page.NextPageToken
-	for _, chat := range m.chatMessages {
-		m.seenMessages[chat.ID] = true
-	}
+	m.markSeenChatMessages(m.chatMessages)
 	return true
 }
 
@@ -98,7 +96,7 @@ func (m *Model) rememberChatMessage(message api.ChatMessage) {
 	m.cache.EnsureMaps()
 	page := m.cache.ChatMessagesBySpace[message.Space]
 	for i := range page.Items {
-		if page.Items[i].ID == message.ID {
+		if sameChatMessage(page.Items[i], message) {
 			page.Items[i] = message
 			m.cache.ChatMessagesBySpace[message.Space] = page
 			return

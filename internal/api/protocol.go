@@ -51,8 +51,10 @@ type ChatMessagesParams struct {
 }
 
 type SendChatMessageParams struct {
-	SpaceName string `json:"space_name"`
-	Text      string `json:"text"`
+	SpaceName   string            `json:"space_name"`
+	Text        string            `json:"text"`
+	ThreadID    string            `json:"thread_id,omitempty"`
+	Attachments []LocalAttachment `json:"attachments,omitempty"`
 }
 
 type SpaceNameParams struct {

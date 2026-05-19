@@ -50,8 +50,8 @@ func (c *testWorkspaceClient) ChatMessages(_ context.Context, spaceName, pageTok
 	}}}, nil
 }
 
-func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text string) (api.ChatMessage, error) {
-	return api.ChatMessage{ID: "sent-1", Space: spaceName, Text: text, SenderName: "Me", CreateTime: c.now}, nil
+func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text, threadID string, _ []api.LocalAttachment) (api.ChatMessage, error) {
+	return api.ChatMessage{ID: "sent-1", Space: spaceName, Text: text, SenderName: "Me", CreateTime: c.now, ThreadID: threadID}, nil
 }
 
 func (c *testWorkspaceClient) SubscribeChat(context.Context, string) (<-chan api.ChatMessage, error) {

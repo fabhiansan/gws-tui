@@ -146,10 +146,49 @@ func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken s
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].CreateTime.Before(items[j].CreateTime)
 	})
+	linkThreadReplies(items)
 	return Page[ChatMessage]{Items: items, NextPageToken: raw.NextPageToken}, nil
 }
 
-func (c *CommandClient) SendChatMessage(ctx context.Context, spaceName, text string) (ChatMessage, error) {
+// linkThreadReplies marks every message after the first in a given thread as a
+// reply by setting ParentID to the starter's ID. Walks in chronological order
+// so the earliest message per thread wins the starter slot. Messages whose
+// starter falls outside this page get a structural fallback: Google Chat
+// thread-starter message IDs share their prefix with the thread key
+// (e.g. thread "spaces/X/threads/AAA" → starter message ID "AAA" or "AAA.AAA").
+func linkThreadReplies(items []ChatMessage) {
+	starter := make(map[string]string, len(items))
+	for i := range items {
+		thread := items[i].ThreadID
+		if thread == "" {
+			continue
+		}
+		if id, ok := starter[thread]; ok {
+			items[i].ParentID = id
+			continue
+		}
+		if isThreadStarter(items[i].ID, thread) {
+			starter[thread] = items[i].ID
+			continue
+		}
+		items[i].ParentID = lastSegment(thread)
+		starter[thread] = lastSegment(thread)
+	}
+}
+
+func isThreadStarter(messageID, threadName string) bool {
+	key := lastSegment(threadName)
+	if key == "" || messageID == "" {
+		return true
+	}
+	if messageID == key {
+		return true
+	}
+	prefix, _, ok := strings.Cut(messageID, ".")
+	return ok && prefix == key
+}
+
+func (c *CommandClient) SendChatMessage(ctx context.Context, spaceName, text, threadID string, attachments []LocalAttachment) (ChatMessage, error) {
 	var raw struct {
 		Name       string `json:"name"`
 		Text       string `json:"text"`
@@ -158,15 +197,100 @@ func (c *CommandClient) SendChatMessage(ctx context.Context, spaceName, text str
 			Name        string `json:"name"`
 			DisplayName string `json:"displayName"`
 		} `json:"sender"`
+		Thread struct {
+			Name string `json:"name"`
+		} `json:"thread"`
+		Attachment  []rawChatAttachment `json:"attachment"`
+		Attachments []rawChatAttachment `json:"attachments"`
 	}
-	body, _ := json.Marshal(map[string]any{"text": text})
-	err := c.runJSON(ctx, &raw, "chat", "spaces", "messages", "create", "--params", fmt.Sprintf(`{"parent":%q}`, spaceName), "--json", string(body), "--format", "json")
+	uploaded := make([]map[string]any, 0, len(attachments))
+	for _, att := range attachments {
+		ref, err := c.uploadChatAttachment(ctx, spaceName, att)
+		if err != nil {
+			return ChatMessage{}, fmt.Errorf("upload %s: %w", att.Path, err)
+		}
+		// Prefer the upload token — that's what fresh uploads return and
+		// what messages.create expects. resourceName works too but is
+		// only present after the upload has been referenced elsewhere.
+		dataRef := map[string]any{}
+		if ref.UploadToken != "" {
+			dataRef["attachmentUploadToken"] = ref.UploadToken
+		} else {
+			dataRef["resourceName"] = ref.ResourceName
+		}
+		entry := map[string]any{"attachmentDataRef": dataRef}
+		if att.ContentType != "" {
+			entry["contentType"] = att.ContentType
+		}
+		if att.Name != "" {
+			entry["contentName"] = att.Name
+		}
+		uploaded = append(uploaded, entry)
+	}
+	params := map[string]any{"parent": spaceName}
+	bodyMap := map[string]any{"text": text}
+	if len(uploaded) > 0 {
+		bodyMap["attachment"] = uploaded
+	}
+	if threadID != "" {
+		bodyMap["thread"] = map[string]any{"name": threadID}
+		params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+	}
+	paramsJSON, _ := json.Marshal(params)
+	body, _ := json.Marshal(bodyMap)
+	err := c.runJSON(ctx, &raw, "chat", "spaces", "messages", "create", "--params", string(paramsJSON), "--json", string(body), "--format", "json")
 	if err != nil {
 		return ChatMessage{}, err
 	}
 	created, _ := time.Parse(time.RFC3339, raw.CreateTime)
 	bodyText := fallback(raw.Text, text)
-	return ChatMessage{ID: lastSegment(raw.Name), Name: raw.Name, Space: spaceName, SenderID: raw.Sender.Name, SenderName: fallback(raw.Sender.DisplayName, "You"), Text: bodyText, Attachments: ImageAttachmentsFromText(bodyText), CreateTime: created}, nil
+	parent := ""
+	if threadID != "" {
+		parent = lastSegment(threadID)
+	}
+	serverAttachments := MergeAttachments(
+		chatAttachments(raw.Attachment),
+		chatAttachments(raw.Attachments),
+	)
+	// Order matches the request body, which is the order of `attachments`
+	// here. Stamp each server-returned attachment with the temp file we
+	// just uploaded so the inline renderer can render without a roundtrip.
+	for i := range serverAttachments {
+		if i < len(attachments) && attachments[i].Path != "" {
+			serverAttachments[i].LocalPath = attachments[i].Path
+			if serverAttachments[i].ContentType == "" {
+				serverAttachments[i].ContentType = attachments[i].ContentType
+			}
+			if serverAttachments[i].Name == "" {
+				serverAttachments[i].Name = attachments[i].Name
+			}
+		}
+	}
+	// If upstream omitted the attachment list entirely (older builds), fall
+	// back to synthesizing entries from the local files so the bubble still
+	// shows what the user just sent.
+	if len(serverAttachments) == 0 && len(attachments) > 0 {
+		for _, att := range attachments {
+			serverAttachments = append(serverAttachments, Attachment{
+				LocalPath:   att.Path,
+				ContentType: att.ContentType,
+				Name:        att.Name,
+			})
+		}
+	}
+	mergedAttachments := MergeAttachments(serverAttachments, ImageAttachmentsFromText(bodyText))
+	return ChatMessage{
+		ID:          lastSegment(raw.Name),
+		Name:        raw.Name,
+		Space:       spaceName,
+		SenderID:    raw.Sender.Name,
+		SenderName:  fallback(raw.Sender.DisplayName, "You"),
+		Text:        bodyText,
+		Attachments: mergedAttachments,
+		CreateTime:  created,
+		ThreadID:    fallback(raw.Thread.Name, threadID),
+		ParentID:    parent,
+	}, nil
 }
 
 // SubscribeChat opens a long-running stream of new chat messages for the given
@@ -504,6 +628,132 @@ func chatAttachments(raw []rawChatAttachment) []Attachment {
 		})
 	}
 	return NormalizeAttachments(attachments)
+}
+
+// uploadedAttachmentRef captures whichever pointer the API gave us back for a
+// freshly uploaded attachment. Fresh uploads return an attachmentUploadToken
+// that messages.create consumes directly; resourceName only appears once a
+// message references the upload. We carry both so the caller picks the right
+// field when building the create-message body.
+type uploadedAttachmentRef struct {
+	UploadToken  string
+	ResourceName string
+}
+
+// uploadChatAttachment pushes a local file through `chat media upload` and
+// returns the upload reference the API hands back. messages.create needs that
+// ref to embed the upload as a real attachment on the next message.
+func (c *CommandClient) uploadChatAttachment(ctx context.Context, spaceName string, att LocalAttachment) (uploadedAttachmentRef, error) {
+	var empty uploadedAttachmentRef
+	if att.Path == "" {
+		return empty, errors.New("attachment path is empty")
+	}
+	if spaceName == "" {
+		return empty, errors.New("space name is empty")
+	}
+	if c.path == "" {
+		return empty, errors.New("gws path is empty")
+	}
+	filename := att.Name
+	if filename == "" {
+		filename = filepath.Base(att.Path)
+	}
+	params, _ := json.Marshal(map[string]string{"parent": spaceName})
+	body, _ := json.Marshal(map[string]any{
+		"filename": filename,
+	})
+	// Upstream rejects --upload paths that resolve outside the current
+	// working directory. Run from the file's folder and pass only the
+	// basename so the guard sees a cwd-relative path. DownloadAttachment
+	// applies the same pattern.
+	args := []string{"chat", "media", "upload",
+		"--params", string(params),
+		"--json", string(body),
+		"--upload", filepath.Base(att.Path),
+	}
+	if att.ContentType != "" {
+		args = append(args, "--upload-content-type", att.ContentType)
+	}
+	args = append(args, "--format", "json")
+	cmd := exec.CommandContext(ctx, c.path, args...)
+	cmd.Dir = filepath.Dir(att.Path)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		if stderr != "" {
+			return empty, fmt.Errorf("gws media upload failed: %s", stderr)
+		}
+		return empty, fmt.Errorf("gws media upload failed: %w", err)
+	}
+	// Fresh uploads return an attachmentUploadToken — that token is what
+	// messages.create wants in attachmentDataRef. resourceName only exists
+	// after a message has referenced the upload, so it usually isn't here.
+	// Probe both (plus snake_case variants) so we tolerate upstream drift.
+	var resp map[string]any
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return empty, fmt.Errorf("decode media upload response: %w (raw=%s)", err, truncate(string(out), 400))
+	}
+	ref := extractAttachmentRef(resp)
+	if ref.UploadToken == "" && ref.ResourceName == "" {
+		return empty, fmt.Errorf("media upload response missing attachmentUploadToken/resourceName (raw=%s)", truncate(string(out), 400))
+	}
+	return ref, nil
+}
+
+// extractAttachmentRef walks the known response shapes for Google Chat media
+// upload and returns the upload token and/or resource name. Tolerates the
+// camelCase docs shape, snake_case variants some upstream builds emit, and a
+// bare Attachment resource with `name`.
+func extractAttachmentRef(resp map[string]any) uploadedAttachmentRef {
+	var out uploadedAttachmentRef
+	if resp == nil {
+		return out
+	}
+	for _, key := range []string{"attachmentDataRef", "attachment_data_ref"} {
+		nested, ok := resp[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, inner := range []string{"attachmentUploadToken", "attachment_upload_token"} {
+			if s, ok := nested[inner].(string); ok && s != "" {
+				out.UploadToken = s
+				break
+			}
+		}
+		for _, inner := range []string{"resourceName", "resource_name"} {
+			if s, ok := nested[inner].(string); ok && s != "" {
+				out.ResourceName = s
+				break
+			}
+		}
+		if out.UploadToken != "" || out.ResourceName != "" {
+			return out
+		}
+	}
+	for _, key := range []string{"attachmentUploadToken", "attachment_upload_token"} {
+		if s, ok := resp[key].(string); ok && s != "" {
+			out.UploadToken = s
+			return out
+		}
+	}
+	for _, key := range []string{"resourceName", "resource_name", "name"} {
+		if s, ok := resp[key].(string); ok && s != "" {
+			out.ResourceName = s
+			return out
+		}
+	}
+	return out
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated)"
 }
 
 func (c *CommandClient) DownloadAttachment(ctx context.Context, attachment Attachment, outputPath string) error {

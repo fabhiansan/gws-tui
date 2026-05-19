@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -333,6 +335,40 @@ func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
 	}
 }
 
+func TestRealtimeChatMessageDedupesDuplicateTriggers(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.spaces = []api.Space{{Name: "spaces/engineering", DisplayName: "#engineering", Live: true}}
+	model.selected[FeatureChat] = 0
+	msg := api.ChatMessage{
+		ID:         "live-1",
+		Name:       "spaces/engineering/messages/live-1",
+		Space:      "spaces/engineering",
+		SenderID:   "users/alice",
+		SenderName: "Alice",
+		Text:       "masukk ke notiff",
+		CreateTime: time.Date(2026, 5, 19, 6, 51, 20, 153455000, time.UTC),
+	}
+
+	updated, _ := model.Update(realtimeMsg{message: msg})
+	model = updated.(Model)
+	updated, _ = model.Update(realtimeMsg{message: msg})
+	model = updated.(Model)
+
+	if len(model.chatMessages) != 1 {
+		t.Fatalf("duplicate live trigger should render one message, got %#v", model.chatMessages)
+	}
+	if model.chatMessages[0].Text != "masukk ke notiff" {
+		t.Fatalf("unexpected message kept: %#v", model.chatMessages[0])
+	}
+}
+
 func TestDaemonChatReadEventClearsSpaceUnread(t *testing.T) {
 	model := New(Options{
 		Client: newTestWorkspaceClient(),
@@ -399,6 +435,83 @@ func TestRefreshKeyOnlyReloadsMailFeature(t *testing.T) {
 	}
 	if model.toast != "mail refreshed" {
 		t.Fatalf("expected mail refreshed toast, got %q", model.toast)
+	}
+}
+
+func TestChatCtrlXClearsPendingAttachments(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.png")
+	pathB := filepath.Join(dir, "b.png")
+	for _, p := range []string{pathA, pathB} {
+		if err := os.WriteFile(p, []byte("png"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.pendingChatAttachments = []pendingAttachment{
+		{path: pathA, contentType: "image/png", name: "a.png"},
+		{path: pathB, contentType: "image/png", name: "b.png"},
+	}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyCtrlX})
+	if cmd != nil {
+		t.Fatalf("clear should not return a command, got %v", cmd)
+	}
+	if len(updated.pendingChatAttachments) != 0 {
+		t.Fatalf("expected pending list cleared, got %d", len(updated.pendingChatAttachments))
+	}
+	if !strings.Contains(updated.toast, "cleared") {
+		t.Fatalf("expected clear toast, got %q", updated.toast)
+	}
+	for _, p := range []string{pathA, pathB} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, stat err=%v", p, err)
+		}
+	}
+}
+
+func TestChatSentFailureRestoresPendingAttachments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paste.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.chatMessages = []api.ChatMessage{{ID: "pending-1", Space: "spaces/engineering", Text: "hi", Pending: true}}
+	model.seenMessages = map[string]bool{}
+
+	failure := chatSentMsg{
+		pendingID:   "pending-1",
+		err:         errors.New("network down"),
+		attachments: []pendingAttachment{{path: path, contentType: "image/png", name: "paste.png"}},
+	}
+	updated, _ := model.Update(failure)
+	m := updated.(Model)
+
+	if len(m.pendingChatAttachments) != 1 || m.pendingChatAttachments[0].path != path {
+		t.Fatalf("expected pending attachments restored, got %#v", m.pendingChatAttachments)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("attachment file should still exist after failure, got %v", err)
+	}
+	if !strings.Contains(m.err, "network down") {
+		t.Fatalf("expected send error surfaced, got %q", m.err)
 	}
 }
 

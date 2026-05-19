@@ -19,6 +19,12 @@ const burstWindow = 5 * time.Minute
 // Below this threshold chatDetail falls back to plain inline rendering.
 const minBubbleWidth = 24
 
+// threadReplyIndent is the left-margin in cells applied to reply bubbles so
+// they read as nested under the thread starter. Picked to roughly match the
+// avatar/gutter offset Slack/Google Chat use — wide enough to register as a
+// branch, narrow enough to keep usable text width on small terminals.
+const threadReplyIndent = 4
+
 // messageBurst is a run of consecutive messages from the same sender within
 // burstWindow. The chat detail pane renders one bubble per burst rather than
 // per message — that's the trick that makes "bubble everything" cheaper than
@@ -27,6 +33,7 @@ type messageBurst struct {
 	senderID   string
 	senderName string
 	isSelf     bool
+	indent     int // left padding cells; non-zero for reply bursts under a thread starter
 	messages   []api.ChatMessage
 }
 
@@ -61,6 +68,53 @@ func (m *Model) groupBursts(messages []api.ChatMessage) []messageBurst {
 	return bursts
 }
 
+// groupThreadedBursts reorders messages so that each thread starter is
+// immediately followed by its replies, then bursts the result. The first
+// burst of every thread renders at the normal column; subsequent bursts get
+// indented so the reply chain reads as a branch beneath the starter rather
+// than as standalone messages scattered in chronological order.
+func (m *Model) groupThreadedBursts(messages []api.ChatMessage) []messageBurst {
+	threads := orderByThread(messages)
+	var out []messageBurst
+	for _, thread := range threads {
+		bursts := m.groupBursts(thread)
+		for i := range bursts {
+			if i > 0 {
+				bursts[i].indent = threadReplyIndent
+			}
+		}
+		out = append(out, bursts...)
+	}
+	return out
+}
+
+// orderByThread groups messages by their ThreadID (falling back to the
+// message ID for messages with no thread metadata), preserving:
+//   - the order in which threads first appear (== chronological order of the
+//     earliest visible message per thread, since the caller sorts ascending)
+//   - chronological order within each thread.
+//
+// Messages whose starter is outside the current page still cluster with their
+// siblings; the first one we see acts as the visible anchor.
+func orderByThread(messages []api.ChatMessage) [][]api.ChatMessage {
+	index := map[string]int{}
+	var groups [][]api.ChatMessage
+	for _, msg := range messages {
+		key := msg.ThreadID
+		if key == "" {
+			key = msg.ID
+		}
+		i, ok := index[key]
+		if !ok {
+			i = len(groups)
+			index[key] = i
+			groups = append(groups, nil)
+		}
+		groups[i] = append(groups[i], msg)
+	}
+	return groups
+}
+
 // burstHasText reports whether any message in the burst has non-empty text.
 // Card-only messages (Braga Bot etc.) have empty Text and only Cards; we
 // suppress the bubble for those and let the card renderer handle the visual.
@@ -84,7 +138,12 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 		return m.renderBubblePlain(burst, textWidth)
 	}
 
-	maxBubbleW := textWidth
+	// Reply bursts get pulled in from both sides so the bubble visually
+	// nests under its thread starter. We shrink the bubble's max width by
+	// the indent so the right edge for self bubbles still lands at the
+	// same column as a non-reply self bubble — only the left edge moves.
+	indent := burst.indent
+	maxBubbleW := textWidth - indent
 	if maxBubbleW < minBubbleWidth {
 		maxBubbleW = minBubbleWidth
 	}
@@ -127,8 +186,15 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 
 	boxLines := strings.Split(box, "\n")
 	if burst.isSelf {
+		// Right-align to the full textWidth so self bubbles continue to
+		// hug the right wall regardless of indent.
 		for i, line := range boxLines {
 			boxLines[i] = rightAlign(line, textWidth)
+		}
+	} else if indent > 0 {
+		pad := strings.Repeat(" ", indent)
+		for i, line := range boxLines {
+			boxLines[i] = pad + line
 		}
 	}
 	return boxLines
@@ -138,6 +204,7 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 // original inline format. Keeps the TUI usable when someone shrinks the
 // window below ~24 columns.
 func (m *Model) renderBubblePlain(burst messageBurst, textWidth int) []string {
+	indentPad := strings.Repeat(" ", burst.indent)
 	var lines []string
 	for i, msg := range burst.messages {
 		if i == 0 || burst.messages[i-1].CreateTime.Day() != msg.CreateTime.Day() {
@@ -150,6 +217,8 @@ func (m *Model) renderBubblePlain(burst messageBurst, textWidth int) []string {
 			header := name + "    " + msg.CreateTime.Format("15:04")
 			if burst.isSelf {
 				header = rightAlign(header, textWidth)
+			} else if burst.indent > 0 {
+				header = indentPad + header
 			}
 			lines = append(lines, header)
 		}
@@ -158,12 +227,14 @@ func (m *Model) renderBubblePlain(burst messageBurst, textWidth int) []string {
 			prefix = "  " + m.icon("↪", ">") + " "
 		}
 		prefixW := lipgloss.Width(prefix)
-		wrapW := max(8, textWidth-prefixW)
+		wrapW := max(8, textWidth-prefixW-burst.indent)
 		for _, line := range strings.Split(msg.Text, "\n") {
 			for _, sub := range strings.Split(ansi.Wrap(displayText(line), wrapW, " -"), "\n") {
 				out := prefix + sub
 				if burst.isSelf {
 					out = rightAlign(out, textWidth)
+				} else if burst.indent > 0 {
+					out = indentPad + out
 				}
 				lines = append(lines, out)
 			}

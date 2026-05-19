@@ -422,7 +422,7 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		msg, err := s.client.SendChatMessage(ctx, p.SpaceName, p.Text)
+		msg, err := s.client.SendChatMessage(ctx, p.SpaceName, p.Text, p.ThreadID, p.Attachments)
 		if err == nil {
 			s.handleChatMessage(msg, false)
 		}
