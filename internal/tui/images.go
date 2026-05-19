@@ -21,7 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi/kitty"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 	"golang.org/x/image/draw"
 )
 

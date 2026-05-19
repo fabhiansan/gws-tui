@@ -197,6 +197,20 @@ func (s MeetSpace) IsActive() bool {
 	return s.Active
 }
 
+// Pinner is implemented by clients that can ask the daemon to keep a chat
+// space subscribed across TUI sessions. Only the RemoteClient implements it;
+// the TUI uses a type assertion to detect daemon mode.
+type Pinner interface {
+	PinChatSpace(ctx context.Context, spaceName string) error
+	UnpinChatSpace(ctx context.Context, spaceName string) error
+}
+
+// ChatReader is implemented by clients that can mark a chat space as read on
+// the daemon. The daemon tracks last-read timestamps to compute Space.Unread.
+type ChatReader interface {
+	MarkChatRead(ctx context.Context, spaceName string) error
+}
+
 type WorkspaceClient interface {
 	AuthStatus(context.Context) (AuthStatus, error)
 	ChatSpaces(context.Context) (Page[Space], error)

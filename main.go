@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/fabhiantomaoludyo/gws-tui/cmd"
+	"github.com/fabhiansan/gws-tui/cmd"
 )
 
 func main() {

@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi/kitty"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui/theme"
+	"github.com/fabhiansan/gws-tui/internal/tui/theme"
 )
 
 func newDetailVimModel(t *testing.T, lines int) *Model {

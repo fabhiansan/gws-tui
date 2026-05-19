@@ -11,27 +11,29 @@ import (
 )
 
 type Config struct {
-	InitialFeature     string
-	Theme              string
-	NoIcons            bool
-	NoColor            bool
-	Daemon             bool
-	DaemonSocket       string
-	DaemonAutospawn    bool
-	DaemonLog          string
-	DaemonPIDFile      string
-	NotifyDesktop      bool
-	NotifySound        bool
-	NotifySoundFile    string
-	InlineImages       bool
-	VimMode            bool
-	ConfigPath         string
-	StatePath          string
-	CachePath          string
-	ImageCacheDir      string
-	DraftDir           string
-	LogPath            string
-	AllowFixtureNotice bool
+	InitialFeature         string
+	Theme                  string
+	NoIcons                bool
+	NoColor                bool
+	Daemon                 bool
+	DaemonSocket           string
+	DaemonAutospawn        bool
+	DaemonLog              string
+	DaemonPIDFile          string
+	DaemonAutoSubscribe    bool
+	DaemonAutoSubscribeMax int
+	NotifyDesktop          bool
+	NotifySound            bool
+	NotifySoundFile        string
+	InlineImages           bool
+	VimMode                bool
+	ConfigPath             string
+	StatePath              string
+	CachePath              string
+	ImageCacheDir          string
+	DraftDir               string
+	LogPath                string
+	AllowFixtureNotice     bool
 }
 
 func LoadConfig() (Config, error) {
@@ -41,24 +43,26 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		InitialFeature:     "chat",
-		Theme:              "catppuccin",
-		DaemonSocket:       defaultDaemonSocket(cacheBase),
-		DaemonAutospawn:    true,
-		DaemonLog:          filepath.Join(cacheBase, "daemon.log"),
-		DaemonPIDFile:      defaultDaemonPIDFile(cacheBase),
-		NotifyDesktop:      true,
-		NotifySound:        true,
-		NotifySoundFile:    "/System/Library/Sounds/Glass.aiff",
-		InlineImages:       true,
-		VimMode:            true,
-		ConfigPath:         filepath.Join(configBase, "tui.toml"),
-		StatePath:          filepath.Join(configBase, "tui-state.json"),
-		CachePath:          filepath.Join(cacheBase, "tui-cache.json"),
-		ImageCacheDir:      filepath.Join(cacheBase, "images"),
-		DraftDir:           filepath.Join(cacheBase, "drafts"),
-		LogPath:            filepath.Join(cacheBase, "tui.log"),
-		AllowFixtureNotice: true,
+		InitialFeature:         "chat",
+		Theme:                  "catppuccin",
+		DaemonSocket:           defaultDaemonSocket(cacheBase),
+		DaemonAutospawn:        true,
+		DaemonLog:              filepath.Join(cacheBase, "daemon.log"),
+		DaemonPIDFile:          defaultDaemonPIDFile(cacheBase),
+		DaemonAutoSubscribe:    true,
+		DaemonAutoSubscribeMax: 20,
+		NotifyDesktop:          true,
+		NotifySound:            true,
+		NotifySoundFile:        "/System/Library/Sounds/Glass.aiff",
+		InlineImages:           true,
+		VimMode:                true,
+		ConfigPath:             filepath.Join(configBase, "tui.toml"),
+		StatePath:              filepath.Join(configBase, "tui-state.json"),
+		CachePath:              filepath.Join(cacheBase, "tui-cache.json"),
+		ImageCacheDir:          filepath.Join(cacheBase, "images"),
+		DraftDir:               filepath.Join(cacheBase, "drafts"),
+		LogPath:                filepath.Join(cacheBase, "tui.log"),
+		AllowFixtureNotice:     true,
 	}
 
 	file, err := os.Open(cfg.ConfigPath)
@@ -101,6 +105,12 @@ func LoadConfig() (Config, error) {
 			cfg.DaemonLog = expandPath(value)
 		case "daemon_pid_file":
 			cfg.DaemonPIDFile = expandPath(value)
+		case "daemon_auto_subscribe":
+			cfg.DaemonAutoSubscribe = parseBool(value)
+		case "daemon_auto_subscribe_max":
+			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+				cfg.DaemonAutoSubscribeMax = n
+			}
 		case "notify_desktop":
 			cfg.NotifyDesktop = parseBool(value)
 		case "notify_sound":

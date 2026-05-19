@@ -2,13 +2,14 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
@@ -293,6 +294,70 @@ func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
 	}
 	if model.toast != "chat refreshed" {
 		t.Fatalf("expected chat refreshed toast, got %q", model.toast)
+	}
+}
+
+func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
+	model := New(Options{
+		Client: api.NewFixtureClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design"},
+	}
+	model.selected[FeatureChat] = 0
+	payload, err := json.Marshal(map[string]string{"space": "spaces/design"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := model.Update(daemonEventMsg{
+		event: api.DaemonEvent{Topic: "notify", Payload: payload},
+	})
+	model = updated.(Model)
+
+	if !model.spaces[1].Unread {
+		t.Fatalf("notify event should mark other space unread: %#v", model.spaces)
+	}
+	if model.spaces[0].Unread {
+		t.Fatalf("notify event should not mark selected space unread: %#v", model.spaces)
+	}
+	if model.toast != "new chat message" {
+		t.Fatalf("expected chat toast, got %q", model.toast)
+	}
+}
+
+func TestDaemonChatReadEventClearsSpaceUnread(t *testing.T) {
+	model := New(Options{
+		Client: api.NewFixtureClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/design", DisplayName: "#design", Unread: true},
+	}
+	payload, err := json.Marshal(map[string]string{"space": "spaces/design"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := model.Update(daemonEventMsg{
+		event: api.DaemonEvent{Topic: "chat.read", Payload: payload},
+	})
+	model = updated.(Model)
+
+	if model.spaces[0].Unread {
+		t.Fatalf("chat.read event should clear unread badge: %#v", model.spaces)
 	}
 }
 

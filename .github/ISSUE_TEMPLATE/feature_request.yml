@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement or new workflow.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: What should gws-tui do differently?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Optional. Mention workarounds, related CLI behavior, or other tools.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat
+        - Mail
+        - Calendar
+        - Meet
+        - Daemon
+        - Neovim compatibility
+        - Images / attachments
+        - Install / release
+        - Other
+    validations:
+      required: true

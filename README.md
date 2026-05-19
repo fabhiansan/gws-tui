@@ -13,10 +13,20 @@ Lua Neovim plugin contract intact: non-`tui` commands are delegated to an
 installed `gws` binary when one is available, and fixture mode exists for
 deterministic compatibility tests.
 
+## Project Status
+
+`gws-tui` is preparing for its first public release. Expect a local-first CLI
+workflow, fixture-backed tests, and optional daemon mode, but review
+`docs/RELEASE_CHECKLIST.md` before cutting a tag or announcing a release.
+
+Supported release targets for now are macOS and Linux. Windows is not part of
+the first release because daemon lifecycle management currently depends on
+Unix-style process and socket behavior.
+
 ## Install
 
 ```sh
-go install github.com/fabhiantomaoludyo/gws-tui@latest
+go install github.com/fabhiansan/gws-tui@latest
 ```
 
 For local development:
@@ -156,6 +166,9 @@ Authenticated Google Chat attachments are downloaded through the upstream
 `gws chat media download` command so existing Workspace credentials are used
 instead of browser cookies.
 
+See `docs/PRIVACY.md` for local cache, state, draft, image, log, and cleanup
+details.
+
 ## Daemon Mode
 
 Daemon mode is optional. `gws tui` remains standalone by default. Use:
@@ -211,3 +224,15 @@ Manual smoke remains required before a release:
 4. Run `gws tui` and verify Chat, Mail, Calendar, and Meet screens open.
 5. Run `gws daemon start --detach && gws tui --daemon`, then open a second TUI
    and verify both clients receive live chat events.
+
+## Contributing and Security
+
+- Contribution workflow: `CONTRIBUTING.md`
+- Security reporting: `SECURITY.md`
+- Privacy and local data: `docs/PRIVACY.md`
+- Release checklist: `docs/RELEASE_CHECKLIST.md`
+- Reddit launch notes: `docs/REDDIT_LAUNCH.md`
+
+## License
+
+MIT. See `LICENSE`.

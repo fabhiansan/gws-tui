@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/fabhiantomaoludyo/gws-tui/internal/api"
+import "github.com/fabhiansan/gws-tui/internal/api"
 
 const workspaceCacheVersion = api.WorkspaceSnapshotVersion
 

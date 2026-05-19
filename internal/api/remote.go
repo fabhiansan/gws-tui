@@ -200,6 +200,18 @@ func (c *RemoteClient) EndMeetSpace(ctx context.Context, name string) error {
 	return c.request(ctx, "EndMeetSpace", MeetSpaceNameParams{Name: name}, nil)
 }
 
+func (c *RemoteClient) PinChatSpace(ctx context.Context, spaceName string) error {
+	return c.request(ctx, "PinChatSpace", SpaceNameParams{SpaceName: spaceName}, nil)
+}
+
+func (c *RemoteClient) UnpinChatSpace(ctx context.Context, spaceName string) error {
+	return c.request(ctx, "UnpinChatSpace", SpaceNameParams{SpaceName: spaceName}, nil)
+}
+
+func (c *RemoteClient) MarkChatRead(ctx context.Context, spaceName string) error {
+	return c.request(ctx, "MarkChatRead", SpaceNameParams{SpaceName: spaceName}, nil)
+}
+
 func (c *RemoteClient) Snapshot(ctx context.Context) (WorkspaceSnapshot, error) {
 	var out WorkspaceSnapshot
 	err := c.request(ctx, "Snapshot", nil, &out)

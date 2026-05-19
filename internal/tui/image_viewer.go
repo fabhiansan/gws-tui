@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 // imageViewerState holds the fullscreen Kitty render for one attachment.

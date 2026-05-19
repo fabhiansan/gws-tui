@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
-	daemonpkg "github.com/fabhiantomaoludyo/gws-tui/internal/daemon"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui"
+	"github.com/fabhiansan/gws-tui/internal/api"
+	daemonpkg "github.com/fabhiansan/gws-tui/internal/daemon"
+	"github.com/fabhiansan/gws-tui/internal/tui"
 )
 
 func runDaemon(args []string, stdout, stderr io.Writer) int {
@@ -171,13 +171,15 @@ func runDaemonLogs(cfg tui.Config, stdout, stderr io.Writer) int {
 
 func daemonOptions(cfg tui.Config) daemonpkg.Options {
 	return daemonpkg.Options{
-		SocketPath:      cfg.DaemonSocket,
-		CachePath:       cfg.CachePath,
-		DraftDir:        cfg.DraftDir,
-		ImageCacheDir:   cfg.ImageCacheDir,
-		NotifyDesktop:   cfg.NotifyDesktop,
-		NotifySound:     cfg.NotifySound,
-		NotifySoundFile: cfg.NotifySoundFile,
+		SocketPath:         cfg.DaemonSocket,
+		CachePath:          cfg.CachePath,
+		DraftDir:           cfg.DraftDir,
+		ImageCacheDir:      cfg.ImageCacheDir,
+		NotifyDesktop:      cfg.NotifyDesktop,
+		NotifySound:        cfg.NotifySound,
+		NotifySoundFile:    cfg.NotifySoundFile,
+		AutoSubscribeChats: cfg.DaemonAutoSubscribe,
+		AutoSubscribeMax:   cfg.DaemonAutoSubscribeMax,
 	}
 }
 

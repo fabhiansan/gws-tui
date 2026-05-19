@@ -18,18 +18,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui/notify"
+	"github.com/fabhiansan/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/tui/notify"
 )
 
 type Options struct {
-	SocketPath      string
-	CachePath       string
-	DraftDir        string
-	ImageCacheDir   string
-	NotifyDesktop   bool
-	NotifySound     bool
-	NotifySoundFile string
+	SocketPath         string
+	CachePath          string
+	DraftDir           string
+	ImageCacheDir      string
+	NotifyDesktop      bool
+	NotifySound        bool
+	NotifySoundFile    string
+	AutoSubscribeChats bool
+	AutoSubscribeMax   int
 }
 
 type Server struct {
@@ -46,6 +48,8 @@ type Server struct {
 	sessions       map[*Session]bool
 	chatCancels    map[string]context.CancelFunc
 	managedChats   map[string]bool
+	pinnedSpaces   map[string]bool
+	autoSpaces     map[string]bool
 	snapshot       api.WorkspaceSnapshot
 	snapshotLoaded bool
 	cacheLock      *api.SnapshotLock
@@ -66,6 +70,12 @@ type Session struct {
 
 func NewServer(client api.WorkspaceClient, opts Options) *Server {
 	snapshot, ok := api.LoadWorkspaceSnapshot(opts.CachePath)
+	pinned := map[string]bool{}
+	for _, name := range snapshot.PinnedSpaces {
+		if name != "" {
+			pinned[name] = true
+		}
+	}
 	return &Server{
 		client:         client,
 		opts:           opts,
@@ -73,6 +83,8 @@ func NewServer(client api.WorkspaceClient, opts Options) *Server {
 		sessions:       map[*Session]bool{},
 		chatCancels:    map[string]context.CancelFunc{},
 		managedChats:   map[string]bool{},
+		pinnedSpaces:   pinned,
+		autoSpaces:     map[string]bool{},
 		snapshot:       snapshot,
 		snapshotLoaded: ok,
 	}
@@ -162,17 +174,105 @@ func (s *Server) bootstrap() {
 			s.logError("bootstrap snapshot", err)
 			return
 		}
+	} else {
+		// Snapshot loaded from disk — refill the image cache for any
+		// attachments that were missed (e.g. a previous daemon shut down
+		// mid-download). cacheAttachments is idempotent: existing files
+		// are skipped via fileExists.
+		s.mu.Lock()
+		snapshot := s.snapshot.Clone()
+		s.mu.Unlock()
+		for _, page := range snapshot.ChatMessagesBySpace {
+			s.cacheAttachments(page.Items)
+		}
+	}
+	s.seedReadMarkers()
+	s.restorePinnedSubscriptions()
+	s.autoSubscribeTopSpaces()
+}
+
+// seedReadMarkers initializes LastReadBySpace from the latest message in each
+// space. Runs once after upgrade so users don't see every space light up as
+// unread the first time the daemon starts with this feature.
+func (s *Server) seedReadMarkers() {
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		for spaceName, page := range snapshot.ChatMessagesBySpace {
+			if _, seen := snapshot.LastReadBySpace[spaceName]; seen {
+				continue
+			}
+			var latest time.Time
+			for _, msg := range page.Items {
+				if msg.CreateTime.After(latest) {
+					latest = msg.CreateTime
+				}
+			}
+			snapshot.LastReadBySpace[spaceName] = latest
+		}
+	})
+}
+
+// restorePinnedSubscriptions resubscribes spaces the user pinned in a previous
+// session so the indicator and live notifications come back after a restart.
+func (s *Server) restorePinnedSubscriptions() {
+	s.mu.Lock()
+	names := make([]string, 0, len(s.pinnedSpaces))
+	for name := range s.pinnedSpaces {
+		names = append(names, name)
+	}
+	s.mu.Unlock()
+	for _, name := range names {
+		s.addManagedChatSubscription(name)
+	}
+}
+
+// autoSubscribeTopSpaces opens chat loops for the most recently active spaces
+// so notifications and unread tracking keep working while no TUI is attached.
+// "Most recently active" = highest CreateTime across that space's prefetched
+// message page; spaces with no prefetched messages rank last.
+func (s *Server) autoSubscribeTopSpaces() {
+	if !s.opts.AutoSubscribeChats || s.opts.AutoSubscribeMax <= 0 {
 		return
 	}
-	// Snapshot loaded from disk — refill the image cache for any
-	// attachments that were missed (e.g. a previous daemon shut down
-	// mid-download). cacheAttachments is idempotent: existing files
-	// are skipped via fileExists.
 	s.mu.Lock()
 	snapshot := s.snapshot.Clone()
 	s.mu.Unlock()
-	for _, page := range snapshot.ChatMessagesBySpace {
-		s.cacheAttachments(page.Items)
+	if len(snapshot.Spaces) == 0 {
+		return
+	}
+	type ranked struct {
+		name     string
+		lastSeen time.Time
+	}
+	scored := make([]ranked, 0, len(snapshot.Spaces))
+	for _, space := range snapshot.Spaces {
+		if space.Name == "" {
+			continue
+		}
+		var latest time.Time
+		if page, ok := snapshot.ChatMessagesBySpace[space.Name]; ok {
+			for _, msg := range page.Items {
+				if msg.CreateTime.After(latest) {
+					latest = msg.CreateTime
+				}
+			}
+		}
+		scored = append(scored, ranked{name: space.Name, lastSeen: latest})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].lastSeen.After(scored[j].lastSeen)
+	})
+	limit := s.opts.AutoSubscribeMax
+	if limit > len(scored) {
+		limit = len(scored)
+	}
+	s.mu.Lock()
+	s.autoSpaces = map[string]bool{}
+	for i := 0; i < limit; i++ {
+		s.autoSpaces[scored[i].name] = true
+	}
+	s.mu.Unlock()
+	for i := 0; i < limit; i++ {
+		s.addManagedChatSubscription(scored[i].name)
 	}
 }
 
@@ -300,6 +400,7 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 		page, err := s.client.ChatSpaces(ctx)
 		if err == nil {
 			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.Spaces = page.Items })
+			s.stampLiveOnSpaces(page.Items)
 		}
 		return page, err
 	case "ChatMessages":
@@ -501,6 +602,24 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			s.broadcast("meet.changed", map[string]string{"name": p.Name, "action": "ended"})
 		}
 		return nil, err
+	case "PinChatSpace":
+		var p api.SpaceNameParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return nil, s.pinChatSpace(p.SpaceName)
+	case "UnpinChatSpace":
+		var p api.SpaceNameParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return nil, s.unpinChatSpace(p.SpaceName)
+	case "MarkChatRead":
+		var p api.SpaceNameParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return nil, s.markChatRead(p.SpaceName)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}
@@ -512,6 +631,7 @@ func (s *Server) getSnapshot(ctx context.Context) (api.WorkspaceSnapshot, error)
 	if loaded {
 		s.snapshot.EnsureMaps()
 		snapshot := s.snapshot.Clone()
+		s.stampLiveLocked(snapshot.Spaces)
 		s.mu.Unlock()
 		return snapshot, nil
 	}
@@ -522,7 +642,216 @@ func (s *Server) getSnapshot(ctx context.Context) (api.WorkspaceSnapshot, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snapshot.EnsureMaps()
-	return s.snapshot.Clone(), nil
+	snapshot := s.snapshot.Clone()
+	s.stampLiveLocked(snapshot.Spaces)
+	return snapshot, nil
+}
+
+// stampLiveOnSpaces marks Space.Live=true for every space the daemon is
+// currently holding a chat loop open for. This is what surfaces the "circle"
+// indicator in the TUI after a reconnect.
+func (s *Server) stampLiveOnSpaces(spaces []api.Space) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stampLiveLocked(spaces)
+}
+
+func (s *Server) stampLiveLocked(spaces []api.Space) {
+	for i := range spaces {
+		name := spaces[i].Name
+		if s.managedChats[name] {
+			spaces[i].Live = true
+		}
+		spaces[i].Unread = s.spaceHasUnreadLocked(name)
+	}
+}
+
+// spaceHasUnreadLocked reports whether the latest message in the space was
+// authored by someone other than the user AFTER the user's last-read marker.
+// Caller must hold s.mu.
+func (s *Server) spaceHasUnreadLocked(spaceName string) bool {
+	if spaceName == "" {
+		return false
+	}
+	page, ok := s.snapshot.ChatMessagesBySpace[spaceName]
+	if !ok || len(page.Items) == 0 {
+		return false
+	}
+	lastRead := s.snapshot.LastReadBySpace[spaceName]
+	for i := len(page.Items) - 1; i >= 0; i-- {
+		msg := page.Items[i]
+		// SenderID arrives as "users/<id>" but SelfUserIDs is keyed by the
+		// bare numeric id, so strip the resource prefix before the lookup.
+		bareID := api.UserIDFromName(msg.SenderID)
+		if bareID != "" && s.snapshot.SelfUserIDs[bareID] {
+			continue
+		}
+		if msg.CreateTime.After(lastRead) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) pinChatSpace(spaceName string) error {
+	if spaceName == "" {
+		return errors.New("space name required")
+	}
+	s.mu.Lock()
+	if s.pinnedSpaces[spaceName] {
+		s.mu.Unlock()
+		return nil
+	}
+	s.pinnedSpaces[spaceName] = true
+	s.mu.Unlock()
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		snapshot.PinnedSpaces = appendUnique(snapshot.PinnedSpaces, spaceName)
+	})
+	s.addManagedChatSubscription(spaceName)
+	s.broadcast("chat.pinned", map[string]string{"space": spaceName, "action": "pinned"})
+	return nil
+}
+
+func (s *Server) unpinChatSpace(spaceName string) error {
+	if spaceName == "" {
+		return errors.New("space name required")
+	}
+	s.mu.Lock()
+	if !s.pinnedSpaces[spaceName] {
+		s.mu.Unlock()
+		return nil
+	}
+	delete(s.pinnedSpaces, spaceName)
+	// If the auto-subscribe ranker also wants this space, leave the loop
+	// running; otherwise tear it down so we stop hitting the upstream.
+	if !s.autoSpaces[spaceName] {
+		delete(s.managedChats, spaceName)
+		if cancel := s.chatCancels[spaceName]; cancel != nil {
+			// Also confirm no session is still subscribed before cancelling.
+			stillWanted := false
+			for sess := range s.sessions {
+				sess.mu.Lock()
+				if sess.topics[api.ChatMessageTopic(spaceName)] {
+					stillWanted = true
+				}
+				sess.mu.Unlock()
+				if stillWanted {
+					break
+				}
+			}
+			if !stillWanted {
+				cancel()
+				delete(s.chatCancels, spaceName)
+			}
+		}
+	}
+	s.mu.Unlock()
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		snapshot.PinnedSpaces = removeString(snapshot.PinnedSpaces, spaceName)
+	})
+	s.broadcast("chat.pinned", map[string]string{"space": spaceName, "action": "unpinned"})
+	return nil
+}
+
+// resolveSenderName converts a sender resource name (e.g. "users/115178...")
+// into a human display name, consulting the in-memory UserLabels cache first
+// and falling back to a synchronous PeopleGet lookup. Result is cached.
+// Returns "" if no lookup was needed or no better name could be found.
+func (s *Server) resolveSenderName(msg api.ChatMessage) string {
+	senderID := msg.SenderID
+	if senderID == "" {
+		return ""
+	}
+	// If the upstream already gave us a real display name (anything other
+	// than the raw resource name), trust it.
+	if msg.SenderName != "" && msg.SenderName != senderID {
+		return msg.SenderName
+	}
+	// UserLabels and SelfUserIDs are keyed by the bare numeric id (e.g.
+	// "115178..."), while msg.SenderID arrives with the "users/" prefix.
+	// Normalize before any cache lookup or write, otherwise we always miss
+	// the cache, fall through to PeopleGet on every message, and never see
+	// labels that the TUI already resolved.
+	bareID := api.UserIDFromName(senderID)
+	s.mu.Lock()
+	if s.snapshot.UserLabels != nil {
+		if cached, ok := s.snapshot.UserLabels[bareID]; ok && cached != "" && cached != bareID {
+			s.mu.Unlock()
+			return cached
+		}
+	}
+	s.mu.Unlock()
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	person, err := s.client.PeopleGet(lookupCtx, bareID)
+	if err != nil {
+		return ""
+	}
+	name := person.DisplayName
+	if name == "" {
+		name = person.Email
+	}
+	if name == "" || name == bareID {
+		return ""
+	}
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		snapshot.UserLabels[bareID] = name
+	})
+	return name
+}
+
+// notifyTitleForSpace builds a desktop notification title that includes the
+// space's display name when known, falling back to "gws chat".
+func (s *Server) notifyTitleForSpace(spaceName string) string {
+	if spaceName == "" {
+		return "gws chat"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, space := range s.snapshot.Spaces {
+		if space.Name != spaceName {
+			continue
+		}
+		if title := space.Title(); title != "" {
+			return "gws chat · " + title
+		}
+		break
+	}
+	return "gws chat"
+}
+
+func (s *Server) markChatRead(spaceName string) error {
+	if spaceName == "" {
+		return errors.New("space name required")
+	}
+	now := time.Now()
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		snapshot.LastReadBySpace[spaceName] = now
+	})
+	s.broadcast("chat.read", map[string]string{"space": spaceName})
+	return nil
+}
+
+func appendUnique(slice []string, value string) []string {
+	for _, v := range slice {
+		if v == value {
+			return slice
+		}
+	}
+	return append(slice, value)
+}
+
+func removeString(slice []string, value string) []string {
+	for i, v := range slice {
+		if v == value {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
 }
 
 func (s *Server) refreshSnapshot(ctx context.Context) error {
@@ -600,7 +929,10 @@ func (s *Server) subscribe(session *Session, topics []string) {
 func (s *Server) removeSession(session *Session) {
 	s.mu.Lock()
 	delete(s.sessions, session)
-	// Cancel chat loops for spaces no remaining session subscribes to.
+	// Cancel chat loops for spaces no remaining session subscribes to AND
+	// that aren't daemon-managed (auto-subscribed). Daemon-managed loops
+	// keep running so notifications and unread tracking persist while the
+	// TUI is closed.
 	wanted := make(map[string]bool)
 	for sess := range s.sessions {
 		sess.mu.Lock()
@@ -612,17 +944,22 @@ func (s *Server) removeSession(session *Session) {
 		sess.mu.Unlock()
 	}
 	for spaceName, cancel := range s.chatCancels {
-		if wanted[spaceName] {
+		if wanted[spaceName] || s.managedChats[spaceName] {
 			continue
 		}
 		cancel()
 		delete(s.chatCancels, spaceName)
-		delete(s.managedChats, spaceName)
 	}
 	s.mu.Unlock()
 }
 
 func (s *Server) addChatSubscription(spaceName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureChatLoopLocked(spaceName)
+}
+
+func (s *Server) addManagedChatSubscription(spaceName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.managedChats[spaceName] = true
@@ -673,6 +1010,13 @@ func (s *Server) handleChatMessage(msg api.ChatMessage, fireNotify bool) {
 	if msg.ID == "" || msg.Space == "" {
 		return
 	}
+	// Resolve sender ID -> display name before persisting & broadcasting so
+	// the TUI's chat view and the desktop notification both show the real
+	// name instead of "users/115178...". Mutates msg in place so the same
+	// resolved name flows to the snapshot, the broadcast, and the notify.
+	if resolved := s.resolveSenderName(msg); resolved != "" {
+		msg.SenderName = resolved
+	}
 	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
 		page := snapshot.ChatMessagesBySpace[msg.Space]
 		page.Items = upsertChatMessage(page.Items, msg)
@@ -680,15 +1024,16 @@ func (s *Server) handleChatMessage(msg api.ChatMessage, fireNotify bool) {
 	})
 	s.cacheAttachments([]api.ChatMessage{msg})
 	if fireNotify {
-		message := msg.SenderName + ": " + msg.Text
-		notify.Send("gws chat", message, notify.Options{
+		title := s.notifyTitleForSpace(msg.Space)
+		body := strings.TrimSpace(msg.SenderName + ": " + msg.Text)
+		notify.Send(title, body, notify.Options{
 			Desktop:   s.opts.NotifyDesktop,
 			Sound:     s.opts.NotifySound,
 			SoundFile: s.opts.NotifySoundFile,
 		})
 		s.broadcast("notify", map[string]string{
-			"title": "gws chat",
-			"body":  message,
+			"title": title,
+			"body":  body,
 			"space": msg.Space,
 		})
 	}

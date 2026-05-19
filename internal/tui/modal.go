@@ -6,7 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 type modalKind string

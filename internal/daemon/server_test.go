@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 func TestServerFansOutSingleChatSubscriptionToMultipleClients(t *testing.T) {
@@ -239,6 +239,172 @@ func TestServerStopsPollingWhenLastSubscriberDisconnects(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down")
+	}
+}
+
+func TestServerAutoSubscribesTopSpacesAndSurvivesClientDisconnect(t *testing.T) {
+	dir := t.TempDir()
+	socketDir := shortSocketDir(t)
+	socketPath := filepath.Join(socketDir, "daemon.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := &pushChatClient{
+		WorkspaceClient: api.NewFixtureClient(),
+		events:          make(chan api.ChatMessage),
+		started:         make(chan struct{}),
+	}
+	server := NewServer(backend, Options{
+		SocketPath:         socketPath,
+		CachePath:          filepath.Join(dir, "cache.json"),
+		AutoSubscribeChats: true,
+		AutoSubscribeMax:   2,
+	})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	// Top 2 fixture spaces by most-recent message are spaces/alice
+	// (DM, 35min ago) and spaces/engineering (100min ago). Bootstrap
+	// should subscribe both.
+	waitFor(t, 2*time.Second, func() bool {
+		return backend.SubscribeCalls("spaces/alice") >= 1 &&
+			backend.SubscribeCalls("spaces/engineering") >= 1
+	}, "bootstrap did not auto-subscribe top spaces")
+
+	// design and random are below the top-2 cutoff and must not be
+	// auto-subscribed.
+	if backend.SubscribeCalls("spaces/design") != 0 {
+		t.Fatalf("spaces/design should not be auto-subscribed, got %d calls", backend.SubscribeCalls("spaces/design"))
+	}
+
+	// Attach a client, then close it. The auto-subscribed loops must
+	// survive because they're daemon-managed, not session-driven.
+	client, err := api.NewRemoteClient(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give removeSession a beat to run, then assert both managed loops
+	// are still alive.
+	time.Sleep(100 * time.Millisecond)
+	server.mu.Lock()
+	_, aliceAlive := server.chatCancels["spaces/alice"]
+	_, engAlive := server.chatCancels["spaces/engineering"]
+	server.mu.Unlock()
+	if !aliceAlive || !engAlive {
+		t.Fatalf("managed loops were cancelled after client disconnect: alice=%v engineering=%v", aliceAlive, engAlive)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down")
+	}
+}
+
+func TestServerPersistsPinAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.json")
+	socketDir := shortSocketDir(t)
+	socketPath := filepath.Join(socketDir, "daemon.sock")
+
+	// First server lifetime: client pins a space, then shuts down.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	listener1, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend1 := &pushChatClient{
+		WorkspaceClient: api.NewFixtureClient(),
+		events:          make(chan api.ChatMessage),
+		started:         make(chan struct{}),
+	}
+	server1 := NewServer(backend1, Options{
+		SocketPath: socketPath,
+		CachePath:  cachePath,
+	})
+	done1 := make(chan error, 1)
+	go func() { done1 <- server1.Serve(ctx1, listener1) }()
+
+	client1, err := api.NewRemoteClient(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinCtx, pinCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := client1.PinChatSpace(pinCtx, "spaces/design"); err != nil {
+		pinCancel()
+		t.Fatalf("pin failed: %v", err)
+	}
+	pinCancel()
+	// Pin should have opened a backend subscription for design.
+	waitForSubscription(t, backend1, "spaces/design")
+
+	// Snapshot should report Live=true for the pinned space so the TUI
+	// renders the indicator.
+	snapCtx, snapCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	snap, err := client1.Snapshot(snapCtx)
+	snapCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLive := false
+	for _, s := range snap.Spaces {
+		if s.Name == "spaces/design" && s.Live {
+			foundLive = true
+			break
+		}
+	}
+	if !foundLive {
+		t.Fatal("snapshot did not stamp Live on pinned space")
+	}
+
+	_ = client1.Close()
+	cancel1()
+	<-done1
+
+	// Second server lifetime: same cache path. Pin should be restored
+	// before any client subscribes.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	listener2, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend2 := &pushChatClient{
+		WorkspaceClient: api.NewFixtureClient(),
+		events:          make(chan api.ChatMessage),
+		started:         make(chan struct{}),
+	}
+	server2 := NewServer(backend2, Options{
+		SocketPath: socketPath,
+		CachePath:  cachePath,
+	})
+	done2 := make(chan error, 1)
+	go func() { done2 <- server2.Serve(ctx2, listener2) }()
+
+	waitFor(t, 2*time.Second, func() bool {
+		return backend2.SubscribeCalls("spaces/design") >= 1
+	}, "pinned space was not auto-resubscribed after restart")
+
+	cancel2()
+	select {
+	case err := <-done2:
 		if err != nil {
 			t.Fatal(err)
 		}

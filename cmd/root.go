@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 // Build metadata. Release builds override these with -ldflags.

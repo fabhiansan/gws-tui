@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -28,6 +27,8 @@ type WorkspaceSnapshot struct {
 	MembersBySpace      map[string][]SpaceMember     `json:"members_by_space,omitempty"`
 	SelfUserIDs         map[string]bool              `json:"self_user_ids,omitempty"`
 	PeopleAPIDown       bool                         `json:"people_api_down,omitempty"`
+	PinnedSpaces        []string                     `json:"pinned_spaces,omitempty"`
+	LastReadBySpace     map[string]time.Time         `json:"last_read_by_space,omitempty"`
 }
 
 func NewWorkspaceSnapshot() WorkspaceSnapshot {
@@ -92,40 +93,6 @@ func TryLockWorkspaceSnapshot(path string) (*SnapshotLock, error) {
 	return lockWorkspaceSnapshot(path, true)
 }
 
-func lockWorkspaceSnapshot(path string, nonblock bool) (*SnapshotLock, error) {
-	if path == "" {
-		return nil, nil
-	}
-	lockPath := path + ".lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	flag := syscall.LOCK_EX
-	if nonblock {
-		flag |= syscall.LOCK_NB
-	}
-	if err := syscall.Flock(int(file.Fd()), flag); err != nil {
-		_ = file.Close()
-		if nonblock && errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrSnapshotLockBusy
-		}
-		return nil, err
-	}
-	return &SnapshotLock{file: file, path: lockPath}, nil
-}
-
-func (l *SnapshotLock) Release() error {
-	if l == nil || l.file == nil {
-		return nil
-	}
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
-	return l.file.Close()
-}
-
 func (s *WorkspaceSnapshot) EnsureMaps() {
 	if s.ChatMessagesBySpace == nil {
 		s.ChatMessagesBySpace = map[string]Page[ChatMessage]{}
@@ -138,6 +105,9 @@ func (s *WorkspaceSnapshot) EnsureMaps() {
 	}
 	if s.SelfUserIDs == nil {
 		s.SelfUserIDs = map[string]bool{}
+	}
+	if s.LastReadBySpace == nil {
+		s.LastReadBySpace = map[string]time.Time{}
 	}
 	if s.ProtocolVersion == 0 {
 		s.ProtocolVersion = ProtocolVersion
@@ -203,6 +173,15 @@ func (s WorkspaceSnapshot) Clone() WorkspaceSnapshot {
 		out.SelfUserIDs = make(map[string]bool, len(s.SelfUserIDs))
 		for k, v := range s.SelfUserIDs {
 			out.SelfUserIDs[k] = v
+		}
+	}
+	if s.PinnedSpaces != nil {
+		out.PinnedSpaces = append([]string(nil), s.PinnedSpaces...)
+	}
+	if s.LastReadBySpace != nil {
+		out.LastReadBySpace = make(map[string]time.Time, len(s.LastReadBySpace))
+		for k, v := range s.LastReadBySpace {
+			out.LastReadBySpace[k] = v
 		}
 	}
 	return out

@@ -8,8 +8,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui"
+	"github.com/fabhiansan/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/tui"
 )
 
 func runTUI(args []string, stdout, stderr io.Writer) int {

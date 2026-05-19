@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
 func (m Model) spaceLabel(space api.Space) string {
@@ -166,10 +166,13 @@ func (m Model) renderList(width, height int) string {
 		}
 		for i, space := range spaces {
 			marker := "  "
-			if space.Live {
-				marker = m.live(m.icon("●", "*")) + " "
-			} else if space.Unread {
+			// Unread wins over Live: a subscribed space that has new
+			// messages should glow accent, not just look "watched".
+			switch {
+			case space.Unread:
 				marker = m.accent(m.icon("●", "*")) + " "
+			case space.Live:
+				marker = m.live(m.icon("●", "*")) + " "
 			}
 			name := truncate(m.spaceLabel(space), width-8)
 			if i == m.selected[FeatureChat] {

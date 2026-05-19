@@ -14,9 +14,9 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/api"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui/notify"
-	"github.com/fabhiantomaoludyo/gws-tui/internal/tui/theme"
+	"github.com/fabhiansan/gws-tui/internal/api"
+	"github.com/fabhiansan/gws-tui/internal/tui/notify"
+	"github.com/fabhiansan/gws-tui/internal/tui/theme"
 )
 
 type Feature string
@@ -207,6 +207,12 @@ type realtimeMsg struct {
 	err     error
 }
 
+type pinActionMsg struct {
+	space  string
+	pinned bool
+	err    error
+}
+
 type autosaveMsg struct{}
 
 type imageCachedMsg struct {
@@ -300,9 +306,9 @@ func New(opts Options) Model {
 			FeatureCalendar: persisted.Selections[string(FeatureCalendar)],
 			FeatureMeet:     persisted.Selections[string(FeatureMeet)],
 		},
-		persisted:    persisted,
-		cache:        cache,
-		cacheLoaded:  cacheLoaded,
+		persisted:      persisted,
+		cache:          cache,
+		cacheLoaded:    cacheLoaded,
 		imageFiles:     map[string]string{},
 		imageLoading:   map[string]bool{},
 		imageErrors:    map[string]string{},
@@ -411,6 +417,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = "chat refreshed"
 		}
 		m.rememberChatPage(msg.spaceName, msg.messages)
+		// Opening a space implicitly marks it read.
+		for i := range m.spaces {
+			if m.spaces[i].Name == msg.spaceName {
+				m.spaces[i].Unread = false
+				break
+			}
+		}
+		cmds = append(cmds, m.markChatReadCmd(msg.spaceName))
 		m.persistWorkspaceCache()
 		cmds = append(cmds, m.enrichSendersCmds()...)
 		cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
@@ -510,6 +524,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.persistWorkspaceCache()
 			}
 		}
+	case pinActionMsg:
+		if msg.err != nil {
+			// Roll back the optimistic local flip so the indicator
+			// matches what the daemon actually has.
+			for i := range m.spaces {
+				if m.spaces[i].Name == msg.space {
+					m.spaces[i].Live = !msg.pinned
+					break
+				}
+			}
+			m.err = msg.err.Error()
+		}
 	case realtimeMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -528,8 +554,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.message.ID != "" && !m.seenMessages[msg.message.ID] {
 			m.seenMessages[msg.message.ID] = true
 			m.rememberChatMessage(msg.message)
+			// selfUserIDs is keyed by the bare numeric id; msg.SenderID has
+			// the "users/" resource prefix. Normalize before lookup.
+			senderBareID := api.UserIDFromName(msg.message.SenderID)
+			fromSelf := senderBareID != "" && m.selfUserIDs[senderBareID]
 			if m.isSelectedSpace(msg.message.Space) {
 				m.chatMessages = append(m.chatMessages, msg.message)
+				// User is actively viewing; keep the daemon's read
+				// marker in sync so the badge doesn't reappear on
+				// reconnect.
+				cmds = append(cmds, m.markChatReadCmd(msg.message.Space))
+			} else if !fromSelf {
+				for i := range m.spaces {
+					if m.spaces[i].Name == msg.message.Space {
+						m.spaces[i].Unread = true
+						break
+					}
+				}
 			}
 			m.toast = "new chat message"
 			if cmd := m.resolveUserCmd(api.UserIDFromName(msg.message.SenderID)); cmd != nil {
@@ -592,6 +633,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.imageLoading, payload.Source)
 				m.imageVersion++
 				cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
+			}
+		}
+		if msg.event.Topic == "notify" {
+			var payload struct {
+				Space string `json:"space"`
+			}
+			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Space != "" {
+				if m.isSelectedSpace(payload.Space) {
+					m.setSpaceUnread(payload.Space, false)
+					cmds = append(cmds, m.markChatReadCmd(payload.Space))
+				} else {
+					m.setSpaceUnread(payload.Space, true)
+					m.toast = "new chat message"
+				}
+			}
+		}
+		if msg.event.Topic == "chat.read" {
+			var payload struct {
+				Space string `json:"space"`
+			}
+			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Space != "" {
+				m.setSpaceUnread(payload.Space, false)
 			}
 		}
 		cmds = append(cmds, m.daemonEventCmd())
@@ -1251,6 +1314,21 @@ func (m Model) subscribeCmd() tea.Cmd {
 	}
 }
 
+func (m Model) markChatReadCmd(spaceName string) tea.Cmd {
+	if spaceName == "" || !m.cfg.Daemon {
+		return nil
+	}
+	reader, ok := m.client.(api.ChatReader)
+	if !ok {
+		return nil
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		_ = reader.MarkChatRead(ctx, spaceName)
+		return nil
+	}
+}
+
 func (m Model) daemonEventCmd() tea.Cmd {
 	subscriber, ok := m.client.(interface {
 		SubscribeEvents(context.Context, []string) (<-chan api.DaemonEvent, error)
@@ -1258,7 +1336,7 @@ func (m Model) daemonEventCmd() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	topics := []string{"image.cached", "notify", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
+	topics := []string{"image.cached", "notify", "chat.read", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
 	return func() tea.Msg {
 		ch, err := subscriber.SubscribeEvents(m.ctx, topics)
 		if err != nil {
@@ -1443,6 +1521,15 @@ func (m Model) selectedSpace() api.Space {
 
 func (m Model) isSelectedSpace(space string) bool {
 	return m.selectedSpace().Name == space
+}
+
+func (m *Model) setSpaceUnread(spaceName string, unread bool) {
+	for i := range m.spaces {
+		if m.spaces[i].Name == spaceName {
+			m.spaces[i].Unread = unread
+			return
+		}
+	}
 }
 
 func (m Model) selectedMail() api.MailThread {
@@ -1671,16 +1758,35 @@ func (m *Model) toggleChatSubscription() tea.Cmd {
 	for i := range m.spaces {
 		if m.spaces[i].Name == space.Name {
 			m.spaces[i].Live = !m.spaces[i].Live
-			if m.spaces[i].Live {
+			pinned := m.spaces[i].Live
+			spaceName := m.spaces[i].Name
+			if pinned {
 				m.toast = "subscription on"
 			} else {
 				m.toast = "subscription off"
 			}
 			m.persistWorkspaceCache()
-			if m.spaces[i].Live {
-				return m.subscribeCmd()
+			var cmds []tea.Cmd
+			if pinner, ok := m.client.(api.Pinner); ok && m.cfg.Daemon {
+				cmds = append(cmds, func() tea.Msg {
+					var err error
+					if pinned {
+						err = pinner.PinChatSpace(m.ctx, spaceName)
+					} else {
+						err = pinner.UnpinChatSpace(m.ctx, spaceName)
+					}
+					return pinActionMsg{space: spaceName, pinned: pinned, err: err}
+				})
 			}
-			return nil
+			if pinned {
+				if cmd := m.subscribeCmd(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			if len(cmds) == 0 {
+				return nil
+			}
+			return tea.Batch(cmds...)
 		}
 	}
 	return nil
