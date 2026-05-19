@@ -515,6 +515,44 @@ func TestChatSentFailureRestoresPendingAttachments(t *testing.T) {
 	}
 }
 
+func TestChatSentReplacePendingDedupesRealtimeRace(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.seenMessages = map[string]bool{}
+	pendingID := "pending-1"
+	real := api.ChatMessage{
+		ID:         "real-1",
+		Space:      "spaces/engineering",
+		SenderID:   "users/me-real",
+		SenderName: "Me",
+		Text:       "hello",
+		CreateTime: time.Now(),
+	}
+	// Simulate the race: realtime push lands first and appends the real
+	// message under its real ID, then the pending placeholder is still in
+	// the list waiting for the API response.
+	model.chatMessages = []api.ChatMessage{
+		{ID: pendingID, Space: real.Space, SenderID: "users/me", Text: "hello", Pending: true, CreateTime: real.CreateTime.Add(-time.Second)},
+		real,
+	}
+
+	model.replacePending(pendingID, real, nil)
+
+	if got := len(model.chatMessages); got != 1 {
+		t.Fatalf("expected dedupe to leave 1 message, got %d: %#v", got, model.chatMessages)
+	}
+	if model.chatMessages[0].ID != real.ID {
+		t.Fatalf("expected real message after dedupe, got %#v", model.chatMessages[0])
+	}
+}
+
 func TestChatShiftRRefreshesAllWorkspaceData(t *testing.T) {
 	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{

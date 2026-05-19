@@ -1839,7 +1839,13 @@ func (m *Model) replacePending(pendingID string, msg api.ChatMessage, err error)
 				return
 			}
 			m.chatMessages[i] = msg
-			m.seenMessages[msg.ID] = true
+			m.markSeenChatMessage(msg)
+			// A realtime push for this same message may have raced the
+			// API response and appended a copy under the real ID while
+			// the pending placeholder was still here. Collapse those
+			// copies — sameChatMessage keys on real ID now that the
+			// placeholder has been swapped out.
+			m.chatMessages = dedupeChatMessages(m.chatMessages)
 			m.toast = "sent"
 			return
 		}
