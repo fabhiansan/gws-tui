@@ -14,7 +14,7 @@ import (
 
 func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
 	model := New(Options{
-		Client: api.NewFixtureClient(),
+		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      t.TempDir() + "/state.json",
@@ -38,7 +38,7 @@ func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
 
 func TestChatSelectionDoesNotBlockOnMessageLoad(t *testing.T) {
 	client := &blockingMessagesClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		started:         make(chan struct{}),
 		release:         make(chan struct{}),
 	}
@@ -123,7 +123,7 @@ func TestModelHydratesWorkspaceCacheWithoutInitialLoad(t *testing.T) {
 	}
 
 	model := New(Options{
-		Client: api.NewFixtureClient(),
+		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      statePath,
@@ -172,7 +172,7 @@ func TestChatSelectionUsesCachedMessages(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	client := &countingMessagesClient{WorkspaceClient: api.NewFixtureClient()}
+	client := &countingMessagesClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{
 		Client: client,
 		Config: Config{
@@ -204,7 +204,7 @@ func TestChatSelectionUsesCachedMessages(t *testing.T) {
 func TestUpdateDetailContentSkipsUnchangedDetailRender(t *testing.T) {
 	dir := t.TempDir()
 	model := New(Options{
-		Client: api.NewFixtureClient(),
+		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      filepath.Join(dir, "state.json"),
@@ -246,7 +246,7 @@ func TestUpdateDetailContentSkipsUnchangedDetailRender(t *testing.T) {
 }
 
 func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
-	client := &countingWorkspaceClient{WorkspaceClient: api.NewFixtureClient()}
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{
 		Client: client,
 		Config: Config{
@@ -299,7 +299,7 @@ func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
 
 func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
 	model := New(Options{
-		Client: api.NewFixtureClient(),
+		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      t.TempDir() + "/state.json",
@@ -335,7 +335,7 @@ func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
 
 func TestDaemonChatReadEventClearsSpaceUnread(t *testing.T) {
 	model := New(Options{
-		Client: api.NewFixtureClient(),
+		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      t.TempDir() + "/state.json",
@@ -362,7 +362,7 @@ func TestDaemonChatReadEventClearsSpaceUnread(t *testing.T) {
 }
 
 func TestRefreshKeyOnlyReloadsMailFeature(t *testing.T) {
-	client := &countingWorkspaceClient{WorkspaceClient: api.NewFixtureClient()}
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{
 		Client: client,
 		Config: Config{
@@ -403,7 +403,7 @@ func TestRefreshKeyOnlyReloadsMailFeature(t *testing.T) {
 }
 
 func TestChatShiftRRefreshesAllWorkspaceData(t *testing.T) {
-	client := &countingWorkspaceClient{WorkspaceClient: api.NewFixtureClient()}
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{
 		Client: client,
 		Config: Config{

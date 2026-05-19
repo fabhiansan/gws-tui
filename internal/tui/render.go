@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -749,53 +750,32 @@ func (m *Model) chatDetail() string {
 		}
 		return centerText("No messages in this space yet. Press i to write.", m.detail.Width)
 	}
+	textWidth := m.detailTextWidth()
+	bursts := m.groupBursts(messages)
 	var lines []string
 	lastDay := ""
-	for _, msg := range messages {
-		day := msg.CreateTime.Format("Mon, 02 Jan 2006")
+	for _, burst := range bursts {
+		first := burst.messages[0]
+		day := first.CreateTime.Format("Mon, 02 Jan 2006")
 		if day != lastDay {
-			lines = append(lines, m.subtle("─── "+friendlyDay(msg.CreateTime)+" ───"))
+			lines = append(lines, m.subtle("─── "+friendlyDay(first.CreateTime)+" ───"))
 			lastDay = day
 		}
-		name := m.senderLabel(msg)
-		isSelf := m.isSelfMessage(msg, name)
-		if isSelf {
-			name = m.accent(name)
-		} else {
-			name = m.senderColor(msg.SenderID, name)
+		if bubble := m.renderBubble(burst, textWidth); len(bubble) > 0 {
+			lines = append(lines, bubble...)
 		}
-		status := ""
-		if msg.Pending {
-			status = " " + m.subtle("(sending)")
-		}
-		block := []string{fmt.Sprintf("%s    %s%s", name, msg.CreateTime.Format("15:04"), status)}
-		prefix := "  "
-		if msg.ParentID != "" {
-			prefix = "  " + m.icon("↪", ">") + " "
-		}
-		textWidth := m.detailTextWidth()
-		prefixW := lipgloss.Width(prefix)
-		wrapWidth := max(10, textWidth-prefixW)
-		for _, line := range strings.Split(msg.Text, "\n") {
-			if strings.HasPrefix(line, "```") {
-				block = append(block, m.theme.Code.Width(max(12, textWidth-2)).Render(line))
-				continue
-			}
-			for _, sub := range strings.Split(ansi.Wrap(line, wrapWidth, " -"), "\n") {
-				block = append(block, prefix+sub)
+		// Attachments and cards render outside the bubble — they read
+		// better as their own visual element, and bubbles with embedded
+		// images would have to fight inline-image sizing.
+		for _, msg := range burst.messages {
+			lines = m.appendAttachmentLines(lines, msg.Attachments)
+			if cardLines := m.renderCards(msg.Cards, textWidth); len(cardLines) > 0 {
+				lines = append(lines, cardLines...)
 			}
 		}
-		if isSelf {
-			for _, bl := range block {
-				lines = append(lines, rightAlign(bl, textWidth))
-			}
-		} else {
-			lines = append(lines, block...)
-		}
-		lines = m.appendAttachmentLines(lines, msg.Attachments)
 		lines = append(lines, "")
 	}
-	return strings.Join(lines, "\n")
+	return displayText(strings.Join(lines, "\n"))
 }
 
 // appendAttachmentLines renders msg.Attachments and records each image's
@@ -858,7 +838,7 @@ func (m *Model) mailDetail() string {
 		lines = append(lines, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
 	}
 	lines = append(lines, "", m.subtle("R reply · f forward · e archive · # trash · s star"))
-	return strings.Join(lines, "\n")
+	return displayText(strings.Join(lines, "\n"))
 }
 
 func (m Model) calendarDetail() string {
@@ -879,7 +859,7 @@ func (m Model) calendarDetail() string {
 		"",
 		m.subtle("[Y]es  [N]o  [M]aybe · c new event · d delete · ]/[ week"),
 	}
-	return strings.Join(lines, "\n")
+	return displayText(strings.Join(lines, "\n"))
 }
 
 func (m Model) meetDetail() string {
@@ -910,7 +890,7 @@ func (m Model) meetDetail() string {
 		"",
 		m.subtle("[J]oin  [C]opy link  [E]nd  n new space"),
 	)
-	return strings.Join(lines, "\n")
+	return displayText(strings.Join(lines, "\n"))
 }
 
 func (m Model) paneHints() string {
@@ -1062,6 +1042,7 @@ var senderPalette = []string{
 }
 
 func (m *Model) senderColor(key, value string) string {
+	value = displayText(value)
 	if m.cfg.NoColor {
 		return value
 	}
@@ -1084,21 +1065,14 @@ func (m *Model) senderColor(key, value string) string {
 }
 
 func (m Model) subtle(value string) string {
-	return m.theme.SubtleText.Render(value)
+	return m.theme.SubtleText.Render(displayText(value))
 }
 
 func truncate(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(value) <= width {
-		return value
-	}
-	runes := []rune(value)
-	for len(runes) > 0 && lipgloss.Width(string(runes)) > width-1 {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "…"
+	return ansi.Truncate(displayText(value), width, "…")
 }
 
 func fitLines(lines []string, width, height int) string {
@@ -1112,16 +1086,39 @@ func fitLines(lines []string, width, height int) string {
 }
 
 func centerText(value string, width int) string {
+	value = displayText(value)
 	pad := max(0, (width-lipgloss.Width(value))/2)
 	return strings.Repeat(" ", pad) + value
 }
 
 func rightAlign(value string, width int) string {
+	value = displayText(value)
 	pad := width - lipgloss.Width(value)
 	if pad <= 0 {
 		return value
 	}
 	return strings.Repeat(" ", pad) + value
+}
+
+func displayText(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	changed := false
+	for _, r := range value {
+		if isInvisibleFormatControl(r) {
+			changed = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if !changed {
+		return value
+	}
+	return b.String()
+}
+
+func isInvisibleFormatControl(r rune) bool {
+	return unicode.In(r, unicode.Cf)
 }
 
 func friendlyDay(t time.Time) string {

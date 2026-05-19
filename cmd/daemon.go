@@ -60,6 +60,11 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
+	upstream, err := findUpstreamGWS()
+	if err != nil || upstream == "" {
+		fmt.Fprintf(stderr, "gws daemon start: upstream Google Workspace CLI not found; install it as `gws` or set GWS_TUI_UPSTREAM\n")
+		return 127
+	}
 	if *detach {
 		if err := daemonpkg.StartDetached(cfg.DaemonLog, "daemon", "start"); err != nil {
 			fmt.Fprintf(stderr, "gws daemon start: %v\n", err)
@@ -80,11 +85,8 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 	}
 	defer lock.Release()
 
-	upstream, _ := findUpstreamGWS()
 	client := api.NewDefaultClient(api.ClientOptions{
-		UpstreamPath:  upstream,
-		ForceFixture:  shouldUseFixtures() || upstream == "",
-		FixtureReason: upstreamDescription(),
+		UpstreamPath: upstream,
 	})
 	defer client.Close()
 

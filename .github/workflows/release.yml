@@ -28,16 +28,15 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          binary="gws-${GOOS}-${GOARCH}"
-          go build \
-            -ldflags="-s -w -X github.com/fabhiansan/gws-tui/cmd.Version=${GITHUB_REF_NAME} -X github.com/fabhiansan/gws-tui/cmd.Commit=${GITHUB_SHA} -X github.com/fabhiansan/gws-tui/cmd.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o "dist/${binary}" .
           package_dir="dist/package"
           mkdir -p "$package_dir"
-          cp "dist/${binary}" README.md LICENSE CHANGELOG.md "$package_dir/"
+          go build \
+            -ldflags="-s -w -X github.com/fabhiansan/gws-tui/cmd.Version=${GITHUB_REF_NAME} -X github.com/fabhiansan/gws-tui/cmd.Commit=${GITHUB_SHA} -X github.com/fabhiansan/gws-tui/cmd.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "${package_dir}/gws" ./cmd/gws
+          cp README.md LICENSE CHANGELOG.md "$package_dir/"
           archive="gws-${GOOS}-${GOARCH}.tar.gz"
           tar -czf "dist/${archive}" -C "$package_dir" .
-          rm -rf "$package_dir" "dist/${binary}"
+          rm -rf "$package_dir"
       - uses: actions/upload-artifact@v4
         with:
           name: gws-${{ matrix.goos }}-${{ matrix.goarch }}

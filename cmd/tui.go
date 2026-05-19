@@ -25,7 +25,6 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	daemonMode := flags.Bool("daemon", false, "connect to the background daemon")
 	noDaemon := flags.Bool("no-daemon", false, "force standalone single-process mode")
 	version := flags.Bool("version", false, "print TUI build version")
-	fixtures := flags.Bool("fixtures", false, "force fixture data instead of the installed gws CLI")
 
 	if err := flags.Parse(args); err != nil {
 		return 3
@@ -80,12 +79,13 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 		snapshot = daemonSnapshot
 		upstreamHint = "daemon " + cfg.DaemonSocket
 	} else {
-		upstream, _ := findUpstreamGWS()
-		forceFixtures := *fixtures || shouldUseFixtures() || upstream == ""
+		upstream, err := findUpstreamGWS()
+		if err != nil || upstream == "" {
+			fmt.Fprintf(stderr, "gws tui: upstream Google Workspace CLI not found; install it as `gws` or set GWS_TUI_UPSTREAM\n")
+			return 127
+		}
 		client = api.NewDefaultClient(api.ClientOptions{
-			UpstreamPath:  upstream,
-			ForceFixture:  forceFixtures,
-			FixtureReason: upstreamDescription(),
+			UpstreamPath: upstream,
 		})
 	}
 	defer client.Close()

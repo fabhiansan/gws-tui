@@ -65,7 +65,7 @@ func delegate(upstream string, args []string, stdout, stderr io.Writer) int {
 func upstreamDescription() string {
 	upstream, err := findUpstreamGWS()
 	if err != nil {
-		return "fixture mode"
+		return "upstream gws not found"
 	}
 	return strings.TrimSpace(upstream)
 }

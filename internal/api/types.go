@@ -90,11 +90,115 @@ type ChatMessage struct {
 	SenderName   string       `json:"senderName"`
 	Text         string       `json:"text"`
 	Attachments  []Attachment `json:"attachments,omitempty"`
+	Cards        []ChatCard   `json:"cards,omitempty"`
 	CreateTime   time.Time    `json:"createTime"`
 	ThreadID     string       `json:"threadId,omitempty"`
 	ParentID     string       `json:"parentId,omitempty"`
 	Pending      bool         `json:"pending,omitempty"`
 	FromRealtime bool         `json:"fromRealtime,omitempty"`
+}
+
+// ChatCard is the TUI's flattened view of a Google Chat Card v2 payload. The
+// upstream model wraps widgets in sections; we lose nothing useful by walking
+// sections eagerly and exposing widgets as a single ordered slice, with the
+// section header (if any) preserved on the widget itself.
+type ChatCard struct {
+	ID      string       `json:"id,omitempty"`
+	Header  *CardHeader  `json:"header,omitempty"`
+	Widgets []CardWidget `json:"widgets,omitempty"`
+}
+
+type CardHeader struct {
+	Title    string `json:"title,omitempty"`
+	Subtitle string `json:"subtitle,omitempty"`
+	ImageURL string `json:"imageUrl,omitempty"`
+	ImageAlt string `json:"imageAlt,omitempty"`
+}
+
+// CardWidgetKind tags the concrete payload inside CardWidget. A widget always
+// has exactly one non-nil payload — Kind is what the renderer dispatches on
+// without having to nil-check every field.
+type CardWidgetKind string
+
+const (
+	CardWidgetDecoratedText CardWidgetKind = "decoratedText"
+	CardWidgetTextParagraph CardWidgetKind = "textParagraph"
+	CardWidgetButtonList    CardWidgetKind = "buttonList"
+	CardWidgetImage         CardWidgetKind = "image"
+	CardWidgetDivider       CardWidgetKind = "divider"
+	CardWidgetColumns       CardWidgetKind = "columns"
+	CardWidgetGrid          CardWidgetKind = "grid"
+	CardWidgetUnknown       CardWidgetKind = "unknown"
+)
+
+type CardWidget struct {
+	Kind          CardWidgetKind       `json:"kind"`
+	SectionHeader string               `json:"sectionHeader,omitempty"`
+	DecoratedText *DecoratedTextWidget `json:"decoratedText,omitempty"`
+	TextParagraph *TextParagraphWidget `json:"textParagraph,omitempty"`
+	ButtonList    *ButtonListWidget    `json:"buttonList,omitempty"`
+	Image         *ImageWidget         `json:"image,omitempty"`
+	Columns       *ColumnsWidget       `json:"columns,omitempty"`
+	Grid          *GridWidget          `json:"grid,omitempty"`
+	// UnknownType records the JSON key for widgets the TUI does not model
+	// (e.g. selectionInput, dateTimePicker, chipList). Renderer shows a
+	// placeholder so the user knows the bot included something we dropped.
+	UnknownType string `json:"unknownType,omitempty"`
+}
+
+type DecoratedTextWidget struct {
+	TopLabel    string    `json:"topLabel,omitempty"`
+	Text        string    `json:"text,omitempty"`
+	BottomLabel string    `json:"bottomLabel,omitempty"`
+	Icon        *CardIcon `json:"icon,omitempty"`
+	StartIcon   *CardIcon `json:"startIcon,omitempty"`
+	WrapText    bool      `json:"wrapText,omitempty"`
+	URL         string    `json:"url,omitempty"`
+}
+
+type TextParagraphWidget struct {
+	Text string `json:"text,omitempty"`
+}
+
+type ButtonListWidget struct {
+	Buttons []CardButton `json:"buttons,omitempty"`
+}
+
+type CardButton struct {
+	Text     string `json:"text,omitempty"`
+	AltText  string `json:"altText,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+type ImageWidget struct {
+	URL     string `json:"url,omitempty"`
+	AltText string `json:"altText,omitempty"`
+}
+
+type ColumnsWidget struct {
+	// Columns is the per-column widget list. Terminals don't have the width
+	// to render true columns, so the renderer prints them stacked with a
+	// separator. Keeping the structure preserves order if we ever pick up
+	// the slack on a wider layout.
+	Columns [][]CardWidget `json:"columns,omitempty"`
+}
+
+type GridWidget struct {
+	Title string     `json:"title,omitempty"`
+	Items []GridItem `json:"items,omitempty"`
+}
+
+type GridItem struct {
+	Title    string `json:"title,omitempty"`
+	Subtitle string `json:"subtitle,omitempty"`
+	ImageURL string `json:"imageUrl,omitempty"`
+}
+
+type CardIcon struct {
+	KnownIcon string `json:"knownIcon,omitempty"`
+	IconURL   string `json:"iconUrl,omitempty"`
+	AltText   string `json:"altText,omitempty"`
 }
 
 type MailLabel struct {
@@ -241,19 +345,9 @@ type WorkspaceClient interface {
 }
 
 type ClientOptions struct {
-	UpstreamPath  string
-	ForceFixture  bool
-	FixtureReason string
+	UpstreamPath string
 }
 
 func NewDefaultClient(opts ClientOptions) WorkspaceClient {
-	fixture := NewFixtureClient()
-	if opts.ForceFixture || opts.UpstreamPath == "" {
-		fixture.reason = opts.FixtureReason
-		return fixture
-	}
-	return &HybridClient{
-		primary:  NewCommandClient(opts.UpstreamPath),
-		fallback: fixture,
-	}
+	return NewCommandClient(opts.UpstreamPath)
 }

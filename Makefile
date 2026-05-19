@@ -1,10 +1,10 @@
 .PHONY: install build test check clean
 
 install:
-	go install .
+	go install ./cmd/gws
 
 build:
-	go build -o ./bin/gws .
+	go build -o ./bin/gws ./cmd/gws
 
 test:
 	go test ./...

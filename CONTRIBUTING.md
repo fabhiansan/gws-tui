@@ -5,16 +5,13 @@ Thanks for helping improve `gws-tui`.
 ## Development
 
 ```sh
-go build -o ./bin/gws .
-./bin/gws tui --fixtures
+go build -o ./bin/gws ./cmd/gws
+./bin/gws tui
 ```
 
-Fixture mode is the safest way to work on UI behavior without touching a real
-Google Workspace account:
-
-```sh
-GWS_TUI_USE_FIXTURES=1 ./bin/gws tui
-```
+Manual TUI development requires an authenticated upstream `gws` CLI. If the
+upstream binary is not discoverable as another `gws` on `PATH`, set
+`GWS_TUI_UPSTREAM=/path/to/upstream/gws` before running the local build.
 
 ## Checks
 
@@ -41,5 +38,4 @@ data, also run the manual smoke checklist in `docs/RELEASE_CHECKLIST.md`.
 
 This repository intentionally keeps non-`tui` commands delegated to an existing
 `gws` binary when available. Changes that affect command delegation should keep
-the Neovim plugin compatibility contract covered by the fixture and golden
-tests.
+the Neovim plugin compatibility contract covered by tests.

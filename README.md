@@ -10,13 +10,13 @@ gws tui
 
 The TUI is built with Bubble Tea, Bubbles, and Lip Gloss. It keeps the existing
 Lua Neovim plugin contract intact: non-`tui` commands are delegated to an
-installed `gws` binary when one is available, and fixture mode exists for
-deterministic compatibility tests.
+installed upstream `gws` binary.
 
 ## Project Status
 
 `gws-tui` is preparing for its first public release. Expect a local-first CLI
-workflow, fixture-backed tests, and optional daemon mode, but review
+workflow, an upstream `gws` dependency for real Workspace auth/API access, and
+optional daemon mode, but review
 `docs/RELEASE_CHECKLIST.md` before cutting a tag or announcing a release.
 
 Supported release targets for now are macOS and Linux. Windows is not part of
@@ -25,14 +25,40 @@ Unix-style process and socket behavior.
 
 ## Install
 
+Prerequisite: install and authenticate the upstream Google Workspace CLI as
+`gws` first, then verify it works:
+
 ```sh
-go install github.com/fabhiansan/gws-tui@latest
+gws auth status
+```
+
+Install the TUI binary:
+
+```sh
+go install github.com/fabhiansan/gws-tui/cmd/gws@latest
+gws tui
+```
+
+If the TUI binary shadows the upstream CLI on `PATH`, delegation should still
+find the next `gws` executable. If your upstream CLI lives somewhere custom, set:
+
+```sh
+export GWS_TUI_UPSTREAM=/path/to/upstream/gws
+```
+
+For release archives, download the archive for your OS/architecture, then:
+
+```sh
+tar -xzf gws-darwin-arm64.tar.gz
+mkdir -p ~/.local/bin
+install -m 0755 gws ~/.local/bin/gws
+gws tui
 ```
 
 For local development:
 
 ```sh
-go build -o ./bin/gws .
+go build -o ./bin/gws ./cmd/gws
 ./bin/gws tui
 ```
 
@@ -45,7 +71,6 @@ gws tui --feature mail
 gws tui --feature calendar
 gws tui --feature meet
 gws tui --auth
-gws tui --fixtures
 gws tui --daemon
 gws tui --no-daemon
 gws tui --no-icons
@@ -61,10 +86,9 @@ gws daemon restart
 gws daemon logs
 ```
 
-Set `GWS_TUI_USE_FIXTURES=1` to force deterministic fixture data. Without that
-flag, the TUI tries the installed Google Workspace CLI first and falls back to
-fixtures if auth/API calls fail. Run `gws tui --help` or `gws daemon --help`
-for the live flag list.
+The TUI requires the upstream Google Workspace CLI for live data. If it cannot
+find an upstream `gws`, it exits with a setup error instead of showing dummy
+data. Run `gws tui --help` or `gws daemon --help` for the live flag list.
 
 ## Keys
 
@@ -198,8 +222,9 @@ them.
 
 ## Compatibility
 
-The Lua plugin is not modified by this repository. Golden tests cover fixture
-JSON for the CLI shapes used by the plugin:
+The Lua plugin is not modified by this repository. Non-TUI commands are
+delegated to the upstream CLI, and tests cover the command parser plus the API
+shapes used by the plugin:
 
 - `gws auth status`
 - `gws chat spaces list`
@@ -220,9 +245,11 @@ Manual smoke remains required before a release:
 
 1. Build the binary.
 2. Put it on `PATH` ahead of the old `gws`, or set the plugin to use it.
-3. Run `:GwsOpen` in Neovim and verify existing plugin flows still work.
-4. Run `gws tui` and verify Chat, Mail, Calendar, and Meet screens open.
-5. Run `gws daemon start --detach && gws tui --daemon`, then open a second TUI
+3. Set `GWS_TUI_UPSTREAM` if the upstream CLI is not discoverable as another
+   `gws` on `PATH`.
+4. Run `:GwsOpen` in Neovim and verify existing plugin flows still work.
+5. Run `gws tui` and verify Chat, Mail, Calendar, and Meet screens open.
+6. Run `gws daemon start --detach && gws tui --daemon`, then open a second TUI
    and verify both clients receive live chat events.
 
 ## Contributing and Security

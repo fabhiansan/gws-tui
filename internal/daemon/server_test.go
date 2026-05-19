@@ -24,7 +24,7 @@ func TestServerFansOutSingleChatSubscriptionToMultipleClients(t *testing.T) {
 	defer cancel()
 
 	backend := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage, 1),
 		started:         make(chan struct{}),
 	}
@@ -105,7 +105,7 @@ func TestServerSnapshotAndDraftRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server := NewServer(api.NewFixtureClient(), Options{
+	server := NewServer(newTestWorkspaceClient(), Options{
 		SocketPath: socketPath,
 		CachePath:  filepath.Join(dir, "cache.json"),
 		DraftDir:   filepath.Join(dir, "drafts"),
@@ -164,7 +164,7 @@ func TestServerDoesNotStartLiveSubscriptionsWithoutClients(t *testing.T) {
 	defer cancel()
 
 	backend := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage, 1),
 		started:         make(chan struct{}),
 	}
@@ -207,7 +207,7 @@ func TestServerStopsPollingWhenLastSubscriberDisconnects(t *testing.T) {
 	defer cancel()
 
 	backend := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage, 1),
 		started:         make(chan struct{}),
 	}
@@ -259,7 +259,7 @@ func TestServerAutoSubscribesTopSpacesAndSurvivesClientDisconnect(t *testing.T) 
 	defer cancel()
 
 	backend := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage),
 		started:         make(chan struct{}),
 	}
@@ -272,7 +272,7 @@ func TestServerAutoSubscribesTopSpacesAndSurvivesClientDisconnect(t *testing.T) 
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(ctx, listener) }()
 
-	// Top 2 fixture spaces by most-recent message are spaces/alice
+	// Top 2 test spaces by most-recent message are spaces/alice
 	// (DM, 35min ago) and spaces/engineering (100min ago). Bootstrap
 	// should subscribe both.
 	waitFor(t, 2*time.Second, func() bool {
@@ -331,7 +331,7 @@ func TestServerPersistsPinAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend1 := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage),
 		started:         make(chan struct{}),
 	}
@@ -387,7 +387,7 @@ func TestServerPersistsPinAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend2 := &pushChatClient{
-		WorkspaceClient: api.NewFixtureClient(),
+		WorkspaceClient: newTestWorkspaceClient(),
 		events:          make(chan api.ChatMessage),
 		started:         make(chan struct{}),
 	}
@@ -418,7 +418,7 @@ func TestListenAndServeRemovesSocketOnShutdown(t *testing.T) {
 	socketDir := shortSocketDir(t)
 	socketPath := filepath.Join(socketDir, "daemon.sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	server := NewServer(api.NewFixtureClient(), Options{
+	server := NewServer(newTestWorkspaceClient(), Options{
 		SocketPath: socketPath,
 		CachePath:  filepath.Join(dir, "cache.json"),
 	})

@@ -110,6 +110,7 @@ func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken s
 			} `json:"thread"`
 			Attachment  []rawChatAttachment `json:"attachment"`
 			Attachments []rawChatAttachment `json:"attachments"`
+			CardsV2     json.RawMessage     `json:"cardsV2"`
 		} `json:"messages"`
 		NextPageToken string `json:"nextPageToken"`
 	}
@@ -137,6 +138,7 @@ func (c *CommandClient) ChatMessages(ctx context.Context, spaceName, pageToken s
 			SenderName:  fallback(msg.Sender.DisplayName, msg.Sender.Name),
 			Text:        text,
 			Attachments: attachments,
+			Cards:       decodeCards(msg.CardsV2),
 			CreateTime:  created,
 			ThreadID:    msg.Thread.Name,
 		})
@@ -334,6 +336,7 @@ func parseChatCloudEvent(line []byte, defaultSpace string) (ChatMessage, bool) {
 					Name string `json:"name"`
 				} `json:"space"`
 				Attachments []rawChatAttachment `json:"attachments"`
+				CardsV2     json.RawMessage     `json:"cardsV2"`
 			} `json:"message"`
 		} `json:"data"`
 	}
@@ -374,6 +377,7 @@ func parseChatCloudEvent(line []byte, defaultSpace string) (ChatMessage, bool) {
 		SenderName:  fallback(raw.Sender.DisplayName, raw.Sender.Name),
 		Text:        raw.Text,
 		Attachments: attachments,
+		Cards:       decodeCards(raw.CardsV2),
 		CreateTime:  created,
 	}, true
 }
@@ -967,6 +971,15 @@ func lastSegment(value string) string {
 	}
 	parts := strings.Split(value, "/")
 	return parts[len(parts)-1]
+}
+
+func firstLine(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	line, _, _ := strings.Cut(value, "\n")
+	return strings.TrimSpace(line)
 }
 
 func fallback(value, fallback string) string {

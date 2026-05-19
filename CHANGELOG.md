@@ -9,7 +9,10 @@ This project follows semantic versioning once public releases begin.
 - Prepare the repository for public GitHub release.
 - Document privacy, security, contribution, release, and Reddit launch
   workflows.
-- Align the Go module path and install command with the public repository URL.
+- Align the Go module path and install command with the public `cmd/gws`
+  command path.
+- Remove runtime dummy-data fallback; live data now requires an authenticated
+  upstream `gws` CLI.
 
 ## v0.1.0
 
@@ -19,7 +22,6 @@ Planned scope:
 
 - Standalone `gws tui` terminal UI for Google Workspace.
 - Chat, Mail, Calendar, and Meet feature panes.
-- Fixture mode for deterministic UI and compatibility tests.
 - Optional daemon mode for shared Workspace data loading and notifications.
 - Kitty inline image preview support.
 - Compatibility coverage for existing Neovim plugin command shapes.

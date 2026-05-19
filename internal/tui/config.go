@@ -33,7 +33,6 @@ type Config struct {
 	ImageCacheDir          string
 	DraftDir               string
 	LogPath                string
-	AllowFixtureNotice     bool
 }
 
 func LoadConfig() (Config, error) {
@@ -62,7 +61,6 @@ func LoadConfig() (Config, error) {
 		ImageCacheDir:          filepath.Join(cacheBase, "images"),
 		DraftDir:               filepath.Join(cacheBase, "drafts"),
 		LogPath:                filepath.Join(cacheBase, "tui.log"),
-		AllowFixtureNotice:     true,
 	}
 
 	file, err := os.Open(cfg.ConfigPath)
