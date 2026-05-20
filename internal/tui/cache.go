@@ -31,9 +31,20 @@ func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
 	m.mailLabels = cache.MailLabels
 	m.mailThreads = cache.MailThreads.Items
 	m.mailNext = cache.MailThreads.NextPageToken
+	m.calendars = cache.CalendarLists
+	m.calendarIndex = indexOfCalendar(cache.CalendarLists, cache.CalendarID)
 	m.events = cache.Events.Items
 	m.calendarNext = cache.Events.NextPageToken
 	m.meetSpaces = cache.MeetSpaces
+	m.taskLists = cache.TaskLists
+	m.taskListIndex = indexOfTaskList(cache.TaskLists, cache.TaskListID)
+	m.tasks = cache.Tasks.Items
+	m.taskNext = cache.Tasks.NextPageToken
+	m.driveFiles = cache.DriveFiles.Items
+	m.driveNext = cache.DriveFiles.NextPageToken
+	m.docFiles = cache.DocFiles.Items
+	m.docNext = cache.DocFiles.NextPageToken
+	m.doc = cache.Doc
 	m.userLabels = cache.UserLabels
 	m.membersBySpace = cache.MembersBySpace
 	m.selfUserIDs = cache.SelfUserIDs
@@ -123,7 +134,24 @@ func (m *Model) persistWorkspaceCache() {
 		Items:         m.events,
 		NextPageToken: m.calendarNext,
 	}
+	m.cache.CalendarLists = m.calendars
+	m.cache.CalendarID = m.selectedCalendar().ID
 	m.cache.MeetSpaces = m.meetSpaces
+	m.cache.TaskLists = m.taskLists
+	m.cache.Tasks = api.Page[api.TaskItem]{
+		Items:         m.tasks,
+		NextPageToken: m.taskNext,
+	}
+	m.cache.TaskListID = m.selectedTaskList().ID
+	m.cache.DriveFiles = api.Page[api.DriveFile]{
+		Items:         m.driveFiles,
+		NextPageToken: m.driveNext,
+	}
+	m.cache.DocFiles = api.Page[api.DriveFile]{
+		Items:         m.docFiles,
+		NextPageToken: m.docNext,
+	}
+	m.cache.Doc = m.doc
 	m.cache.UserLabels = m.userLabels
 	m.cache.MembersBySpace = m.membersBySpace
 	m.cache.SelfUserIDs = m.selfUserIDs

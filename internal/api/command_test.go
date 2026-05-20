@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -154,6 +155,46 @@ func TestCommandClientSendChatMessageUploadsAttachments(t *testing.T) {
 	}
 }
 
+func TestCommandClientChatMessageActionsUseChatResources(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	msg, err := client.EditChatMessage(context.Background(), "spaces/engineering/messages/msg-1", "edited text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ID != "msg-1" || msg.Space != "spaces/engineering" || msg.Text != "edited text" {
+		t.Fatalf("unexpected edited message: %#v", msg)
+	}
+	if err := client.DeleteChatMessage(context.Background(), "spaces/engineering/messages/msg-1"); err != nil {
+		t.Fatal(err)
+	}
+	space, err := client.CreateChatSpace(context.Background(), "Launch Room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if space.Name != "spaces/launch-room" || space.DisplayName != "Launch Room" {
+		t.Fatalf("unexpected created space: %#v", space)
+	}
+	setup, err := client.SetupChatSpace(context.Background(), "Launch Room", []string{"alice@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.Name != "spaces/launch-room-setup" {
+		t.Fatalf("unexpected setup space: %#v", setup)
+	}
+	reaction, err := client.AddChatReaction(context.Background(), "spaces/engineering/messages/msg-1", "\U0001F44D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaction != "spaces/engineering/messages/msg-1/reactions/reaction-1" {
+		t.Fatalf("unexpected reaction name: %q", reaction)
+	}
+	if err := client.DeleteChatReaction(context.Background(), reaction); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommandClientDownloadAttachmentUsesMediaResourceName(t *testing.T) {
 	t.Setenv("GWS_FAKE_COMMAND", "1")
 
@@ -173,6 +214,267 @@ func TestCommandClientDownloadAttachmentUsesMediaResourceName(t *testing.T) {
 	}
 	if string(payload) != "fake-media" {
 		t.Fatalf("unexpected downloaded payload: %q", payload)
+	}
+
+	mailOutputPath := filepath.Join(t.TempDir(), "mail.txt")
+	err = client.DownloadAttachment(context.Background(), Attachment{
+		ResourceName: "gmail/users/me/messages/msg-attach/attachments/att-1",
+		ContentType:  "text/plain",
+	}, mailOutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err = os.ReadFile(mailOutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "mail-attachment" {
+		t.Fatalf("unexpected gmail attachment payload: %q", payload)
+	}
+
+	driveOutputPath := filepath.Join(t.TempDir(), "drive.bin")
+	err = client.DownloadAttachment(context.Background(), Attachment{
+		ResourceName: "drive/files/drive-download",
+		Name:         "drive.bin",
+	}, driveOutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err = os.ReadFile(driveOutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "drive-media" {
+		t.Fatalf("unexpected drive payload: %q", payload)
+	}
+}
+
+func TestCommandClientMailLabelsUsesGmailLabelsList(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	labels, err := client.MailLabels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) < 3 {
+		t.Fatalf("expected labels plus All Mail, got %#v", labels)
+	}
+	if labels[0].Name != "Inbox" || labels[0].LabelIDs[0] != "INBOX" {
+		t.Fatalf("unexpected first label: %#v", labels[0])
+	}
+	if labels[len(labels)-1].Name != "All Mail" || labels[len(labels)-1].Query == "" {
+		t.Fatalf("expected synthesized All Mail query label, got %#v", labels[len(labels)-1])
+	}
+}
+
+func TestCommandClientSendMailSendsRFC822RawMessage(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	thread, err := client.SendMail(context.Background(), MailDraft{
+		To:       "you@example.com",
+		Cc:       "copy@example.com",
+		Subject:  "Launch",
+		Body:     "Hi team\nShip it.",
+		ThreadID: "thread-send",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread.ID != "thread-send" {
+		t.Fatalf("expected sent thread id, got %q", thread.ID)
+	}
+	if thread.Subject != "Launch" || thread.Body != "Hi team\nShip it." {
+		t.Fatalf("sent thread did not preserve draft fields: %#v", thread)
+	}
+}
+
+func TestCommandClientMailDraftsUseGmailDraftResources(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	drafts, err := client.MailDrafts(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts.Items) != 1 || drafts.Items[0].ID != "draft-1" || drafts.Items[0].Subject != "Draft subject" {
+		t.Fatalf("unexpected drafts: %#v", drafts)
+	}
+	created, err := client.CreateMailDraft(context.Background(), MailDraft{
+		To:      "you@example.com",
+		Subject: "Draft subject",
+		Body:    "draft body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "draft-created" || created.To != "you@example.com" {
+		t.Fatalf("unexpected created draft: %#v", created)
+	}
+	thread, err := client.SendMailDraft(context.Background(), "draft-created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread.ID != "thread-draft-sent" {
+		t.Fatalf("unexpected sent draft thread: %#v", thread)
+	}
+}
+
+func TestCommandClientArchiveTrashAndToggleStarUseThreadResources(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	if err := client.ArchiveMail(context.Background(), "thread-archive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.TrashMail(context.Background(), "thread-trash"); err != nil {
+		t.Fatal(err)
+	}
+	thread, err := client.ToggleStar(context.Background(), "thread-unstarred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !thread.Starred {
+		t.Fatalf("expected ToggleStar to return a starred thread: %#v", thread)
+	}
+	if !containsLabel(thread.Labels, "STARRED") {
+		t.Fatalf("expected STARRED label in returned thread: %#v", thread.Labels)
+	}
+	readThread, err := client.SetMailUnread(context.Background(), "thread-read", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readThread.Unread || containsLabel(readThread.Labels, "UNREAD") {
+		t.Fatalf("expected read thread without UNREAD label: %#v", readThread)
+	}
+	unreadThread, err := client.SetMailUnread(context.Background(), "thread-unread", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unreadThread.Unread || !containsLabel(unreadThread.Labels, "UNREAD") {
+		t.Fatalf("expected unread thread with UNREAD label: %#v", unreadThread)
+	}
+}
+
+func TestCommandClientRSVPAndDeleteEventUseCalendarEndpoints(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	event, err := client.RSVPEvent(context.Background(), "event-rsvp", "accepted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != "event-rsvp" || event.RSVP != "accepted" {
+		t.Fatalf("unexpected RSVP result: %#v", event)
+	}
+	if err := client.DeleteEvent(context.Background(), "event-delete"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommandClientCalendarListsUpdateAndMoveEvents(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	calendars, err := client.CalendarLists(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calendars.Items) != 2 || calendars.Items[1].ID != "team@example.com" {
+		t.Fatalf("unexpected calendars: %#v", calendars)
+	}
+	updated, err := client.UpdateEvent(context.Background(), "event-update", EventDraft{
+		CalendarID: "team@example.com",
+		Summary:    "Updated planning",
+		Start:      time.Date(2026, 5, 20, 12, 0, 0, 0, time.FixedZone("WIB", 7*60*60)),
+		End:        time.Date(2026, 5, 20, 13, 0, 0, 0, time.FixedZone("WIB", 7*60*60)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != "event-update" || updated.CalendarID != "team@example.com" || updated.Summary != "Updated planning" {
+		t.Fatalf("unexpected updated event: %#v", updated)
+	}
+	moved, err := client.MoveEvent(context.Background(), "event-update", "team@example.com", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.CalendarID != "primary" {
+		t.Fatalf("unexpected moved event: %#v", moved)
+	}
+}
+
+func TestCommandClientTasksLoadsTaskListsAndTasks(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	lists, err := client.TaskLists(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists.Items) != 1 || lists.Items[0].ID != "tasks-default" {
+		t.Fatalf("unexpected task lists: %#v", lists)
+	}
+	tasks, err := client.Tasks(context.Background(), TaskQuery{TaskListID: "tasks-default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Title != "Review launch checklist" {
+		t.Fatalf("unexpected tasks: %#v", tasks)
+	}
+	if tasks.Items[0].TaskListID != "tasks-default" {
+		t.Fatalf("expected task list id stamped on task: %#v", tasks.Items[0])
+	}
+}
+
+func TestCommandClientMeetSpacesLoadsConferenceRecordDetails(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	meet, err := client.MeetSpaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meet.Items) != 1 || meet.Items[0].Name != "conferenceRecords/rec-1" {
+		t.Fatalf("unexpected meet records: %#v", meet)
+	}
+	record := meet.Items[0]
+	if len(record.Participants) != 1 || record.Participants[0].DisplayName != "Alice" {
+		t.Fatalf("participants not loaded: %#v", record.Participants)
+	}
+	if len(record.Recordings) != 1 || record.Recordings[0].File != "drive-files/recording-1" {
+		t.Fatalf("recordings not loaded: %#v", record.Recordings)
+	}
+	if len(record.Transcripts) != 1 || record.Transcripts[0].File != "docs/doc-1" {
+		t.Fatalf("transcripts not loaded: %#v", record.Transcripts)
+	}
+}
+
+func TestCommandClientDriveAndDocs(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	files, err := client.DriveFiles(context.Background(), DriveQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files.Items) != 1 || files.Items[0].ID != "drive-1" {
+		t.Fatalf("unexpected drive files: %#v", files)
+	}
+	docs, err := client.Docs(context.Background(), DriveQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs.Items) != 1 || docs.Items[0].ID != "doc-1" {
+		t.Fatalf("unexpected docs: %#v", docs)
+	}
+	doc, err := client.Doc(context.Background(), "doc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Title != "Launch notes" || doc.Body != "Hello docs\nSecond line" {
+		t.Fatalf("unexpected doc: %#v", doc)
 	}
 }
 
@@ -317,6 +619,96 @@ func fakeCommand() {
 		}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "patch":
+		if params["name"] != "spaces/engineering/messages/msg-1" || params["updateMask"] != "text" {
+			fmt.Fprintf(os.Stderr, "unexpected message patch params: %v\n", params)
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		if body["text"] != "edited text" {
+			fmt.Fprintf(os.Stderr, "unexpected message patch body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{
+			"name": "spaces/engineering/messages/msg-1",
+			"text": "edited text",
+			"createTime": "2026-05-18T10:00:00+07:00",
+			"sender": {"name": "users/me", "displayName": "Me"}
+		}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "delete":
+		if params["name"] != "spaces/engineering/messages/msg-1" {
+			fmt.Fprintf(os.Stderr, "unexpected message delete params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "create":
+		body := fakeJSONArg("--json")
+		if body["displayName"] != "Launch Room" || body["spaceType"] != "SPACE" {
+			fmt.Fprintf(os.Stderr, "unexpected space create body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"name":"spaces/launch-room","displayName":"Launch Room","spaceType":"SPACE"}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "setup":
+		body := fakeJSONArg("--json")
+		space, _ := body["space"].(map[string]any)
+		if space["displayName"] != "Launch Room" || space["spaceType"] != "SPACE" {
+			fmt.Fprintf(os.Stderr, "unexpected space setup body: %v\n", body)
+			os.Exit(2)
+		}
+		memberships, _ := body["memberships"].([]any)
+		if len(memberships) != 1 {
+			fmt.Fprintf(os.Stderr, "unexpected memberships body: %v\n", body)
+			os.Exit(2)
+		}
+		first, _ := memberships[0].(map[string]any)
+		member, _ := first["member"].(map[string]any)
+		if member["name"] != "users/alice@example.com" {
+			fmt.Fprintf(os.Stderr, "unexpected member body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"name":"spaces/launch-room-setup","displayName":"Launch Room","spaceType":"SPACE"}`)
+	case len(os.Args) >= 6 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "reactions" &&
+		os.Args[5] == "create":
+		if params["parent"] != "spaces/engineering/messages/msg-1" {
+			fmt.Fprintf(os.Stderr, "unexpected reaction create params: %v\n", params)
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		emoji, _ := body["emoji"].(map[string]any)
+		if emoji["unicode"] != "\U0001F44D" {
+			fmt.Fprintf(os.Stderr, "unexpected reaction body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"name":"spaces/engineering/messages/msg-1/reactions/reaction-1"}`)
+	case len(os.Args) >= 6 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "reactions" &&
+		os.Args[5] == "delete":
+		if params["name"] != "spaces/engineering/messages/msg-1/reactions/reaction-1" {
+			fmt.Fprintf(os.Stderr, "unexpected reaction delete params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
 		os.Args[2] == "media" &&
 		os.Args[3] == "download":
 		if params["resourceName"] != "spaces/engineering/messages/msg-1/attachments/image-1" {
@@ -342,8 +734,432 @@ func fakeCommand() {
 			fmt.Fprintf(os.Stderr, "write output: %v\n", err)
 			os.Exit(2)
 		}
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "labels" &&
+		os.Args[4] == "list":
+		if params["userId"] != "me" {
+			fmt.Fprintf(os.Stderr, "unexpected userId: %v\n", params["userId"])
+			os.Exit(2)
+		}
+		fmt.Print(`{"labels":[
+			{"id":"INBOX","name":"Inbox","type":"system"},
+			{"id":"STARRED","name":"Starred","type":"system"}
+		]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "drafts" &&
+		os.Args[4] == "list":
+		if params["userId"] != "me" || params["maxResults"] != float64(20) {
+			fmt.Fprintf(os.Stderr, "unexpected drafts list params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"drafts":[{"id":"draft-1","message":{
+			"id":"msg-draft","threadId":"thread-draft","snippet":"draft body",
+			"internalDate":"1779199200000",
+			"payload":{"headers":[
+				{"name":"To","value":"you@example.com"},
+				{"name":"Subject","value":"Draft subject"}
+			]}
+		}}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "drafts" &&
+		os.Args[4] == "create":
+		if params["userId"] != "me" {
+			fmt.Fprintf(os.Stderr, "unexpected drafts create params: %v\n", params)
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		message, _ := body["message"].(map[string]any)
+		raw, _ := message["raw"].(string)
+		decoded := fakeDecodeBase64URL(raw)
+		for _, want := range []string{"To: you@example.com\r\n", "Subject: Draft subject\r\n", "\r\ndraft body"} {
+			if !strings.Contains(decoded, want) {
+				fmt.Fprintf(os.Stderr, "draft raw missing %q in %q\n", want, decoded)
+				os.Exit(2)
+			}
+		}
+		fmt.Print(`{"id":"draft-created","message":{
+			"id":"msg-created","threadId":"thread-created","snippet":"draft body",
+			"internalDate":"1779199200000",
+			"payload":{"headers":[
+				{"name":"To","value":"you@example.com"},
+				{"name":"Subject","value":"Draft subject"}
+			]}
+		}}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "drafts" &&
+		os.Args[4] == "send":
+		if params["userId"] != "me" {
+			fmt.Fprintf(os.Stderr, "unexpected drafts send params: %v\n", params)
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		if body["id"] != "draft-created" {
+			fmt.Fprintf(os.Stderr, "unexpected draft send body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"id":"msg-draft-sent","threadId":"thread-draft-sent","labelIds":["SENT"],"payload":{"headers":[{"name":"Subject","value":"Draft subject"}]}}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "attachments" &&
+		len(os.Args) >= 6 &&
+		os.Args[5] == "get":
+		if params["userId"] != "me" || params["messageId"] != "msg-attach" || params["id"] != "att-1" {
+			fmt.Fprintf(os.Stderr, "unexpected gmail attachment params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Printf(`{"data":%q,"size":15}`, base64.URLEncoding.EncodeToString([]byte("mail-attachment")))
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "messages" &&
+		os.Args[4] == "send":
+		if params["userId"] != "me" {
+			fmt.Fprintf(os.Stderr, "unexpected userId: %v\n", params["userId"])
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		if body["threadId"] != "thread-send" {
+			fmt.Fprintf(os.Stderr, "unexpected threadId body: %v\n", body["threadId"])
+			os.Exit(2)
+		}
+		raw, _ := body["raw"].(string)
+		message := fakeDecodeBase64URL(raw)
+		for _, want := range []string{
+			"To: you@example.com\r\n",
+			"Cc: copy@example.com\r\n",
+			"Subject: Launch\r\n",
+			"In-Reply-To: <thread-send>\r\n",
+			"References: <thread-send>\r\n",
+			"\r\nHi team\r\nShip it.",
+		} {
+			if !strings.Contains(message, want) {
+				fmt.Fprintf(os.Stderr, "raw message missing %q in %q\n", want, message)
+				os.Exit(2)
+			}
+		}
+		fmt.Print(`{"id":"msg-send","threadId":"thread-send","labelIds":["SENT"]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "threads" &&
+		os.Args[4] == "modify":
+		if params["userId"] != "me" {
+			fmt.Fprintf(os.Stderr, "unexpected userId: %v\n", params["userId"])
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		switch params["id"] {
+		case "thread-archive":
+			if !fakeStringSliceContains(body["removeLabelIds"], "INBOX") {
+				fmt.Fprintf(os.Stderr, "archive did not remove INBOX: %v\n", body)
+				os.Exit(2)
+			}
+		case "thread-unstarred":
+			if !fakeStringSliceContains(body["addLabelIds"], "STARRED") {
+				fmt.Fprintf(os.Stderr, "toggle did not add STARRED: %v\n", body)
+				os.Exit(2)
+			}
+		case "thread-read":
+			if !fakeStringSliceContains(body["removeLabelIds"], "UNREAD") {
+				fmt.Fprintf(os.Stderr, "mark-read did not remove UNREAD: %v\n", body)
+				os.Exit(2)
+			}
+		case "thread-unread":
+			if !fakeStringSliceContains(body["addLabelIds"], "UNREAD") {
+				fmt.Fprintf(os.Stderr, "mark-unread did not add UNREAD: %v\n", body)
+				os.Exit(2)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "unexpected thread modify id: %v\n", params["id"])
+			os.Exit(2)
+		}
+		fmt.Print(`{}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "threads" &&
+		os.Args[4] == "trash":
+		if params["userId"] != "me" || params["id"] != "thread-trash" {
+			fmt.Fprintf(os.Stderr, "unexpected trash params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "gmail" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "threads" &&
+		os.Args[4] == "get":
+		if params["userId"] != "me" || params["format"] != "full" {
+			fmt.Fprintf(os.Stderr, "unexpected thread get params: %v\n", params)
+			os.Exit(2)
+		}
+		threadID, _ := params["id"].(string)
+		labels := `["INBOX"]`
+		switch threadID {
+		case "thread-unstarred", "thread-unread":
+		case "thread-read":
+			labels = `["INBOX","UNREAD"]`
+		default:
+			fmt.Fprintf(os.Stderr, "unexpected thread get id: %v\n", params["id"])
+			os.Exit(2)
+		}
+		fmt.Printf(`{"id":%q,"messages":[{
+			"id":"msg-unstarred",
+			"threadId":%q,
+			"labelIds":%s,
+			"internalDate":"1779199200000",
+			"payload":{"headers":[
+				{"name":"From","value":"Alice <alice@example.com>"},
+				{"name":"Subject","value":"Needs star"}
+			],"mimeType":"text/plain","body":{"data":"SGVsbG8="}}
+		}]}`, threadID, threadID, labels)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "calendarList" &&
+		os.Args[3] == "list":
+		if params["maxResults"] != float64(100) {
+			fmt.Fprintf(os.Stderr, "unexpected calendarList list params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"items":[
+			{"id":"primary","summary":"Primary","primary":true,"accessRole":"owner"},
+			{"id":"team@example.com","summary":"Team","accessRole":"writer"}
+		]}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "calendarList" &&
+		os.Args[3] == "get":
+		if params["calendarId"] != "primary" {
+			fmt.Fprintf(os.Stderr, "unexpected calendarList params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"id":"me@example.com"}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "events" &&
+		os.Args[3] == "get":
+		if params["calendarId"] != "primary" || params["eventId"] != "event-rsvp" {
+			fmt.Fprintf(os.Stderr, "unexpected event get params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"id":"event-rsvp","summary":"Planning","start":{"dateTime":"2026-05-20T10:00:00+07:00"},"end":{"dateTime":"2026-05-20T11:00:00+07:00"},"attendees":[{"email":"me@example.com","responseStatus":"needsAction"},{"email":"you@example.com","responseStatus":"accepted"}]}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "events" &&
+		os.Args[3] == "patch":
+		switch params["eventId"] {
+		case "event-rsvp":
+			if params["calendarId"] != "primary" || params["sendUpdates"] != "none" {
+				fmt.Fprintf(os.Stderr, "unexpected event patch params: %v\n", params)
+				os.Exit(2)
+			}
+			body := fakeJSONArg("--json")
+			attendees, _ := body["attendees"].([]any)
+			if len(attendees) == 0 {
+				fmt.Fprintf(os.Stderr, "missing attendees patch body: %v\n", body)
+				os.Exit(2)
+			}
+			self, _ := attendees[0].(map[string]any)
+			if self["email"] != "me@example.com" || self["responseStatus"] != "accepted" {
+				fmt.Fprintf(os.Stderr, "unexpected attendee patch: %v\n", body)
+				os.Exit(2)
+			}
+			fmt.Print(`{"id":"event-rsvp","summary":"Planning","start":{"dateTime":"2026-05-20T10:00:00+07:00"},"end":{"dateTime":"2026-05-20T11:00:00+07:00"},"attendees":[{"email":"me@example.com","responseStatus":"accepted"},{"email":"you@example.com","responseStatus":"accepted"}]}`)
+		case "event-update":
+			if params["calendarId"] != "team@example.com" || params["sendUpdates"] != "none" {
+				fmt.Fprintf(os.Stderr, "unexpected event update params: %v\n", params)
+				os.Exit(2)
+			}
+			body := fakeJSONArg("--json")
+			if body["summary"] != "Updated planning" {
+				fmt.Fprintf(os.Stderr, "unexpected event update body: %v\n", body)
+				os.Exit(2)
+			}
+			fmt.Print(`{"id":"event-update","summary":"Updated planning","start":{"dateTime":"2026-05-20T12:00:00+07:00"},"end":{"dateTime":"2026-05-20T13:00:00+07:00"}}`)
+		default:
+			fmt.Fprintf(os.Stderr, "unexpected event patch params: %v\n", params)
+			os.Exit(2)
+		}
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "events" &&
+		os.Args[3] == "move":
+		if params["calendarId"] != "team@example.com" || params["eventId"] != "event-update" || params["destination"] != "primary" {
+			fmt.Fprintf(os.Stderr, "unexpected event move params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"id":"event-update","summary":"Updated planning","start":{"dateTime":"2026-05-20T12:00:00+07:00"},"end":{"dateTime":"2026-05-20T13:00:00+07:00"}}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "calendar" &&
+		os.Args[2] == "events" &&
+		os.Args[3] == "delete":
+		if params["calendarId"] != "primary" || params["eventId"] != "event-delete" {
+			fmt.Fprintf(os.Stderr, "unexpected event delete params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "meet" &&
+		os.Args[2] == "conferenceRecords" &&
+		os.Args[3] == "list":
+		if params["pageSize"] != float64(20) {
+			fmt.Fprintf(os.Stderr, "unexpected conference records params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"conferenceRecords":[{"name":"conferenceRecords/rec-1","space":"spaces/meet-1","startTime":"2026-05-20T09:00:00+07:00","endTime":"2026-05-20T10:00:00+07:00"}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "meet" &&
+		os.Args[2] == "conferenceRecords" &&
+		os.Args[3] == "participants" &&
+		os.Args[4] == "list":
+		if params["parent"] != "conferenceRecords/rec-1" {
+			fmt.Fprintf(os.Stderr, "unexpected participants params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"participants":[{"name":"conferenceRecords/rec-1/participants/alice","earliestStartTime":"2026-05-20T09:00:00+07:00","latestEndTime":"2026-05-20T10:00:00+07:00","signedinUser":{"user":"users/alice","displayName":"Alice"}}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "meet" &&
+		os.Args[2] == "conferenceRecords" &&
+		os.Args[3] == "recordings" &&
+		os.Args[4] == "list":
+		if params["parent"] != "conferenceRecords/rec-1" {
+			fmt.Fprintf(os.Stderr, "unexpected recordings params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"recordings":[{"name":"conferenceRecords/rec-1/recordings/recording-1","state":"FILE_GENERATED","startTime":"2026-05-20T09:00:00+07:00","endTime":"2026-05-20T10:00:00+07:00","driveDestination":{"file":"drive-files/recording-1"}}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "meet" &&
+		os.Args[2] == "conferenceRecords" &&
+		os.Args[3] == "transcripts" &&
+		os.Args[4] == "list":
+		if params["parent"] != "conferenceRecords/rec-1" {
+			fmt.Fprintf(os.Stderr, "unexpected transcripts params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"transcripts":[{"name":"conferenceRecords/rec-1/transcripts/transcript-1","state":"FILE_GENERATED","startTime":"2026-05-20T09:00:00+07:00","endTime":"2026-05-20T10:00:00+07:00","docsDestination":{"document":"docs/doc-1"}}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "tasks" &&
+		os.Args[2] == "tasklists" &&
+		os.Args[3] == "list":
+		if params["maxResults"] != float64(100) {
+			fmt.Fprintf(os.Stderr, "unexpected tasklists params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"items":[{"id":"tasks-default","title":"My Tasks","updated":"2026-05-20T08:00:00+07:00"}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "tasks" &&
+		os.Args[2] == "tasks" &&
+		os.Args[3] == "list":
+		if params["tasklist"] != "tasks-default" || params["maxResults"] != float64(100) || params["showCompleted"] != true || params["showDeleted"] != false {
+			fmt.Fprintf(os.Stderr, "unexpected tasks params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"items":[{"id":"task-1","title":"Review launch checklist","notes":"Ship docs","status":"needsAction","due":"2026-05-21T00:00:00.000Z","updated":"2026-05-20T08:30:00+07:00"}]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "drive" &&
+		os.Args[2] == "files" &&
+		os.Args[3] == "get":
+		if params["fileId"] != "drive-download" || params["alt"] != "media" {
+			fmt.Fprintf(os.Stderr, "unexpected drive get params: %v\n", params)
+			os.Exit(2)
+		}
+		outputIndex := -1
+		for i, arg := range os.Args {
+			if arg == "--output" && i+1 < len(os.Args) {
+				outputIndex = i + 1
+				break
+			}
+		}
+		if outputIndex == -1 {
+			fmt.Fprintln(os.Stderr, "missing drive --output")
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Args[outputIndex], []byte("drive-media"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "write drive output: %v\n", err)
+			os.Exit(2)
+		}
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "drive" &&
+		os.Args[2] == "files" &&
+		os.Args[3] == "list":
+		if params["pageSize"] != float64(50) {
+			fmt.Fprintf(os.Stderr, "unexpected drive params: %v\n", params)
+			os.Exit(2)
+		}
+		q, _ := params["q"].(string)
+		if strings.Contains(q, "application/vnd.google-apps.document") {
+			fmt.Print(`{"files":[{"id":"doc-1","name":"Launch notes","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-05-20T08:00:00+07:00","webViewLink":"https://docs.google.com/document/d/doc-1"}]}`)
+		} else {
+			fmt.Print(`{"files":[{"id":"drive-1","name":"Release checklist.pdf","mimeType":"application/pdf","modifiedTime":"2026-05-20T08:00:00+07:00","webViewLink":"https://drive.google.com/file/d/drive-1","size":"2048"}]}`)
+		}
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "docs" &&
+		os.Args[2] == "documents" &&
+		os.Args[3] == "get":
+		if params["documentId"] != "doc-1" {
+			fmt.Fprintf(os.Stderr, "unexpected doc params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"documentId":"doc-1","title":"Launch notes","body":{"content":[{"paragraph":{"elements":[{"textRun":{"content":"Hello docs\n"}}]}},{"paragraph":{"elements":[{"textRun":{"content":"Second line\n"}}]}}]}}`)
 	default:
 		fmt.Fprintf(os.Stderr, "unexpected command: %s\n", strings.Join(os.Args[1:], " "))
 		os.Exit(2)
 	}
+}
+
+func fakeJSONArg(flag string) map[string]any {
+	value, ok := fakeArg(flag)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "missing %s\n", flag)
+		os.Exit(2)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid %s: %v\n", flag, err)
+		os.Exit(2)
+	}
+	return out
+}
+
+func fakeArg(flag string) (string, bool) {
+	for i, arg := range os.Args {
+		if arg == flag && i+1 < len(os.Args) {
+			return os.Args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func fakeDecodeBase64URL(value string) string {
+	for _, encoding := range []*base64.Encoding{base64.URLEncoding, base64.RawURLEncoding} {
+		if decoded, err := encoding.DecodeString(value); err == nil {
+			return string(decoded)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "invalid base64url raw message\n")
+	os.Exit(2)
+	return ""
+}
+
+func fakeStringSliceContains(value any, target string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }

@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	MaxFrameBytes   = 16 << 20
 )
 
@@ -57,6 +57,30 @@ type SendChatMessageParams struct {
 	Attachments []LocalAttachment `json:"attachments,omitempty"`
 }
 
+type EditChatMessageParams struct {
+	MessageName string `json:"message_name"`
+	Text        string `json:"text"`
+}
+
+type ChatMessageNameParams struct {
+	MessageName string `json:"message_name"`
+}
+
+type CreateChatSpaceParams struct {
+	DisplayName string `json:"display_name"`
+}
+
+type SetupChatSpaceParams struct {
+	DisplayName string   `json:"display_name"`
+	Members     []string `json:"members,omitempty"`
+}
+
+type ChatReactionParams struct {
+	MessageName  string `json:"message_name,omitempty"`
+	ReactionName string `json:"reaction_name,omitempty"`
+	Emoji        string `json:"emoji,omitempty"`
+}
+
 type SpaceNameParams struct {
 	SpaceName string `json:"space_name"`
 }
@@ -78,8 +102,21 @@ type SendMailParams struct {
 	Draft MailDraft `json:"draft"`
 }
 
+type MailDraftsParams struct {
+	PageToken string `json:"page_token,omitempty"`
+}
+
+type MailDraftIDParams struct {
+	DraftID string `json:"draft_id"`
+}
+
 type ThreadIDParams struct {
 	ThreadID string `json:"thread_id"`
+}
+
+type SetMailUnreadParams struct {
+	ThreadID string `json:"thread_id"`
+	Unread   bool   `json:"unread"`
 }
 
 type CalendarEventsParams struct {
@@ -92,6 +129,17 @@ type QuickAddEventParams struct {
 
 type CreateEventParams struct {
 	Draft EventDraft `json:"draft"`
+}
+
+type UpdateEventParams struct {
+	EventID string     `json:"event_id"`
+	Draft   EventDraft `json:"draft"`
+}
+
+type MoveEventParams struct {
+	EventID               string `json:"event_id"`
+	SourceCalendarID      string `json:"source_calendar_id"`
+	DestinationCalendarID string `json:"destination_calendar_id"`
 }
 
 type RSVPEventParams struct {
@@ -109,6 +157,18 @@ type CreateMeetSpaceParams struct {
 
 type MeetSpaceNameParams struct {
 	Name string `json:"name"`
+}
+
+type TasksParams struct {
+	Query TaskQuery `json:"query"`
+}
+
+type DriveFilesParams struct {
+	Query DriveQuery `json:"query"`
+}
+
+type DocIDParams struct {
+	DocumentID string `json:"document_id"`
 }
 
 type SubscribeTopicsParams struct {

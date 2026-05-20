@@ -64,6 +64,18 @@ die()  { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Returns 0 only if the upstream CLI holds a usable Workspace credential.
+# `gws auth status` exits 0 even when signed out, so inspect its JSON instead.
+upstream_authenticated() {
+	local json
+	json="$("$UPSTREAM_GWS" auth status 2>/dev/null)" || return 1
+	[[ "$json" == *'"auth_method"'* ]] || return 1
+	case "$json" in
+		*'"auth_method": "none"'* | *'"auth_method":"none"'*) return 1 ;;
+	esac
+	return 0
+}
+
 trap 'printf "%s\n" "${C_RED}install.sh failed at line ${LINENO}.${C_RESET}" >&2' ERR
 
 # ---------------------------------------------------------------------------
@@ -128,26 +140,37 @@ step "Building and installing the gws TUI"
 
 GOBIN_DIR="$(go env GOBIN)"
 [[ -n "$GOBIN_DIR" ]] || GOBIN_DIR="$(go env GOPATH)/bin"
+LOCAL_BIN="$HOME/.local/bin"
+UPSTREAM_DIR="$(dirname "$UPSTREAM_GWS")"
 
+# 1-based index of a directory within PATH; 99999 when it is absent.
+path_pos() {
+	local target="$1" i=1 d
+	local IFS=:
+	for d in $PATH; do
+		[[ "$d" == "$target" ]] && { printf '%s' "$i"; return 0; }
+		i=$((i + 1))
+	done
+	printf '%s' 99999
+}
+UPSTREAM_POS="$(path_pos "$UPSTREAM_DIR")"
+
+# The TUI binary and the upstream CLI are both named `gws`. Install the TUI
+# into a PATH directory that resolves *before* the upstream, otherwise typing
+# `gws tui` would hit the upstream CLI (which has no `tui` command) and fail.
 PATH_HINT=""
-case ":$PATH:" in
-	*":$GOBIN_DIR:"*)
-		info "go install ./cmd/gws  ->  $GOBIN_DIR"
-		go install ./cmd/gws
-		TUI_GWS="$GOBIN_DIR/gws"
-		;;
-	*)
-		warn "$GOBIN_DIR is not on PATH; falling back to ~/.local/bin"
-		mkdir -p "$HOME/.local/bin"
-		info "go build  ->  $HOME/.local/bin/gws"
-		go build -o "$HOME/.local/bin/gws" ./cmd/gws
-		TUI_GWS="$HOME/.local/bin/gws"
-		case ":$PATH:" in
-			*":$HOME/.local/bin:"*) ;;
-			*) PATH_HINT="$HOME/.local/bin" ;;
-		esac
-		;;
-esac
+if [[ "$(path_pos "$GOBIN_DIR")" -lt "$UPSTREAM_POS" ]]; then
+	info "go install ./cmd/gws  ->  $GOBIN_DIR"
+	go install ./cmd/gws
+	TUI_GWS="$GOBIN_DIR/gws"
+else
+	mkdir -p "$LOCAL_BIN"
+	info "go build  ->  $LOCAL_BIN/gws"
+	go build -o "$LOCAL_BIN/gws" ./cmd/gws
+	TUI_GWS="$LOCAL_BIN/gws"
+	# Flag a PATH change only when ~/.local/bin won't win over the upstream.
+	[[ "$(path_pos "$LOCAL_BIN")" -lt "$UPSTREAM_POS" ]] || PATH_HINT="$LOCAL_BIN"
+fi
 ok "TUI installed: $TUI_GWS"
 
 # ---------------------------------------------------------------------------
@@ -155,6 +178,7 @@ ok "TUI installed: $TUI_GWS"
 # ---------------------------------------------------------------------------
 step "Checking PATH"
 
+hash -r 2>/dev/null || true
 RESOLVED_GWS="$(command -v gws || true)"
 if [[ -z "$RESOLVED_GWS" ]]; then
 	warn "no 'gws' found on PATH yet — see the PATH note below."
@@ -169,7 +193,8 @@ else
 fi
 
 if [[ -n "$PATH_HINT" ]]; then
-	warn "$PATH_HINT is not on PATH. Add this to your shell rc (~/.zshrc):"
+	warn "$PATH_HINT must come before $UPSTREAM_DIR on PATH for 'gws tui' to work."
+	warn "Add this to your shell rc (~/.zshrc), then restart your shell:"
 	printf '\n    export PATH="%s:$PATH"\n' "$PATH_HINT"
 fi
 
@@ -203,9 +228,39 @@ print_manual_setup() {
      Download the JSON file it offers.
        https://console.cloud.google.com/apis/credentials
 
-  (Tip: install the gcloud CLI and re-run this script to automate steps 1-2.)
+  (Tip: install the gcloud CLI to let this script create the project and
+   OAuth client for you, skipping all the manual steps above.)
 
 EOF
+}
+
+# Offer to install the gcloud CLI (macOS/Homebrew) so 'gws auth setup' can run.
+offer_install_gcloud() {
+	local reply
+	if [[ "$(uname -s)" != "Darwin" ]] || ! have brew; then
+		info "Install the gcloud CLI to enable automated setup:"
+		info "  https://cloud.google.com/sdk/docs/install"
+		return
+	fi
+	info "The gcloud CLI is not installed — 'gws auth setup' needs it."
+	printf '%s' "  Install gcloud now via Homebrew? [y/N] "
+	read -r reply || reply=""
+	case "${reply:-N}" in
+		[Yy]*)
+			if brew install --cask google-cloud-sdk; then
+				hash -r 2>/dev/null || true
+				if have gcloud; then
+					ok "gcloud installed."
+				else
+					warn "gcloud installed but not on PATH in this shell."
+					warn "open a new terminal, then re-run:  bash scripts/install.sh"
+				fi
+			else
+				warn "gcloud install failed — using manual path."
+			fi
+			;;
+		*) info "skipping gcloud install; using manual path." ;;
+	esac
 }
 
 if [[ $OPT_NO_AUTH -eq 1 ]]; then
@@ -214,7 +269,7 @@ if [[ $OPT_NO_AUTH -eq 1 ]]; then
 else
 	step "Google Workspace authentication"
 
-	if "$UPSTREAM_GWS" auth status >/dev/null 2>&1; then
+	if upstream_authenticated; then
 		ok "already authenticated with Google Workspace."
 	elif [[ ! -t 0 ]]; then
 		warn "not an interactive terminal — skipping auth."
@@ -226,24 +281,29 @@ else
 		HAS_SETUP=0
 		"$UPSTREAM_GWS" auth setup --help >/dev/null 2>&1 && HAS_SETUP=1
 
-		if [[ $HAS_SETUP -eq 1 ]] && have gcloud; then
-			info "Detected gcloud + 'gws auth setup' — this can create your own"
-			info "Google Cloud project and OAuth client automatically."
-			printf '%s' "  Run 'gws auth setup' now? [Y/n] "
-			read -r reply || reply=""
-			case "${reply:-Y}" in
-				[Nn]*) info "skipping automated setup; using manual path." ;;
-				*)
-					if "$UPSTREAM_GWS" auth setup; then
-						SETUP_DONE=1
-					else
-						warn "'gws auth setup' did not complete — using manual path."
-					fi
-					;;
-			esac
-		elif [[ $HAS_SETUP -eq 1 ]]; then
-			info "'gws auth setup' is available but needs the gcloud CLI."
-			info "Install gcloud (https://cloud.google.com/sdk) to automate this."
+		if [[ $HAS_SETUP -eq 1 ]]; then
+			# 'gws auth setup' automates the project + OAuth client but needs
+			# the gcloud CLI; offer to install it when it is missing.
+			have gcloud || offer_install_gcloud
+			if have gcloud; then
+				info "gcloud + 'gws auth setup' can create your Google Cloud"
+				info "project and OAuth client automatically."
+				printf '%s' "  Run 'gws auth setup' now? [Y/n] "
+				read -r reply || reply=""
+				case "${reply:-Y}" in
+					[Nn]*) info "skipping automated setup; using manual path." ;;
+					*)
+						if "$UPSTREAM_GWS" auth setup; then
+							SETUP_DONE=1
+						else
+							warn "'gws auth setup' did not complete — using manual path."
+							warn "  (if gcloud is not logged in: run 'gcloud auth login', then re-run.)"
+						fi
+						;;
+				esac
+			else
+				info "'gws auth setup' needs gcloud — using manual path."
+			fi
 		fi
 
 		# Manual path: user creates the OAuth client, we install the JSON.
@@ -269,7 +329,7 @@ else
 
 		# Run the OAuth login unless setup already produced a valid session.
 		if [[ $SETUP_DONE -eq 1 ]]; then
-			if "$UPSTREAM_GWS" auth status >/dev/null 2>&1; then
+			if upstream_authenticated; then
 				ok "authenticated with Google Workspace."
 			else
 				info "starting OAuth login — a browser window will open..."

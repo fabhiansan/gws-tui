@@ -27,9 +27,14 @@ const (
 	FeatureMail     Feature = "mail"
 	FeatureCalendar Feature = "calendar"
 	FeatureMeet     Feature = "meet"
+	FeatureTasks    Feature = "tasks"
+	FeatureDrive    Feature = "drive"
+	FeatureDocs     Feature = "docs"
 )
 
-var featureOrder = []Feature{FeatureChat, FeatureMail, FeatureCalendar, FeatureMeet}
+var featureOrder = []Feature{FeatureChat, FeatureMail, FeatureCalendar, FeatureMeet, FeatureTasks, FeatureDrive, FeatureDocs}
+
+const defaultChatReaction = "\U0001F44D"
 
 type pane int
 
@@ -96,11 +101,26 @@ type Model struct {
 	mailThreads []api.MailThread
 	mailNext    string
 
-	events       []api.CalendarEvent
-	calendarNext string
-	weekOffset   int
+	events        []api.CalendarEvent
+	calendarNext  string
+	calendars     []api.CalendarListItem
+	calendarIndex int
+	weekOffset    int
 
 	meetSpaces []api.MeetSpace
+
+	taskLists     []api.TaskList
+	tasks         []api.TaskItem
+	taskNext      string
+	taskListIndex int
+
+	driveFiles []api.DriveFile
+	driveNext  string
+
+	docFiles     []api.DriveFile
+	docNext      string
+	doc          api.DocDocument
+	docLoadingID string
 
 	userLabels     map[string]string
 	pendingUsers   map[string]bool
@@ -148,6 +168,10 @@ type Model struct {
 	detailMessageAt    map[int]string
 	replyThreadID      string
 	replyTargetName    string
+	editMessageName    string
+	editMessageID      string
+	createSpaceMode    bool
+	chatReactions      map[string]string
 
 	// pendingChatAttachments holds files staged for the next chat send.
 	// Populated by Ctrl+V pasting an image; drained (and the temp files
@@ -173,7 +197,15 @@ type loadedMsg struct {
 	labels       []api.MailLabel
 	threads      api.Page[api.MailThread]
 	events       api.Page[api.CalendarEvent]
+	calendars    api.Page[api.CalendarListItem]
+	calendarID   string
 	meet         api.Page[api.MeetSpace]
+	taskLists    api.Page[api.TaskList]
+	tasks        api.Page[api.TaskItem]
+	taskListID   string
+	driveFiles   api.Page[api.DriveFile]
+	docFiles     api.Page[api.DriveFile]
+	doc          api.DocDocument
 	err          error
 	authRequired bool
 }
@@ -186,12 +218,26 @@ type featureLoadedMsg struct {
 }
 
 type featureRefreshedMsg struct {
-	feature Feature
-	labels  []api.MailLabel
-	threads api.Page[api.MailThread]
-	events  api.Page[api.CalendarEvent]
-	meet    api.Page[api.MeetSpace]
-	err     error
+	feature    Feature
+	labels     []api.MailLabel
+	threads    api.Page[api.MailThread]
+	events     api.Page[api.CalendarEvent]
+	calendars  api.Page[api.CalendarListItem]
+	calendarID string
+	meet       api.Page[api.MeetSpace]
+	taskLists  api.Page[api.TaskList]
+	tasks      api.Page[api.TaskItem]
+	taskListID string
+	driveFiles api.Page[api.DriveFile]
+	docFiles   api.Page[api.DriveFile]
+	doc        api.DocDocument
+	err        error
+}
+
+type docLoadedMsg struct {
+	documentID string
+	doc        api.DocDocument
+	err        error
 }
 
 type chatLoadedMsg struct {
@@ -212,10 +258,41 @@ type chatSentMsg struct {
 	attachments []pendingAttachment
 }
 
+type chatEditedMsg struct {
+	messageID string
+	message   api.ChatMessage
+	err       error
+}
+
+type chatDeletedMsg struct {
+	messageID   string
+	messageName string
+	err         error
+}
+
+type chatSpaceCreatedMsg struct {
+	space api.Space
+	err   error
+}
+
+type chatReactionMsg struct {
+	messageID    string
+	messageName  string
+	reactionName string
+	emoji        string
+	remove       bool
+	err          error
+}
+
 type mailActionMsg struct {
 	thread api.MailThread
 	err    error
 	label  string
+}
+
+type mailDraftActionMsg struct {
+	draft api.MailDraftItem
+	err   error
 }
 
 type eventActionMsg struct {
@@ -341,6 +418,9 @@ func New(opts Options) Model {
 			FeatureMail:     persisted.Selections[string(FeatureMail)],
 			FeatureCalendar: persisted.Selections[string(FeatureCalendar)],
 			FeatureMeet:     persisted.Selections[string(FeatureMeet)],
+			FeatureTasks:    persisted.Selections[string(FeatureTasks)],
+			FeatureDrive:    persisted.Selections[string(FeatureDrive)],
+			FeatureDocs:     persisted.Selections[string(FeatureDocs)],
 		},
 		persisted:          persisted,
 		cache:              cache,
@@ -353,6 +433,7 @@ func New(opts Options) Model {
 		detailImageAt:      map[int]api.Attachment{},
 		detailAttachmentAt: map[int]api.Attachment{},
 		detailMessageAt:    map[int]string{},
+		chatReactions:      map[string]string{},
 	}
 	if cacheLoaded {
 		model.hydrateWorkspaceCache(cache)
@@ -425,7 +506,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mailNext = msg.threads.NextPageToken
 		m.events = msg.events.Items
 		m.calendarNext = msg.events.NextPageToken
+		if msg.calendars.Items != nil {
+			m.calendars = msg.calendars.Items
+			m.calendarIndex = indexOfCalendar(m.calendars, msg.calendarID)
+		}
 		m.meetSpaces = msg.meet.Items
+		m.taskLists = msg.taskLists.Items
+		m.taskListIndex = indexOfTaskList(m.taskLists, msg.taskListID)
+		m.tasks = msg.tasks.Items
+		m.taskNext = msg.tasks.NextPageToken
+		m.driveFiles = msg.driveFiles.Items
+		m.driveNext = msg.driveFiles.NextPageToken
+		m.docFiles = msg.docFiles.Items
+		m.docNext = msg.docFiles.NextPageToken
+		m.doc = msg.doc
+		m.docLoadingID = ""
 		m.clampSelections()
 		m.persistWorkspaceCache()
 		cmds = append(cmds, m.subscribeCmd())
@@ -508,6 +603,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = "more events loaded"
 				m.persistWorkspaceCache()
 			}
+		case FeatureTasks:
+			if tasks, ok := msg.items.([]api.TaskItem); ok {
+				m.tasks = append(m.tasks, tasks...)
+				m.taskNext = msg.next
+				m.toast = "more tasks loaded"
+				m.persistWorkspaceCache()
+			}
+		case FeatureDrive:
+			if files, ok := msg.items.([]api.DriveFile); ok {
+				m.driveFiles = append(m.driveFiles, files...)
+				m.driveNext = msg.next
+				m.toast = "more drive files loaded"
+				m.persistWorkspaceCache()
+			}
+		case FeatureDocs:
+			if files, ok := msg.items.([]api.DriveFile); ok {
+				m.docFiles = append(m.docFiles, files...)
+				m.docNext = msg.next
+				m.toast = "more docs loaded"
+				m.persistWorkspaceCache()
+			}
 		}
 	case featureRefreshedMsg:
 		m.loading = false
@@ -525,6 +641,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.persistWorkspaceCache()
 			cmds = append(cmds, m.imageDownloadCmdsForMail(m.mailThreads)...)
 		case FeatureCalendar:
+			if msg.calendars.Items != nil {
+				m.calendars = msg.calendars.Items
+				m.calendarIndex = indexOfCalendar(m.calendars, msg.calendarID)
+			}
 			m.events = msg.events.Items
 			m.calendarNext = msg.events.NextPageToken
 			m.toast = "calendar refreshed"
@@ -533,6 +653,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case FeatureMeet:
 			m.meetSpaces = msg.meet.Items
 			m.toast = "meet refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
+		case FeatureTasks:
+			m.taskLists = msg.taskLists.Items
+			m.taskListIndex = indexOfTaskList(m.taskLists, msg.taskListID)
+			m.tasks = msg.tasks.Items
+			m.taskNext = msg.tasks.NextPageToken
+			m.toast = "tasks refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
+		case FeatureDrive:
+			m.driveFiles = msg.driveFiles.Items
+			m.driveNext = msg.driveFiles.NextPageToken
+			m.toast = "drive refreshed"
+			m.clampSelections()
+			m.persistWorkspaceCache()
+		case FeatureDocs:
+			m.docFiles = msg.docFiles.Items
+			m.docNext = msg.docFiles.NextPageToken
+			m.doc = msg.doc
+			m.docLoadingID = ""
+			m.toast = "docs refreshed"
 			m.clampSelections()
 			m.persistWorkspaceCache()
 		}
@@ -546,6 +688,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// re-pasting. Prepended to preserve order if they paste more.
 			m.pendingChatAttachments = append(msg.attachments, m.pendingChatAttachments...)
 		}
+	case chatEditedMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			if msg.message.ID == "" {
+				msg.message.ID = msg.messageID
+			}
+			m.applyChatMessage(msg.message)
+			m.toast = "message edited"
+			m.persistWorkspaceCache()
+		}
+	case chatDeletedMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.removeChatMessage(msg.messageID, msg.messageName)
+			m.toast = "message deleted"
+			m.persistWorkspaceCache()
+		}
+	case chatSpaceCreatedMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.applyChatSpace(msg.space)
+			m.toast = "space created"
+			m.persistWorkspaceCache()
+		}
+	case chatReactionMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else if msg.remove {
+			delete(m.chatReactions, msg.messageName)
+			m.toast = "reaction removed"
+		} else {
+			m.chatReactions[msg.messageName] = msg.reactionName
+			m.toast = "reaction added " + msg.emoji
+		}
 	case mailActionMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -554,6 +733,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applyMailThread(msg.thread)
 			m.persistWorkspaceCache()
 			cmds = append(cmds, m.imageDownloadCmdsForMail([]api.MailThread{msg.thread})...)
+		}
+	case mailDraftActionMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.toast = "draft saved"
 		}
 	case eventActionMsg:
 		if msg.err != nil {
@@ -637,6 +822,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.path != "" {
 			m.toast = "downloaded to " + compactHomePath(msg.path)
 		}
+	case docLoadedMsg:
+		if msg.documentID != m.selectedDocFile().ID {
+			break
+		}
+		m.docLoadingID = ""
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			break
+		}
+		m.doc = msg.doc
+		m.persistWorkspaceCache()
 	case daemonEventMsg:
 		if msg.events != nil {
 			m.daemonEvents = msg.events
@@ -873,6 +1069,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.feature = FeatureCalendar
 	case "ctrl+4":
 		m.feature = FeatureMeet
+	case "ctrl+5":
+		m.feature = FeatureTasks
+	case "ctrl+6":
+		m.feature = FeatureDrive
+	case "ctrl+7":
+		m.feature = FeatureDocs
 	case "1":
 		m.focusedPane = paneList
 		return m, nil
@@ -940,6 +1142,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return m.downloadAttachment(att)
 			}
 		}
+		if m.feature == FeatureDrive {
+			return m.downloadSelectedDriveFile()
+		}
 		m.toast = m.openHint()
 	case "i":
 		m.focusedPane = paneAction
@@ -993,6 +1198,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		} else if m.feature == FeatureMail {
 			return m.toggleSelectedStar()
 		}
+	case "u":
+		if m.feature == FeatureMail {
+			return m.toggleSelectedUnread()
+		}
 	case "c":
 		if m.feature == FeatureMail {
 			m.openMailCompose(nil, false)
@@ -1025,7 +1234,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m.trashSelectedMail()
 		}
 	case "n":
-		if m.feature == FeatureCalendar {
+		if m.feature == FeatureChat {
+			m.beginCreateChatSpace()
+		} else if m.feature == FeatureCalendar {
 			return m.rsvpSelected("declined")
 		}
 		if m.feature == FeatureMeet {
@@ -1036,6 +1247,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m.rsvpSelected("tentative")
 		}
 	case "d":
+		if m.feature == FeatureChat {
+			return m.deleteSelectedChatMessage()
+		}
 		if m.feature == FeatureCalendar {
 			return m.deleteSelectedEvent()
 		}
@@ -1046,13 +1260,15 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "]":
 		if m.feature == FeatureCalendar {
-			m.weekOffset++
-			m.toast = "next week"
+			return m.moveCalendar(1)
+		} else if m.feature == FeatureTasks {
+			return m.moveTaskList(1)
 		}
 	case "[":
 		if m.feature == FeatureCalendar {
-			m.weekOffset--
-			m.toast = "previous week"
+			return m.moveCalendar(-1)
+		} else if m.feature == FeatureTasks {
+			return m.moveTaskList(-1)
 		}
 	case "J":
 		if m.feature == FeatureMeet {
@@ -1063,8 +1279,35 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m.copyMeetLink()
 		}
 	case "E":
+		if m.feature == FeatureChat {
+			if msg, ok := m.chatMessageUnderCursor(); ok {
+				m.beginEditChatMessage(msg)
+			} else {
+				m.toast = "move cursor onto a message to edit"
+			}
+			return m, nil
+		}
+		if m.feature == FeatureCalendar {
+			event := m.selectedEvent()
+			if event.ID != "" {
+				m.openEventCompose(&event)
+			}
+			return m, nil
+		}
 		if m.feature == FeatureMeet {
 			return m.endSelectedMeet()
+		}
+	case ">":
+		if m.feature == FeatureCalendar {
+			return m.moveSelectedEventToNextCalendar()
+		}
+	case "+":
+		if m.feature == FeatureChat {
+			return m.addSelectedChatReaction()
+		}
+	case "-":
+		if m.feature == FeatureChat {
+			return m.removeSelectedChatReaction()
 		}
 	case "x":
 		m.err = ""
@@ -1159,6 +1402,35 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 	}
 	switch m.feature {
 	case FeatureChat:
+		if m.createSpaceMode {
+			displayName, members := parseChatSpaceSetupInput(value)
+			m.input.SetValue("")
+			m.focusedPane = paneList
+			m.input.Blur()
+			m.clearReplyContext()
+			return m, func() tea.Msg {
+				var space api.Space
+				var err error
+				if len(members) > 0 {
+					space, err = m.client.SetupChatSpace(m.ctx, displayName, members)
+				} else {
+					space, err = m.client.CreateChatSpace(m.ctx, displayName)
+				}
+				return chatSpaceCreatedMsg{space: space, err: err}
+			}
+		}
+		if m.editMessageName != "" {
+			messageName := m.editMessageName
+			messageID := m.editMessageID
+			m.input.SetValue("")
+			m.focusedPane = paneList
+			m.input.Blur()
+			m.clearReplyContext()
+			return m, func() tea.Msg {
+				msg, err := m.client.EditChatMessage(m.ctx, messageName, value)
+				return chatEditedMsg{messageID: messageID, message: msg, err: err}
+			}
+		}
 		space := m.selectedSpace()
 		if space.Name == "" {
 			return m, nil
@@ -1249,6 +1521,9 @@ func (m *Model) chatMessageUnderCursor() (api.ChatMessage, bool) {
 }
 
 func (m *Model) beginThreadReply(target api.ChatMessage) {
+	m.editMessageName = ""
+	m.editMessageID = ""
+	m.createSpaceMode = false
 	thread := target.ThreadID
 	if thread == "" {
 		// No thread metadata — sending without thread context creates a
@@ -1267,9 +1542,58 @@ func (m *Model) beginThreadReply(target api.ChatMessage) {
 	}
 }
 
+func (m *Model) beginEditChatMessage(target api.ChatMessage) {
+	name := target.Name
+	if name == "" && target.Space != "" && target.ID != "" {
+		name = target.Space + "/messages/" + target.ID
+	}
+	if name == "" {
+		m.toast = "message name unavailable"
+		return
+	}
+	m.replyThreadID = ""
+	m.replyTargetName = ""
+	m.createSpaceMode = false
+	m.editMessageName = name
+	m.editMessageID = target.ID
+	m.focusedPane = paneAction
+	m.input.SetValue(target.Text)
+	m.input.Placeholder = "edit message (esc to cancel)"
+	m.input.Focus()
+	m.input.CursorEnd()
+	m.vimComposer = vimModeInsert
+	m.toast = "editing message"
+}
+
+func (m *Model) beginCreateChatSpace() {
+	m.replyThreadID = ""
+	m.replyTargetName = ""
+	m.editMessageName = ""
+	m.editMessageID = ""
+	m.createSpaceMode = true
+	m.focusedPane = paneAction
+	m.input.SetValue("")
+	m.input.Placeholder = "new space name | user@example.com, user2@example.com"
+	m.input.Focus()
+	m.vimComposer = vimModeInsert
+	m.toast = "creating chat space"
+}
+
+func parseChatSpaceSetupInput(value string) (string, []string) {
+	name, memberText, hasMembers := strings.Cut(value, "|")
+	name = strings.TrimSpace(name)
+	if !hasMembers {
+		return name, nil
+	}
+	return name, splitCSV(memberText)
+}
+
 func (m *Model) clearReplyContext() {
 	m.replyThreadID = ""
 	m.replyTargetName = ""
+	m.editMessageName = ""
+	m.editMessageID = ""
+	m.createSpaceMode = false
 	m.input.Placeholder = "message"
 }
 
@@ -1282,6 +1606,13 @@ func lastSegmentOfName(value string) string {
 		return value
 	}
 	return value[idx+1:]
+}
+
+func spaceFromMessageName(value string) string {
+	if idx := strings.Index(value, "/messages/"); idx > 0 {
+		return value[:idx]
+	}
+	return ""
 }
 
 func (m *Model) resolveUserCmd(userID string) tea.Cmd {
@@ -1381,12 +1712,31 @@ func (m Model) loadAllCmd() tea.Cmd {
 		messages, messagesErr := m.client.ChatMessages(ctx, selectedSpace, "")
 		labels, labelsErr := m.client.MailLabels(ctx)
 		threads, threadsErr := m.client.MailThreads(ctx, api.MailQuery{Label: "Inbox"})
-		events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{})
+		calendars, calendarsErr := m.client.CalendarLists(ctx)
+		calendarID := selectedCalendarID(calendars.Items, m.calendarIndex)
+		events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendarID})
 		meet, meetErr := m.client.MeetSpaces(ctx)
+		taskLists, taskListsErr := m.client.TaskLists(ctx)
+		tasks := api.Page[api.TaskItem]{}
+		taskListID := ""
+		var tasksErr error
+		if len(taskLists.Items) > 0 {
+			taskListID = taskLists.Items[clamp(m.taskListIndex, len(taskLists.Items))].ID
+			tasks, tasksErr = m.client.Tasks(ctx, api.TaskQuery{TaskListID: taskListID})
+		}
+		driveFiles, driveErr := m.client.DriveFiles(ctx, api.DriveQuery{})
+		docFiles, docsErr := m.client.Docs(ctx, api.DriveQuery{})
+		doc := api.DocDocument{}
+		var docErr error
+		if len(docFiles.Items) > 0 {
+			doc = api.DocDocument{ID: docFiles.Items[clamp(m.selected[FeatureDocs], len(docFiles.Items))].ID}
+			doc, docErr = m.client.Doc(ctx, doc.ID)
+		}
 
-		err := firstErr(authErr, spacesErr, messagesErr, labelsErr, threadsErr, eventsErr, meetErr)
+		err := firstErr(authErr, spacesErr, messagesErr, labelsErr, threadsErr, calendarsErr, eventsErr, meetErr, taskListsErr, tasksErr, driveErr, docsErr, docErr)
 		return loadedMsg{
-			auth: auth, spaces: spaces, messages: messages, labels: labels, threads: threads, events: events, meet: meet,
+			auth: auth, spaces: spaces, messages: messages, labels: labels, threads: threads, events: events, calendars: calendars, calendarID: calendarID, meet: meet,
+			taskLists: taskLists, tasks: tasks, taskListID: taskListID, driveFiles: driveFiles, docFiles: docFiles, doc: doc,
 			err: err, authRequired: !auth.Valid(),
 		}
 	}
@@ -1419,12 +1769,17 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 	case FeatureCalendar:
 		m.loading = true
 		search := m.search
+		calendarID := m.selectedCalendar().ID
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 			defer cancel()
 
-			events, err := m.client.CalendarEvents(ctx, api.CalendarQuery{Search: search})
-			return featureRefreshedMsg{feature: FeatureCalendar, events: events, err: err}
+			calendars, calendarsErr := m.client.CalendarLists(ctx)
+			if calendarID == "" {
+				calendarID = selectedCalendarID(calendars.Items, m.calendarIndex)
+			}
+			events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendarID, Search: search})
+			return featureRefreshedMsg{feature: FeatureCalendar, calendars: calendars, calendarID: calendarID, events: events, err: firstErr(calendarsErr, eventsErr)}
 		}
 	case FeatureMeet:
 		m.loading = true
@@ -1434,6 +1789,47 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 
 			meet, err := m.client.MeetSpaces(ctx)
 			return featureRefreshedMsg{feature: FeatureMeet, meet: meet, err: err}
+		}
+	case FeatureTasks:
+		m.loading = true
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			taskLists, taskListsErr := m.client.TaskLists(ctx)
+			tasks := api.Page[api.TaskItem]{}
+			taskListID := ""
+			var tasksErr error
+			if len(taskLists.Items) > 0 {
+				taskListID = taskLists.Items[clamp(m.taskListIndex, len(taskLists.Items))].ID
+				tasks, tasksErr = m.client.Tasks(ctx, api.TaskQuery{TaskListID: taskListID})
+			}
+			return featureRefreshedMsg{feature: FeatureTasks, taskLists: taskLists, tasks: tasks, taskListID: taskListID, err: firstErr(taskListsErr, tasksErr)}
+		}
+	case FeatureDrive:
+		m.loading = true
+		search := m.search
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			files, err := m.client.DriveFiles(ctx, api.DriveQuery{Search: search})
+			return featureRefreshedMsg{feature: FeatureDrive, driveFiles: files, err: err}
+		}
+	case FeatureDocs:
+		m.loading = true
+		search := m.search
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+			defer cancel()
+
+			files, filesErr := m.client.Docs(ctx, api.DriveQuery{Search: search})
+			doc := api.DocDocument{}
+			var docErr error
+			if len(files.Items) > 0 {
+				doc, docErr = m.client.Doc(ctx, files.Items[clamp(m.selected[FeatureDocs], len(files.Items))].ID)
+			}
+			return featureRefreshedMsg{feature: FeatureDocs, docFiles: files, doc: doc, err: firstErr(filesErr, docErr)}
 		}
 	default:
 		return m, nil
@@ -1523,10 +1919,45 @@ func (m Model) loadMore() (Model, tea.Cmd) {
 			return m, nil
 		}
 		token := m.calendarNext
+		calendarID := m.selectedCalendar().ID
 		m.loading = true
 		return m, func() tea.Msg {
-			page, err := m.client.CalendarEvents(m.ctx, api.CalendarQuery{Search: m.search, PageToken: token})
+			page, err := m.client.CalendarEvents(m.ctx, api.CalendarQuery{CalendarID: calendarID, Search: m.search, PageToken: token})
 			return featureLoadedMsg{feature: FeatureCalendar, items: page.Items, next: page.NextPageToken, err: err}
+		}
+	case FeatureTasks:
+		if m.taskNext == "" {
+			m.toast = "no more tasks"
+			return m, nil
+		}
+		list := m.selectedTaskList()
+		token := m.taskNext
+		m.loading = true
+		return m, func() tea.Msg {
+			page, err := m.client.Tasks(m.ctx, api.TaskQuery{TaskListID: list.ID, PageToken: token})
+			return featureLoadedMsg{feature: FeatureTasks, items: page.Items, next: page.NextPageToken, err: err}
+		}
+	case FeatureDrive:
+		if m.driveNext == "" {
+			m.toast = "no more drive files"
+			return m, nil
+		}
+		token := m.driveNext
+		m.loading = true
+		return m, func() tea.Msg {
+			page, err := m.client.DriveFiles(m.ctx, api.DriveQuery{Search: m.search, PageToken: token})
+			return featureLoadedMsg{feature: FeatureDrive, items: page.Items, next: page.NextPageToken, err: err}
+		}
+	case FeatureDocs:
+		if m.docNext == "" {
+			m.toast = "no more docs"
+			return m, nil
+		}
+		token := m.docNext
+		m.loading = true
+		return m, func() tea.Msg {
+			page, err := m.client.Docs(m.ctx, api.DriveQuery{Search: m.search, PageToken: token})
+			return featureLoadedMsg{feature: FeatureDocs, items: page.Items, next: page.NextPageToken, err: err}
 		}
 	}
 	return m, nil
@@ -1674,6 +2105,7 @@ func (m *Model) clampSelections() {
 	for _, feature := range featureOrder {
 		m.selected[feature] = clamp(m.selected[feature], m.listLenFor(feature))
 	}
+	m.taskListIndex = clamp(m.taskListIndex, len(m.taskLists))
 }
 
 func (m Model) nextFeature(delta int) Feature {
@@ -1699,7 +2131,18 @@ func (m Model) moveSelection(delta int) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected[m.feature] = next
-	return m.loadSelectedChat()
+	return m.loadSelectedItem()
+}
+
+func (m Model) loadSelectedItem() (Model, tea.Cmd) {
+	switch m.feature {
+	case FeatureChat:
+		return m.loadSelectedChat()
+	case FeatureDocs:
+		return m.loadSelectedDoc()
+	default:
+		return m, nil
+	}
 }
 
 func (m *Model) openSpaceFilter() {
@@ -1837,6 +2280,12 @@ func (m Model) listLenFor(feature Feature) int {
 		return len(m.events)
 	case FeatureMeet:
 		return len(m.meetSpaces)
+	case FeatureTasks:
+		return len(m.tasks)
+	case FeatureDrive:
+		return len(m.driveFiles)
+	case FeatureDocs:
+		return len(m.docFiles)
 	default:
 		return 0
 	}
@@ -2075,11 +2524,176 @@ func (m Model) selectedEvent() api.CalendarEvent {
 	return m.events[clamp(m.selected[FeatureCalendar], len(m.events))]
 }
 
+func (m Model) selectedCalendar() api.CalendarListItem {
+	if len(m.calendars) == 0 {
+		return api.CalendarListItem{ID: "primary", Summary: "Primary", Primary: true}
+	}
+	return m.calendars[clamp(m.calendarIndex, len(m.calendars))]
+}
+
 func (m Model) selectedMeet() api.MeetSpace {
 	if len(m.meetSpaces) == 0 {
 		return api.MeetSpace{}
 	}
 	return m.meetSpaces[clamp(m.selected[FeatureMeet], len(m.meetSpaces))]
+}
+
+func (m Model) selectedTaskList() api.TaskList {
+	if len(m.taskLists) == 0 {
+		return api.TaskList{}
+	}
+	return m.taskLists[clamp(m.taskListIndex, len(m.taskLists))]
+}
+
+func (m Model) selectedTask() api.TaskItem {
+	if len(m.tasks) == 0 {
+		return api.TaskItem{}
+	}
+	return m.tasks[clamp(m.selected[FeatureTasks], len(m.tasks))]
+}
+
+func (m Model) selectedDriveFile() api.DriveFile {
+	if len(m.driveFiles) == 0 {
+		return api.DriveFile{}
+	}
+	return m.driveFiles[clamp(m.selected[FeatureDrive], len(m.driveFiles))]
+}
+
+func (m Model) selectedDocFile() api.DriveFile {
+	if len(m.docFiles) == 0 {
+		return api.DriveFile{}
+	}
+	return m.docFiles[clamp(m.selected[FeatureDocs], len(m.docFiles))]
+}
+
+func (m Model) loadSelectedDoc() (Model, tea.Cmd) {
+	file := m.selectedDocFile()
+	if file.ID == "" {
+		m.doc = api.DocDocument{}
+		m.docLoadingID = ""
+		return m, nil
+	}
+	if m.doc.ID == file.ID && m.doc.Body != "" {
+		return m, nil
+	}
+	m.doc = api.DocDocument{ID: file.ID, Title: file.Name}
+	m.docLoadingID = file.ID
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+
+		doc, err := m.client.Doc(ctx, file.ID)
+		return docLoadedMsg{documentID: file.ID, doc: doc, err: err}
+	}
+}
+
+func indexOfTaskList(lists []api.TaskList, id string) int {
+	if id == "" {
+		return 0
+	}
+	for i, list := range lists {
+		if list.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+func indexOfCalendar(calendars []api.CalendarListItem, id string) int {
+	if id == "" {
+		return 0
+	}
+	for i, calendar := range calendars {
+		if calendar.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+func selectedCalendarID(calendars []api.CalendarListItem, index int) string {
+	if len(calendars) == 0 {
+		return "primary"
+	}
+	return calendars[clamp(index, len(calendars))].ID
+}
+
+func (m Model) moveCalendar(delta int) (Model, tea.Cmd) {
+	if len(m.calendars) == 0 {
+		m.toast = "no calendars"
+		return m, nil
+	}
+	next := clamp(m.calendarIndex+delta, len(m.calendars))
+	if next == m.calendarIndex {
+		return m, nil
+	}
+	m.calendarIndex = next
+	m.selected[FeatureCalendar] = 0
+	return m.loadSelectedCalendar()
+}
+
+func (m Model) loadSelectedCalendar() (Model, tea.Cmd) {
+	calendar := m.selectedCalendar()
+	if calendar.ID == "" {
+		m.events = nil
+		m.calendarNext = ""
+		return m, nil
+	}
+	m.loading = true
+	m.events = nil
+	m.calendarNext = ""
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+
+		page, err := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendar.ID, Search: m.search})
+		return featureRefreshedMsg{
+			feature:    FeatureCalendar,
+			calendars:  api.Page[api.CalendarListItem]{Items: m.calendars},
+			calendarID: calendar.ID,
+			events:     page,
+			err:        err,
+		}
+	}
+}
+
+func (m Model) moveTaskList(delta int) (Model, tea.Cmd) {
+	if len(m.taskLists) == 0 {
+		m.toast = "no task lists"
+		return m, nil
+	}
+	next := clamp(m.taskListIndex+delta, len(m.taskLists))
+	if next == m.taskListIndex {
+		return m, nil
+	}
+	m.taskListIndex = next
+	m.selected[FeatureTasks] = 0
+	return m.loadSelectedTaskList()
+}
+
+func (m Model) loadSelectedTaskList() (Model, tea.Cmd) {
+	list := m.selectedTaskList()
+	if list.ID == "" {
+		m.tasks = nil
+		m.taskNext = ""
+		return m, nil
+	}
+	m.loading = true
+	m.tasks = nil
+	m.taskNext = ""
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+
+		page, err := m.client.Tasks(ctx, api.TaskQuery{TaskListID: list.ID})
+		return featureRefreshedMsg{
+			feature:    FeatureTasks,
+			taskLists:  api.Page[api.TaskList]{Items: m.taskLists},
+			tasks:      page,
+			taskListID: list.ID,
+			err:        err,
+		}
+	}
 }
 
 func (m *Model) replacePending(pendingID string, msg api.ChatMessage, err error) {
@@ -2103,6 +2717,49 @@ func (m *Model) replacePending(pendingID string, msg api.ChatMessage, err error)
 			return
 		}
 	}
+}
+
+func (m *Model) applyChatMessage(msg api.ChatMessage) {
+	if msg.ID == "" && msg.Name != "" {
+		msg.ID = lastSegmentOfName(msg.Name)
+	}
+	if msg.Space == "" && msg.Name != "" {
+		msg.Space = spaceFromMessageName(msg.Name)
+	}
+	if msg.ID == "" {
+		return
+	}
+	m.chatMessages, _ = upsertChatMessage(m.chatMessages, msg)
+	m.markSeenChatMessage(msg)
+}
+
+func (m *Model) removeChatMessage(messageID, messageName string) {
+	if messageID == "" && messageName != "" {
+		messageID = lastSegmentOfName(messageName)
+	}
+	filtered := m.chatMessages[:0]
+	for _, msg := range m.chatMessages {
+		if msg.Name == messageName || (messageID != "" && msg.ID == messageID) {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	m.chatMessages = filtered
+}
+
+func (m *Model) applyChatSpace(space api.Space) {
+	if space.Name == "" {
+		return
+	}
+	for i := range m.spaces {
+		if m.spaces[i].Name == space.Name {
+			m.spaces[i] = space
+			m.selected[FeatureChat] = i
+			return
+		}
+	}
+	m.spaces = append([]api.Space{space}, m.spaces...)
+	m.selected[FeatureChat] = 0
 }
 
 func (m *Model) applyMailThread(thread api.MailThread) {
@@ -2141,6 +2798,86 @@ func (m *Model) applyMeetSpace(space api.MeetSpace) {
 	m.meetSpaces = append([]api.MeetSpace{space}, m.meetSpaces...)
 }
 
+func (m Model) deleteSelectedChatMessage() (Model, tea.Cmd) {
+	msg, ok := m.chatMessageUnderCursor()
+	if !ok {
+		m.toast = "move cursor onto a message to delete"
+		return m, nil
+	}
+	name := msg.Name
+	if name == "" && msg.Space != "" && msg.ID != "" {
+		name = msg.Space + "/messages/" + msg.ID
+	}
+	if name == "" {
+		m.toast = "message name unavailable"
+		return m, nil
+	}
+	return m, func() tea.Msg {
+		err := m.client.DeleteChatMessage(m.ctx, name)
+		return chatDeletedMsg{messageID: msg.ID, messageName: name, err: err}
+	}
+}
+
+func (m Model) addSelectedChatReaction() (Model, tea.Cmd) {
+	msg, ok := m.chatMessageUnderCursor()
+	if !ok {
+		m.toast = "move cursor onto a message to react"
+		return m, nil
+	}
+	name := msg.Name
+	if name == "" && msg.Space != "" && msg.ID != "" {
+		name = msg.Space + "/messages/" + msg.ID
+	}
+	if name == "" {
+		m.toast = "message name unavailable"
+		return m, nil
+	}
+	emoji := defaultChatReaction
+	return m, func() tea.Msg {
+		reactionName, err := m.client.AddChatReaction(m.ctx, name, emoji)
+		return chatReactionMsg{messageID: msg.ID, messageName: name, reactionName: reactionName, emoji: emoji, err: err}
+	}
+}
+
+func (m Model) removeSelectedChatReaction() (Model, tea.Cmd) {
+	msg, ok := m.chatMessageUnderCursor()
+	if !ok {
+		m.toast = "move cursor onto a message to remove reaction"
+		return m, nil
+	}
+	name := msg.Name
+	if name == "" && msg.Space != "" && msg.ID != "" {
+		name = msg.Space + "/messages/" + msg.ID
+	}
+	reactionName := m.chatReactions[name]
+	if reactionName == "" {
+		m.toast = "no TUI reaction to remove"
+		return m, nil
+	}
+	return m, func() tea.Msg {
+		err := m.client.DeleteChatReaction(m.ctx, reactionName)
+		return chatReactionMsg{messageID: msg.ID, messageName: name, reactionName: reactionName, remove: true, err: err}
+	}
+}
+
+func (m Model) downloadSelectedDriveFile() (Model, tea.Cmd) {
+	file := m.selectedDriveFile()
+	if file.ID == "" {
+		return m, nil
+	}
+	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps.") {
+		m.toast = "Google-native files open in Docs tab"
+		return m, nil
+	}
+	attachment := api.Attachment{
+		ID:           file.ID,
+		ResourceName: "drive/files/" + file.ID,
+		Name:         file.Name,
+		ContentType:  file.MimeType,
+	}
+	return m.downloadAttachment(attachment)
+}
+
 func (m Model) toggleSelectedStar() (Model, tea.Cmd) {
 	thread := m.selectedMail()
 	if thread.ID == "" {
@@ -2149,6 +2886,22 @@ func (m Model) toggleSelectedStar() (Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		updated, err := m.client.ToggleStar(m.ctx, thread.ID)
 		return mailActionMsg{thread: updated, err: err, label: "star toggled"}
+	}
+}
+
+func (m Model) toggleSelectedUnread() (Model, tea.Cmd) {
+	thread := m.selectedMail()
+	if thread.ID == "" {
+		return m, nil
+	}
+	unread := !thread.Unread
+	label := "marked read"
+	if unread {
+		label = "marked unread"
+	}
+	return m, func() tea.Msg {
+		updated, err := m.client.SetMailUnread(m.ctx, thread.ID, unread)
+		return mailActionMsg{thread: updated, err: err, label: label}
 	}
 }
 
@@ -2193,6 +2946,31 @@ func (m Model) deleteSelectedEvent() (Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		err := m.client.DeleteEvent(m.ctx, event.ID)
 		return eventActionMsg{event: event, err: err, label: "event deleted"}
+	}
+}
+
+func (m Model) moveSelectedEventToNextCalendar() (Model, tea.Cmd) {
+	event := m.selectedEvent()
+	if event.ID == "" {
+		return m, nil
+	}
+	if len(m.calendars) < 2 {
+		m.toast = "no other calendar"
+		return m, nil
+	}
+	source := event.CalendarID
+	if source == "" {
+		source = m.selectedCalendar().ID
+	}
+	current := indexOfCalendar(m.calendars, source)
+	destination := m.calendars[(current+1)%len(m.calendars)]
+	if destination.ID == source {
+		m.toast = "no other calendar"
+		return m, nil
+	}
+	return m, func() tea.Msg {
+		updated, err := m.client.MoveEvent(m.ctx, event.ID, source, destination.ID)
+		return eventActionMsg{event: updated, err: err, label: "event moved to " + destination.Summary}
 	}
 }
 
@@ -2244,6 +3022,23 @@ func (m *Model) yankFocused() tea.Cmd {
 		text = event.Summary
 	case FeatureMeet:
 		text = m.selectedMeet().MeetingURI
+	case FeatureTasks:
+		task := m.selectedTask()
+		text = task.Title
+		if task.Notes != "" {
+			text = task.Title + "\n\n" + task.Notes
+		}
+	case FeatureDrive:
+		file := m.selectedDriveFile()
+		text = file.Name
+		if file.WebViewLink != "" {
+			text = file.Name + "\n" + file.WebViewLink
+		}
+	case FeatureDocs:
+		text = m.doc.Body
+		if text == "" {
+			text = m.selectedDocFile().WebViewLink
+		}
 	}
 	if text == "" {
 		m.toast = "nothing to yank"
@@ -2337,6 +3132,12 @@ func (m Model) openHint() string {
 		return "event opened"
 	case FeatureMeet:
 		return "meet details opened"
+	case FeatureTasks:
+		return "task opened"
+	case FeatureDrive:
+		return "file opened"
+	case FeatureDocs:
+		return "document opened"
 	default:
 		return ""
 	}
@@ -2513,6 +3314,41 @@ func (m Model) detailRenderFingerprint() string {
 			space.Active,
 			activeConference,
 		)
+	case FeatureTasks:
+		list := m.selectedTaskList()
+		task := m.selectedTask()
+		fmt.Fprintf(&b, "|taskList=%s,%s|task=%s,%s,%s,%s,%d,%d,%d",
+			list.ID,
+			list.Title,
+			task.ID,
+			task.Title,
+			task.Notes,
+			task.Status,
+			task.Due.UnixNano(),
+			task.Completed.UnixNano(),
+			task.Updated.UnixNano(),
+		)
+	case FeatureDrive:
+		file := m.selectedDriveFile()
+		fmt.Fprintf(&b, "|drive=%s,%s,%s,%d,%s,%d",
+			file.ID,
+			file.Name,
+			file.MimeType,
+			file.ModifiedTime.UnixNano(),
+			file.WebViewLink,
+			file.Size,
+		)
+	case FeatureDocs:
+		file := m.selectedDocFile()
+		fmt.Fprintf(&b, "|docFile=%s,%s,%d|doc=%s,%s,%s,%t",
+			file.ID,
+			file.Name,
+			file.ModifiedTime.UnixNano(),
+			m.doc.ID,
+			m.doc.Title,
+			m.doc.Body,
+			m.docLoadingID == file.ID,
+		)
 	}
 	return b.String()
 }
@@ -2543,6 +3379,12 @@ func (m Model) detailKeyForSelection() string {
 		return "cal:" + m.selectedEvent().ID
 	case FeatureMeet:
 		return "meet:" + m.selectedMeet().Name
+	case FeatureTasks:
+		return "tasks:" + m.selectedTaskList().ID + ":" + m.selectedTask().ID
+	case FeatureDrive:
+		return "drive:" + m.selectedDriveFile().ID
+	case FeatureDocs:
+		return "docs:" + m.selectedDocFile().ID
 	default:
 		return string(m.feature)
 	}
@@ -2556,6 +3398,12 @@ func normalizeFeature(value string) string {
 		return string(FeatureCalendar)
 	case "meet":
 		return string(FeatureMeet)
+	case "tasks", "task":
+		return string(FeatureTasks)
+	case "drive":
+		return string(FeatureDrive)
+	case "docs", "doc":
+		return string(FeatureDocs)
 	default:
 		return string(FeatureChat)
 	}

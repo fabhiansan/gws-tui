@@ -54,6 +54,30 @@ func (c *testWorkspaceClient) SendChatMessage(_ context.Context, spaceName, text
 	return api.ChatMessage{ID: "sent-1", Space: spaceName, Text: text, SenderName: "Me", CreateTime: c.now, ThreadID: threadID}, nil
 }
 
+func (c *testWorkspaceClient) EditChatMessage(_ context.Context, messageName, text string) (api.ChatMessage, error) {
+	return api.ChatMessage{ID: "latest", Name: messageName, Space: "spaces/alice", Text: text, SenderName: "Me", CreateTime: c.now}, nil
+}
+
+func (c *testWorkspaceClient) DeleteChatMessage(context.Context, string) error {
+	return nil
+}
+
+func (c *testWorkspaceClient) CreateChatSpace(_ context.Context, displayName string) (api.Space, error) {
+	return api.Space{Name: "spaces/created", DisplayName: displayName, SpaceType: "SPACE"}, nil
+}
+
+func (c *testWorkspaceClient) SetupChatSpace(_ context.Context, displayName string, _ []string) (api.Space, error) {
+	return api.Space{Name: "spaces/setup", DisplayName: displayName, SpaceType: "SPACE"}, nil
+}
+
+func (c *testWorkspaceClient) AddChatReaction(_ context.Context, messageName, _ string) (string, error) {
+	return messageName + "/reactions/reaction-1", nil
+}
+
+func (c *testWorkspaceClient) DeleteChatReaction(context.Context, string) error {
+	return nil
+}
+
 func (c *testWorkspaceClient) SubscribeChat(context.Context, string) (<-chan api.ChatMessage, error) {
 	return make(chan api.ChatMessage), nil
 }
@@ -88,6 +112,18 @@ func (c *testWorkspaceClient) SendMail(_ context.Context, draft api.MailDraft) (
 	return api.MailThread{ID: "mail-sent", Subject: draft.Subject, Body: draft.Body, Date: c.now}, nil
 }
 
+func (c *testWorkspaceClient) MailDrafts(context.Context, string) (api.Page[api.MailDraftItem], error) {
+	return api.Page[api.MailDraftItem]{Items: []api.MailDraftItem{{ID: "draft-1", Subject: "Draft", Date: c.now}}}, nil
+}
+
+func (c *testWorkspaceClient) CreateMailDraft(_ context.Context, draft api.MailDraft) (api.MailDraftItem, error) {
+	return api.MailDraftItem{ID: "draft-created", To: draft.To, Subject: draft.Subject, Snippet: draft.Body, Date: c.now}, nil
+}
+
+func (c *testWorkspaceClient) SendMailDraft(context.Context, string) (api.MailThread, error) {
+	return api.MailThread{ID: "mail-draft-sent", Subject: "Draft", Date: c.now}, nil
+}
+
 func (c *testWorkspaceClient) ArchiveMail(context.Context, string) error {
 	return nil
 }
@@ -100,12 +136,28 @@ func (c *testWorkspaceClient) ToggleStar(context.Context, string) (api.MailThrea
 	return api.MailThread{ID: "mail-1", Subject: "Launch notes", Starred: true, Date: c.now}, nil
 }
 
-func (c *testWorkspaceClient) CalendarEvents(context.Context, api.CalendarQuery) (api.Page[api.CalendarEvent], error) {
+func (c *testWorkspaceClient) SetMailUnread(_ context.Context, threadID string, unread bool) (api.MailThread, error) {
+	return api.MailThread{ID: threadID, Subject: "Launch notes", Unread: unread, Date: c.now}, nil
+}
+
+func (c *testWorkspaceClient) CalendarLists(context.Context) (api.Page[api.CalendarListItem], error) {
+	return api.Page[api.CalendarListItem]{Items: []api.CalendarListItem{
+		{ID: "primary", Summary: "Primary", Primary: true},
+		{ID: "team@example.com", Summary: "Team"},
+	}}, nil
+}
+
+func (c *testWorkspaceClient) CalendarEvents(_ context.Context, query api.CalendarQuery) (api.Page[api.CalendarEvent], error) {
+	calendarID := query.CalendarID
+	if calendarID == "" {
+		calendarID = "primary"
+	}
 	return api.Page[api.CalendarEvent]{Items: []api.CalendarEvent{{
-		ID:      "event-1",
-		Summary: "Planning",
-		Start:   c.now,
-		End:     c.now.Add(time.Hour),
+		ID:         "event-1",
+		CalendarID: calendarID,
+		Summary:    "Planning",
+		Start:      c.now,
+		End:        c.now.Add(time.Hour),
 	}}}, nil
 }
 
@@ -114,7 +166,15 @@ func (c *testWorkspaceClient) QuickAddEvent(_ context.Context, text string) (api
 }
 
 func (c *testWorkspaceClient) CreateEvent(_ context.Context, draft api.EventDraft) (api.CalendarEvent, error) {
-	return api.CalendarEvent{ID: "event-created", Summary: draft.Summary, Start: draft.Start, End: draft.End}, nil
+	return api.CalendarEvent{ID: "event-created", CalendarID: draft.CalendarID, Summary: draft.Summary, Start: draft.Start, End: draft.End}, nil
+}
+
+func (c *testWorkspaceClient) UpdateEvent(_ context.Context, eventID string, draft api.EventDraft) (api.CalendarEvent, error) {
+	return api.CalendarEvent{ID: eventID, CalendarID: draft.CalendarID, Summary: draft.Summary, Start: draft.Start, End: draft.End}, nil
+}
+
+func (c *testWorkspaceClient) MoveEvent(_ context.Context, eventID, _, destinationCalendarID string) (api.CalendarEvent, error) {
+	return api.CalendarEvent{ID: eventID, CalendarID: destinationCalendarID, Summary: "Planning", Start: c.now, End: c.now.Add(time.Hour)}, nil
 }
 
 func (c *testWorkspaceClient) RSVPEvent(_ context.Context, eventID, response string) (api.CalendarEvent, error) {
@@ -139,6 +199,50 @@ func (c *testWorkspaceClient) CreateMeetSpace(_ context.Context, title string) (
 
 func (c *testWorkspaceClient) EndMeetSpace(context.Context, string) error {
 	return nil
+}
+
+func (c *testWorkspaceClient) TaskLists(context.Context) (api.Page[api.TaskList], error) {
+	return api.Page[api.TaskList]{Items: []api.TaskList{
+		{ID: "tasks-default", Title: "My Tasks", Updated: c.now.Add(-time.Hour)},
+		{ID: "tasks-work", Title: "Work", Updated: c.now.Add(-30 * time.Minute)},
+	}}, nil
+}
+
+func (c *testWorkspaceClient) Tasks(_ context.Context, query api.TaskQuery) (api.Page[api.TaskItem], error) {
+	return api.Page[api.TaskItem]{Items: []api.TaskItem{{
+		ID:         query.TaskListID + "-task-1",
+		TaskListID: query.TaskListID,
+		Title:      "Review launch checklist",
+		Notes:      "Confirm release docs and install script.",
+		Status:     "needsAction",
+		Due:        c.now.Add(24 * time.Hour),
+		Updated:    c.now.Add(-10 * time.Minute),
+	}}}, nil
+}
+
+func (c *testWorkspaceClient) DriveFiles(context.Context, api.DriveQuery) (api.Page[api.DriveFile], error) {
+	return api.Page[api.DriveFile]{Items: []api.DriveFile{{
+		ID:           "drive-1",
+		Name:         "Release checklist.pdf",
+		MimeType:     "application/pdf",
+		ModifiedTime: c.now.Add(-2 * time.Hour),
+		WebViewLink:  "https://drive.google.com/file/d/drive-1",
+		Size:         2048,
+	}}}, nil
+}
+
+func (c *testWorkspaceClient) Docs(context.Context, api.DriveQuery) (api.Page[api.DriveFile], error) {
+	return api.Page[api.DriveFile]{Items: []api.DriveFile{{
+		ID:           "doc-1",
+		Name:         "Launch notes",
+		MimeType:     "application/vnd.google-apps.document",
+		ModifiedTime: c.now.Add(-time.Hour),
+		WebViewLink:  "https://docs.google.com/document/d/doc-1",
+	}}}, nil
+}
+
+func (c *testWorkspaceClient) Doc(_ context.Context, documentID string) (api.DocDocument, error) {
+	return api.DocDocument{ID: documentID, Title: "Launch notes", Body: "Launch plan\nShip checklist"}, nil
 }
 
 func (c *testWorkspaceClient) Close() error {

@@ -38,7 +38,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `gws — Google Workspace CLI + terminal UI
 
 USAGE:
-    gws tui [--feature chat|mail|calendar|meet] [--daemon|--no-daemon] [--auth] [--no-icons] [--no-color] [--no-images]
+    gws tui [--feature chat|mail|calendar|meet|tasks|drive|docs] [--daemon|--no-daemon] [--auth] [--no-icons] [--no-color] [--no-images]
     gws daemon start [--detach]
     gws daemon stop|status|logs|restart
     gws <existing gws command> ...

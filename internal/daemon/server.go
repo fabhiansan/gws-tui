@@ -427,6 +427,72 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			s.handleChatMessage(msg, false)
 		}
 		return msg, err
+	case "EditChatMessage":
+		var p api.EditChatMessageParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		msg, err := s.client.EditChatMessage(ctx, p.MessageName, p.Text)
+		if err == nil {
+			if msg.Space == "" {
+				msg.Space = chatSpaceFromMessageName(p.MessageName)
+			}
+			s.handleChatMessage(msg, false)
+		}
+		return msg, err
+	case "DeleteChatMessage":
+		var p api.ChatMessageNameParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		err := s.client.DeleteChatMessage(ctx, p.MessageName)
+		if err == nil {
+			s.removeChatMessage(p.MessageName)
+			s.broadcast("chat.message.deleted", map[string]string{"name": p.MessageName})
+		}
+		return nil, err
+	case "CreateChatSpace":
+		var p api.CreateChatSpaceParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		space, err := s.client.CreateChatSpace(ctx, p.DisplayName)
+		if err == nil {
+			s.applyChatSpace(space)
+			s.broadcast("chat.space", space)
+		}
+		return space, err
+	case "SetupChatSpace":
+		var p api.SetupChatSpaceParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		space, err := s.client.SetupChatSpace(ctx, p.DisplayName, p.Members)
+		if err == nil {
+			s.applyChatSpace(space)
+			s.broadcast("chat.space", space)
+		}
+		return space, err
+	case "AddChatReaction":
+		var p api.ChatReactionParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		name, err := s.client.AddChatReaction(ctx, p.MessageName, p.Emoji)
+		if err == nil {
+			s.broadcast("chat.reaction", map[string]string{"name": name, "message": p.MessageName, "emoji": p.Emoji, "action": "added"})
+		}
+		return name, err
+	case "DeleteChatReaction":
+		var p api.ChatReactionParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		err := s.client.DeleteChatReaction(ctx, p.ReactionName)
+		if err == nil {
+			s.broadcast("chat.reaction", map[string]string{"name": p.ReactionName, "action": "deleted"})
+		}
+		return nil, err
 	case "ChatMembers":
 		var p api.SpaceNameParams
 		if err := decode(params, &p); err != nil {
@@ -491,6 +557,40 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			s.broadcast("mail.changed", thread)
 		}
 		return thread, err
+	case "MailDrafts":
+		var p api.MailDraftsParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		page, err := s.client.MailDrafts(ctx, p.PageToken)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.MailDrafts = page })
+		}
+		return page, err
+	case "CreateMailDraft":
+		var p api.SendMailParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		draft, err := s.client.CreateMailDraft(ctx, p.Draft)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+				snapshot.MailDrafts.Items = append([]api.MailDraftItem{draft}, snapshot.MailDrafts.Items...)
+			})
+			s.broadcast("mail.changed", map[string]string{"draft_id": draft.ID, "action": "draft_created"})
+		}
+		return draft, err
+	case "SendMailDraft":
+		var p api.MailDraftIDParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		thread, err := s.client.SendMailDraft(ctx, p.DraftID)
+		if err == nil {
+			s.applyMailThread(thread)
+			s.broadcast("mail.changed", thread)
+		}
+		return thread, err
 	case "ArchiveMail":
 		var p api.ThreadIDParams
 		if err := decode(params, &p); err != nil {
@@ -522,6 +622,23 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			s.broadcast("mail.changed", thread)
 		}
 		return thread, err
+	case "SetMailUnread":
+		var p api.SetMailUnreadParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		thread, err := s.client.SetMailUnread(ctx, p.ThreadID, p.Unread)
+		if err == nil {
+			s.applyMailThread(thread)
+			s.broadcast("mail.changed", thread)
+		}
+		return thread, err
+	case "CalendarLists":
+		page, err := s.client.CalendarLists(ctx)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.CalendarLists = page.Items })
+		}
+		return page, err
 	case "CalendarEvents":
 		var p api.CalendarEventsParams
 		if err := decode(params, &p); err != nil {
@@ -529,7 +646,10 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 		}
 		page, err := s.client.CalendarEvents(ctx, p.Query)
 		if err == nil {
-			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.Events = page })
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+				snapshot.Events = page
+				snapshot.CalendarID = p.Query.CalendarID
+			})
 		}
 		return page, err
 	case "QuickAddEvent":
@@ -549,6 +669,28 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			return nil, err
 		}
 		event, err := s.client.CreateEvent(ctx, p.Draft)
+		if err == nil {
+			s.applyEvent(event)
+			s.broadcast("calendar.changed", event)
+		}
+		return event, err
+	case "UpdateEvent":
+		var p api.UpdateEventParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		event, err := s.client.UpdateEvent(ctx, p.EventID, p.Draft)
+		if err == nil {
+			s.applyEvent(event)
+			s.broadcast("calendar.changed", event)
+		}
+		return event, err
+	case "MoveEvent":
+		var p api.MoveEventParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		event, err := s.client.MoveEvent(ctx, p.EventID, p.SourceCalendarID, p.DestinationCalendarID)
 		if err == nil {
 			s.applyEvent(event)
 			s.broadcast("calendar.changed", event)
@@ -602,6 +744,55 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			s.broadcast("meet.changed", map[string]string{"name": p.Name, "action": "ended"})
 		}
 		return nil, err
+	case "TaskLists":
+		page, err := s.client.TaskLists(ctx)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.TaskLists = page.Items })
+		}
+		return page, err
+	case "Tasks":
+		var p api.TasksParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		page, err := s.client.Tasks(ctx, p.Query)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+				snapshot.Tasks = page
+				snapshot.TaskListID = p.Query.TaskListID
+			})
+		}
+		return page, err
+	case "DriveFiles":
+		var p api.DriveFilesParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		page, err := s.client.DriveFiles(ctx, p.Query)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.DriveFiles = page })
+		}
+		return page, err
+	case "Docs":
+		var p api.DriveFilesParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		page, err := s.client.Docs(ctx, p.Query)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.DocFiles = page })
+		}
+		return page, err
+	case "Doc":
+		var p api.DocIDParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		doc, err := s.client.Doc(ctx, p.DocumentID)
+		if err == nil {
+			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) { snapshot.Doc = doc })
+		}
+		return doc, err
 	case "PinChatSpace":
 		var p api.SpaceNameParams
 		if err := decode(params, &p); err != nil {
@@ -861,7 +1052,22 @@ func (s *Server) refreshSnapshot(ctx context.Context) error {
 	threads, threadsErr := s.client.MailThreads(ctx, api.MailQuery{Label: "Inbox"})
 	events, eventsErr := s.client.CalendarEvents(ctx, api.CalendarQuery{})
 	meet, meetErr := s.client.MeetSpaces(ctx)
-	if err := firstErr(authErr, spacesErr, labelsErr, threadsErr, eventsErr, meetErr); err != nil {
+	taskLists, taskListsErr := s.client.TaskLists(ctx)
+	tasks := api.Page[api.TaskItem]{}
+	taskListID := ""
+	var tasksErr error
+	if len(taskLists.Items) > 0 {
+		taskListID = taskLists.Items[0].ID
+		tasks, tasksErr = s.client.Tasks(ctx, api.TaskQuery{TaskListID: taskListID})
+	}
+	driveFiles, driveErr := s.client.DriveFiles(ctx, api.DriveQuery{})
+	docFiles, docsErr := s.client.Docs(ctx, api.DriveQuery{})
+	doc := api.DocDocument{}
+	var docErr error
+	if len(docFiles.Items) > 0 {
+		doc, docErr = s.client.Doc(ctx, docFiles.Items[0].ID)
+	}
+	if err := firstErr(authErr, spacesErr, labelsErr, threadsErr, eventsErr, meetErr, taskListsErr, tasksErr, driveErr, docsErr, docErr); err != nil {
 		return err
 	}
 	messagesBySpace := s.prefetchChatMessages(ctx, spaces.Items)
@@ -875,6 +1081,12 @@ func (s *Server) refreshSnapshot(ctx context.Context) error {
 		snapshot.MailThreads = threads
 		snapshot.Events = events
 		snapshot.MeetSpaces = meet.Items
+		snapshot.TaskLists = taskLists.Items
+		snapshot.Tasks = tasks
+		snapshot.TaskListID = taskListID
+		snapshot.DriveFiles = driveFiles
+		snapshot.DocFiles = docFiles
+		snapshot.Doc = doc
 	})
 	for _, page := range messagesBySpace {
 		s.cacheAttachments(page.Items)
@@ -1038,6 +1250,65 @@ func (s *Server) handleChatMessage(msg api.ChatMessage, fireNotify bool) {
 		})
 	}
 	s.broadcast("chat.message", msg)
+}
+
+func (s *Server) removeChatMessage(messageName string) {
+	if messageName == "" {
+		return
+	}
+	spaceName := chatSpaceFromMessageName(messageName)
+	messageID := chatMessageIDFromName(messageName)
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		removeFromPage := func(page api.Page[api.ChatMessage]) api.Page[api.ChatMessage] {
+			out := page.Items[:0]
+			for _, msg := range page.Items {
+				if msg.Name == messageName || (messageID != "" && msg.ID == messageID) {
+					continue
+				}
+				out = append(out, msg)
+			}
+			page.Items = out
+			return page
+		}
+		if spaceName != "" {
+			if page, ok := snapshot.ChatMessagesBySpace[spaceName]; ok {
+				snapshot.ChatMessagesBySpace[spaceName] = removeFromPage(page)
+			}
+			return
+		}
+		for name, page := range snapshot.ChatMessagesBySpace {
+			snapshot.ChatMessagesBySpace[name] = removeFromPage(page)
+		}
+	})
+}
+
+func (s *Server) applyChatSpace(space api.Space) {
+	if space.Name == "" {
+		return
+	}
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		for i := range snapshot.Spaces {
+			if snapshot.Spaces[i].Name == space.Name {
+				snapshot.Spaces[i] = space
+				return
+			}
+		}
+		snapshot.Spaces = append([]api.Space{space}, snapshot.Spaces...)
+	})
+}
+
+func chatSpaceFromMessageName(name string) string {
+	if idx := strings.Index(name, "/messages/"); idx > 0 {
+		return name[:idx]
+	}
+	return ""
+}
+
+func chatMessageIDFromName(name string) string {
+	if idx := strings.LastIndex(name, "/messages/"); idx >= 0 {
+		return name[idx+len("/messages/"):]
+	}
+	return ""
 }
 
 func (s *Server) broadcast(topic string, payload any) {

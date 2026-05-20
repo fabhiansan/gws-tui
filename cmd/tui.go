@@ -16,7 +16,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("gws tui", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	feature := flags.String("feature", "", "initial feature: chat, mail, calendar, or meet")
+	feature := flags.String("feature", "", "initial feature: chat, mail, calendar, meet, tasks, drive, or docs")
 	auth := flags.Bool("auth", false, "show the auth screen before loading the workspace")
 	noIcons := flags.Bool("no-icons", false, "disable Nerd Font/Unicode icons")
 	noColor := flags.Bool("no-color", false, "disable color styling")

@@ -31,7 +31,7 @@ func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
 	model = updated.(Model)
 
 	view := model.View()
-	for _, want := range []string{"Chat", "Mail", "Calendar", "Meet", "#engineering"} {
+	for _, want := range []string{"Chat", "Mail", "Calendar", "Meet", "Tasks", "Drive", "Docs", "#engineering"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("render missing %q:\n%s", want, view)
 		}
@@ -379,9 +379,9 @@ func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
 	if client.chatMessagesCalls != 1 || client.lastChatSpace != "spaces/design" {
 		t.Fatalf("expected one ChatMessages call for selected space, calls=%d space=%q", client.chatMessagesCalls, client.lastChatSpace)
 	}
-	if client.authStatusCalls != 0 || client.chatSpacesCalls != 0 || client.mailLabelsCalls != 0 || client.mailThreadsCalls != 0 || client.calendarEventsCalls != 0 || client.meetSpacesCalls != 0 {
-		t.Fatalf("chat refresh should not refetch other panes: auth=%d spaces=%d labels=%d mail=%d calendar=%d meet=%d",
-			client.authStatusCalls, client.chatSpacesCalls, client.mailLabelsCalls, client.mailThreadsCalls, client.calendarEventsCalls, client.meetSpacesCalls)
+	if client.authStatusCalls != 0 || client.chatSpacesCalls != 0 || client.mailLabelsCalls != 0 || client.mailThreadsCalls != 0 || client.calendarEventsCalls != 0 || client.meetSpacesCalls != 0 || client.taskListsCalls != 0 || client.tasksCalls != 0 || client.driveFilesCalls != 0 || client.docsCalls != 0 || client.docCalls != 0 {
+		t.Fatalf("chat refresh should not refetch other panes: auth=%d spaces=%d labels=%d mail=%d calendar=%d meet=%d taskLists=%d tasks=%d drive=%d docs=%d doc=%d",
+			client.authStatusCalls, client.chatSpacesCalls, client.mailLabelsCalls, client.mailThreadsCalls, client.calendarEventsCalls, client.meetSpacesCalls, client.taskListsCalls, client.tasksCalls, client.driveFilesCalls, client.docsCalls, client.docCalls)
 	}
 	if model.toast != "chat refreshed" {
 		t.Fatalf("expected chat refreshed toast, got %q", model.toast)
@@ -728,12 +728,133 @@ func TestRefreshKeyOnlyReloadsMailFeature(t *testing.T) {
 	if client.lastMailQuery.Label != "All Mail" || client.lastMailQuery.Search != "deck" {
 		t.Fatalf("expected current mail search to refresh, got query=%#v", client.lastMailQuery)
 	}
-	if client.authStatusCalls != 0 || client.chatSpacesCalls != 0 || client.chatMessagesCalls != 0 || client.calendarEventsCalls != 0 || client.meetSpacesCalls != 0 {
-		t.Fatalf("mail refresh should not refetch other panes: auth=%d spaces=%d chat=%d calendar=%d meet=%d",
-			client.authStatusCalls, client.chatSpacesCalls, client.chatMessagesCalls, client.calendarEventsCalls, client.meetSpacesCalls)
+	if client.authStatusCalls != 0 || client.chatSpacesCalls != 0 || client.chatMessagesCalls != 0 || client.calendarEventsCalls != 0 || client.meetSpacesCalls != 0 || client.taskListsCalls != 0 || client.tasksCalls != 0 || client.driveFilesCalls != 0 || client.docsCalls != 0 || client.docCalls != 0 {
+		t.Fatalf("mail refresh should not refetch other panes: auth=%d spaces=%d chat=%d calendar=%d meet=%d taskLists=%d tasks=%d drive=%d docs=%d doc=%d",
+			client.authStatusCalls, client.chatSpacesCalls, client.chatMessagesCalls, client.calendarEventsCalls, client.meetSpacesCalls, client.taskListsCalls, client.tasksCalls, client.driveFilesCalls, client.docsCalls, client.docCalls)
 	}
 	if model.toast != "mail refreshed" {
 		t.Fatalf("expected mail refreshed toast, got %q", model.toast)
+	}
+}
+
+func TestMailUnreadKeyTogglesSelectedThread(t *testing.T) {
+	client := &recordingMailUnreadClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureMail
+	model.mailThreads = []api.MailThread{{
+		ID:      "mail-1",
+		Subject: "Launch notes",
+		Unread:  true,
+		Labels:  []string{"INBOX", "UNREAD"},
+	}}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected unread toggle command")
+	}
+	msg := cmd()
+	action, ok := msg.(mailActionMsg)
+	if !ok {
+		t.Fatalf("expected mailActionMsg, got %T", msg)
+	}
+	updatedModel, _ := model.Update(action)
+	model = updatedModel.(Model)
+
+	if client.threadID != "mail-1" || client.unread {
+		t.Fatalf("expected SetMailUnread(mail-1, false), got thread=%q unread=%v", client.threadID, client.unread)
+	}
+	if model.mailThreads[0].Unread {
+		t.Fatalf("expected selected mail to be marked read: %#v", model.mailThreads[0])
+	}
+	if model.toast != "marked read" {
+		t.Fatalf("expected marked read toast, got %q", model.toast)
+	}
+}
+
+func TestTasksFeatureSwitchesTaskLists(t *testing.T) {
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "tasks",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureTasks
+	model.taskLists = []api.TaskList{
+		{ID: "tasks-default", Title: "My Tasks"},
+		{ID: "tasks-work", Title: "Work"},
+	}
+	model.tasks = []api.TaskItem{{ID: "tasks-default-task-1", TaskListID: "tasks-default", Title: "Default task"}}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected task-list switch command")
+	}
+	msg := cmd()
+	refreshMsg, ok := msg.(featureRefreshedMsg)
+	if !ok {
+		t.Fatalf("expected featureRefreshedMsg, got %T", msg)
+	}
+	updatedModel, _ := model.Update(refreshMsg)
+	model = updatedModel.(Model)
+
+	if client.tasksCalls != 1 || client.lastTaskQuery.TaskListID != "tasks-work" {
+		t.Fatalf("expected tasks-work load, calls=%d query=%#v", client.tasksCalls, client.lastTaskQuery)
+	}
+	if model.selectedTaskList().ID != "tasks-work" {
+		t.Fatalf("expected selected task list to switch: %#v", model.selectedTaskList())
+	}
+	if len(model.tasks) != 1 || model.tasks[0].TaskListID != "tasks-work" {
+		t.Fatalf("expected work tasks in model: %#v", model.tasks)
+	}
+}
+
+func TestDocsSelectionLoadsDocumentBody(t *testing.T) {
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "docs",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureDocs
+	model.docFiles = []api.DriveFile{
+		{ID: "doc-1", Name: "Launch notes"},
+		{ID: "doc-2", Name: "Retro notes"},
+	}
+	model.doc = api.DocDocument{ID: "doc-1", Title: "Launch notes", Body: "Old"}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected doc load command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(docLoadedMsg)
+	if !ok {
+		t.Fatalf("expected docLoadedMsg, got %T", msg)
+	}
+	updatedModel, _ := model.Update(loaded)
+	model = updatedModel.(Model)
+
+	if client.docCalls != 1 || client.lastDocID != "doc-2" {
+		t.Fatalf("expected doc-2 load, calls=%d id=%q", client.docCalls, client.lastDocID)
+	}
+	if model.doc.ID != "doc-2" || model.doc.Body == "" {
+		t.Fatalf("expected selected document body loaded: %#v", model.doc)
 	}
 }
 
@@ -876,9 +997,116 @@ func TestChatShiftRRefreshesAllWorkspaceData(t *testing.T) {
 		t.Fatal("expected loadedMsg from full refresh command")
 	}
 
-	if client.authStatusCalls != 1 || client.chatSpacesCalls != 1 || client.chatMessagesCalls != 1 || client.mailLabelsCalls != 1 || client.mailThreadsCalls != 1 || client.calendarEventsCalls != 1 || client.meetSpacesCalls != 1 {
-		t.Fatalf("expected full workspace refresh, auth=%d spaces=%d chat=%d labels=%d mail=%d calendar=%d meet=%d",
-			client.authStatusCalls, client.chatSpacesCalls, client.chatMessagesCalls, client.mailLabelsCalls, client.mailThreadsCalls, client.calendarEventsCalls, client.meetSpacesCalls)
+	if client.authStatusCalls != 1 || client.chatSpacesCalls != 1 || client.chatMessagesCalls != 1 || client.mailLabelsCalls != 1 || client.mailThreadsCalls != 1 || client.calendarEventsCalls != 1 || client.meetSpacesCalls != 1 || client.taskListsCalls != 1 || client.tasksCalls != 1 || client.driveFilesCalls != 1 || client.docsCalls != 1 || client.docCalls != 1 {
+		t.Fatalf("expected full workspace refresh, auth=%d spaces=%d chat=%d labels=%d mail=%d calendar=%d meet=%d taskLists=%d tasks=%d drive=%d docs=%d doc=%d",
+			client.authStatusCalls, client.chatSpacesCalls, client.chatMessagesCalls, client.mailLabelsCalls, client.mailThreadsCalls, client.calendarEventsCalls, client.meetSpacesCalls, client.taskListsCalls, client.tasksCalls, client.driveFilesCalls, client.docsCalls, client.docCalls)
+	}
+}
+
+func TestChatEditDeleteCreateAndReactionKeys(t *testing.T) {
+	client := &recordingChatActionsClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureChat
+	model.spaces = []api.Space{{Name: "spaces/engineering", DisplayName: "#engineering"}}
+	model.chatMessages = []api.ChatMessage{{
+		ID:         "msg-1",
+		Name:       "spaces/engineering/messages/msg-1",
+		Space:      "spaces/engineering",
+		SenderID:   "users/me",
+		SenderName: "Me",
+		Text:       "before",
+		CreateTime: time.Now(),
+	}}
+	model.detailMessageAt = map[int]string{0: "msg-1"}
+	model.detailCursor = 0
+	model.chatReactions = map[string]string{}
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	model = updated
+	if model.editMessageName != "spaces/engineering/messages/msg-1" || model.input.Value() != "before" {
+		t.Fatalf("edit key did not prepare composer: name=%q input=%q", model.editMessageName, model.input.Value())
+	}
+	model.input.SetValue("after")
+	model, cmd := model.submitAction()
+	if cmd == nil {
+		t.Fatal("expected edit command")
+	}
+	updatedModel, _ := model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.editName != "spaces/engineering/messages/msg-1" || client.editText != "after" {
+		t.Fatalf("unexpected edit call name=%q text=%q", client.editName, client.editText)
+	}
+	if model.chatMessages[0].Text != "after" {
+		t.Fatalf("edited message was not applied: %#v", model.chatMessages[0])
+	}
+
+	updated, cmd = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected add reaction command")
+	}
+	updatedModel, _ = model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.reactionMessage != "spaces/engineering/messages/msg-1" || model.chatReactions["spaces/engineering/messages/msg-1"] == "" {
+		t.Fatalf("reaction was not recorded: client=%q map=%#v", client.reactionMessage, model.chatReactions)
+	}
+
+	updated, cmd = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'-'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected remove reaction command")
+	}
+	updatedModel, _ = model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.deletedReaction == "" || model.chatReactions["spaces/engineering/messages/msg-1"] != "" {
+		t.Fatalf("reaction was not removed: deleted=%q map=%#v", client.deletedReaction, model.chatReactions)
+	}
+
+	updated, cmd = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected delete command")
+	}
+	updatedModel, _ = model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.deleteName != "spaces/engineering/messages/msg-1" || len(model.chatMessages) != 0 {
+		t.Fatalf("delete did not remove message: name=%q messages=%#v", client.deleteName, model.chatMessages)
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	model = updated
+	if !model.createSpaceMode {
+		t.Fatal("n key did not enter create-space mode")
+	}
+	model.input.SetValue("Launch Room")
+	model, cmd = model.submitAction()
+	if cmd == nil {
+		t.Fatal("expected create-space command")
+	}
+	updatedModel, _ = model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.createdSpaceName != "Launch Room" || model.spaces[0].Name != "spaces/launch-room" {
+		t.Fatalf("space was not created/applied: created=%q spaces=%#v", client.createdSpaceName, model.spaces)
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	model = updated
+	model.input.SetValue("Setup Room | alice@example.com, bob@example.com")
+	model, cmd = model.submitAction()
+	if cmd == nil {
+		t.Fatal("expected setup-space command")
+	}
+	updatedModel, _ = model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.setupSpaceName != "Setup Room" || len(client.setupMembers) != 2 || model.spaces[0].Name != "spaces/setup-room" {
+		t.Fatalf("space setup was not applied: name=%q members=%#v spaces=%#v", client.setupSpaceName, client.setupMembers, model.spaces)
 	}
 }
 
@@ -906,6 +1134,58 @@ type countingMessagesClient struct {
 func (c *countingMessagesClient) ChatMessages(ctx context.Context, spaceName, pageToken string) (api.Page[api.ChatMessage], error) {
 	c.calls++
 	return c.WorkspaceClient.ChatMessages(ctx, spaceName, pageToken)
+}
+
+type recordingChatActionsClient struct {
+	api.WorkspaceClient
+	editName         string
+	editText         string
+	deleteName       string
+	createdSpaceName string
+	setupSpaceName   string
+	setupMembers     []string
+	reactionMessage  string
+	deletedReaction  string
+}
+
+func (c *recordingChatActionsClient) EditChatMessage(_ context.Context, messageName, text string) (api.ChatMessage, error) {
+	c.editName = messageName
+	c.editText = text
+	return api.ChatMessage{
+		ID:         "msg-1",
+		Name:       messageName,
+		Space:      "spaces/engineering",
+		SenderID:   "users/me",
+		SenderName: "Me",
+		Text:       text,
+		CreateTime: time.Now(),
+	}, nil
+}
+
+func (c *recordingChatActionsClient) DeleteChatMessage(_ context.Context, messageName string) error {
+	c.deleteName = messageName
+	return nil
+}
+
+func (c *recordingChatActionsClient) CreateChatSpace(_ context.Context, displayName string) (api.Space, error) {
+	c.createdSpaceName = displayName
+	return api.Space{Name: "spaces/launch-room", DisplayName: displayName, SpaceType: "SPACE"}, nil
+}
+
+func (c *recordingChatActionsClient) SetupChatSpace(_ context.Context, displayName string, members []string) (api.Space, error) {
+	c.setupSpaceName = displayName
+	c.setupMembers = append([]string(nil), members...)
+	return api.Space{Name: "spaces/setup-room", DisplayName: displayName, SpaceType: "SPACE"}, nil
+}
+
+func (c *recordingChatActionsClient) AddChatReaction(_ context.Context, messageName, emoji string) (string, error) {
+	c.reactionMessage = messageName
+	return messageName + "/reactions/reaction-1", nil
+}
+
+func (c *recordingChatActionsClient) DeleteChatReaction(_ context.Context, reactionName string) error {
+	c.deletedReaction = reactionName
+	return nil
 }
 
 type rotatingEventsClient struct {
@@ -974,9 +1254,18 @@ type countingWorkspaceClient struct {
 	mailThreadsCalls    int
 	calendarEventsCalls int
 	meetSpacesCalls     int
+	taskListsCalls      int
+	tasksCalls          int
+	driveFilesCalls     int
+	docsCalls           int
+	docCalls            int
 
-	lastChatSpace string
-	lastMailQuery api.MailQuery
+	lastChatSpace  string
+	lastMailQuery  api.MailQuery
+	lastTaskQuery  api.TaskQuery
+	lastDriveQuery api.DriveQuery
+	lastDocsQuery  api.DriveQuery
+	lastDocID      string
 }
 
 func (c *countingWorkspaceClient) AuthStatus(ctx context.Context) (api.AuthStatus, error) {
@@ -1014,6 +1303,51 @@ func (c *countingWorkspaceClient) CalendarEvents(ctx context.Context, query api.
 func (c *countingWorkspaceClient) MeetSpaces(ctx context.Context) (api.Page[api.MeetSpace], error) {
 	c.meetSpacesCalls++
 	return c.WorkspaceClient.MeetSpaces(ctx)
+}
+
+func (c *countingWorkspaceClient) TaskLists(ctx context.Context) (api.Page[api.TaskList], error) {
+	c.taskListsCalls++
+	return c.WorkspaceClient.TaskLists(ctx)
+}
+
+func (c *countingWorkspaceClient) Tasks(ctx context.Context, query api.TaskQuery) (api.Page[api.TaskItem], error) {
+	c.tasksCalls++
+	c.lastTaskQuery = query
+	return c.WorkspaceClient.Tasks(ctx, query)
+}
+
+func (c *countingWorkspaceClient) DriveFiles(ctx context.Context, query api.DriveQuery) (api.Page[api.DriveFile], error) {
+	c.driveFilesCalls++
+	c.lastDriveQuery = query
+	return c.WorkspaceClient.DriveFiles(ctx, query)
+}
+
+func (c *countingWorkspaceClient) Docs(ctx context.Context, query api.DriveQuery) (api.Page[api.DriveFile], error) {
+	c.docsCalls++
+	c.lastDocsQuery = query
+	return c.WorkspaceClient.Docs(ctx, query)
+}
+
+func (c *countingWorkspaceClient) Doc(ctx context.Context, documentID string) (api.DocDocument, error) {
+	c.docCalls++
+	c.lastDocID = documentID
+	return c.WorkspaceClient.Doc(ctx, documentID)
+}
+
+type recordingMailUnreadClient struct {
+	api.WorkspaceClient
+	threadID string
+	unread   bool
+}
+
+func (c *recordingMailUnreadClient) SetMailUnread(_ context.Context, threadID string, unread bool) (api.MailThread, error) {
+	c.threadID = threadID
+	c.unread = unread
+	labels := []string{"INBOX"}
+	if unread {
+		labels = append(labels, "UNREAD")
+	}
+	return api.MailThread{ID: threadID, Subject: "Launch notes", Unread: unread, Labels: labels}, nil
 }
 
 type countingChatReaderClient struct {

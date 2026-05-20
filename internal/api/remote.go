@@ -83,6 +83,38 @@ func (c *RemoteClient) SendChatMessage(ctx context.Context, spaceName, text, thr
 	return out, err
 }
 
+func (c *RemoteClient) EditChatMessage(ctx context.Context, messageName, text string) (ChatMessage, error) {
+	var out ChatMessage
+	err := c.request(ctx, "EditChatMessage", EditChatMessageParams{MessageName: messageName, Text: text}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) DeleteChatMessage(ctx context.Context, messageName string) error {
+	return c.request(ctx, "DeleteChatMessage", ChatMessageNameParams{MessageName: messageName}, nil)
+}
+
+func (c *RemoteClient) CreateChatSpace(ctx context.Context, displayName string) (Space, error) {
+	var out Space
+	err := c.request(ctx, "CreateChatSpace", CreateChatSpaceParams{DisplayName: displayName}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) SetupChatSpace(ctx context.Context, displayName string, members []string) (Space, error) {
+	var out Space
+	err := c.request(ctx, "SetupChatSpace", SetupChatSpaceParams{DisplayName: displayName, Members: members}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) AddChatReaction(ctx context.Context, messageName, emoji string) (string, error) {
+	var out string
+	err := c.request(ctx, "AddChatReaction", ChatReactionParams{MessageName: messageName, Emoji: emoji}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) DeleteChatReaction(ctx context.Context, reactionName string) error {
+	return c.request(ctx, "DeleteChatReaction", ChatReactionParams{ReactionName: reactionName}, nil)
+}
+
 func (c *RemoteClient) SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error) {
 	if spaceName == "" {
 		return nil, errors.New("space name required")
@@ -142,6 +174,24 @@ func (c *RemoteClient) SendMail(ctx context.Context, draft MailDraft) (MailThrea
 	return out, err
 }
 
+func (c *RemoteClient) MailDrafts(ctx context.Context, pageToken string) (Page[MailDraftItem], error) {
+	var out Page[MailDraftItem]
+	err := c.request(ctx, "MailDrafts", MailDraftsParams{PageToken: pageToken}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) CreateMailDraft(ctx context.Context, draft MailDraft) (MailDraftItem, error) {
+	var out MailDraftItem
+	err := c.request(ctx, "CreateMailDraft", SendMailParams{Draft: draft}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) SendMailDraft(ctx context.Context, draftID string) (MailThread, error) {
+	var out MailThread
+	err := c.request(ctx, "SendMailDraft", MailDraftIDParams{DraftID: draftID}, &out)
+	return out, err
+}
+
 func (c *RemoteClient) ArchiveMail(ctx context.Context, threadID string) error {
 	return c.request(ctx, "ArchiveMail", ThreadIDParams{ThreadID: threadID}, nil)
 }
@@ -153,6 +203,18 @@ func (c *RemoteClient) TrashMail(ctx context.Context, threadID string) error {
 func (c *RemoteClient) ToggleStar(ctx context.Context, threadID string) (MailThread, error) {
 	var out MailThread
 	err := c.request(ctx, "ToggleStar", ThreadIDParams{ThreadID: threadID}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) SetMailUnread(ctx context.Context, threadID string, unread bool) (MailThread, error) {
+	var out MailThread
+	err := c.request(ctx, "SetMailUnread", SetMailUnreadParams{ThreadID: threadID, Unread: unread}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) CalendarLists(ctx context.Context) (Page[CalendarListItem], error) {
+	var out Page[CalendarListItem]
+	err := c.request(ctx, "CalendarLists", nil, &out)
 	return out, err
 }
 
@@ -171,6 +233,18 @@ func (c *RemoteClient) QuickAddEvent(ctx context.Context, text string) (Calendar
 func (c *RemoteClient) CreateEvent(ctx context.Context, draft EventDraft) (CalendarEvent, error) {
 	var out CalendarEvent
 	err := c.request(ctx, "CreateEvent", CreateEventParams{Draft: draft}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) UpdateEvent(ctx context.Context, eventID string, draft EventDraft) (CalendarEvent, error) {
+	var out CalendarEvent
+	err := c.request(ctx, "UpdateEvent", UpdateEventParams{EventID: eventID, Draft: draft}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) MoveEvent(ctx context.Context, eventID, sourceCalendarID, destinationCalendarID string) (CalendarEvent, error) {
+	var out CalendarEvent
+	err := c.request(ctx, "MoveEvent", MoveEventParams{EventID: eventID, SourceCalendarID: sourceCalendarID, DestinationCalendarID: destinationCalendarID}, &out)
 	return out, err
 }
 
@@ -198,6 +272,36 @@ func (c *RemoteClient) CreateMeetSpace(ctx context.Context, title string) (MeetS
 
 func (c *RemoteClient) EndMeetSpace(ctx context.Context, name string) error {
 	return c.request(ctx, "EndMeetSpace", MeetSpaceNameParams{Name: name}, nil)
+}
+
+func (c *RemoteClient) TaskLists(ctx context.Context) (Page[TaskList], error) {
+	var out Page[TaskList]
+	err := c.request(ctx, "TaskLists", nil, &out)
+	return out, err
+}
+
+func (c *RemoteClient) Tasks(ctx context.Context, query TaskQuery) (Page[TaskItem], error) {
+	var out Page[TaskItem]
+	err := c.request(ctx, "Tasks", TasksParams{Query: query}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) DriveFiles(ctx context.Context, query DriveQuery) (Page[DriveFile], error) {
+	var out Page[DriveFile]
+	err := c.request(ctx, "DriveFiles", DriveFilesParams{Query: query}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) Docs(ctx context.Context, query DriveQuery) (Page[DriveFile], error) {
+	var out Page[DriveFile]
+	err := c.request(ctx, "Docs", DriveFilesParams{Query: query}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) Doc(ctx context.Context, documentID string) (DocDocument, error) {
+	var out DocDocument
+	err := c.request(ctx, "Doc", DocIDParams{DocumentID: documentID}, &out)
+	return out, err
 }
 
 func (c *RemoteClient) PinChatSpace(ctx context.Context, spaceName string) error {

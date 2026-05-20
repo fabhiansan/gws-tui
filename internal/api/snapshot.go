@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const WorkspaceSnapshotVersion = 2
+const WorkspaceSnapshotVersion = 5
 
 var ErrSnapshotLockBusy = errors.New("workspace snapshot lock is held by another process")
 
@@ -21,8 +21,17 @@ type WorkspaceSnapshot struct {
 	ChatMessagesBySpace map[string]Page[ChatMessage] `json:"chat_messages_by_space,omitempty"`
 	MailLabels          []MailLabel                  `json:"mail_labels,omitempty"`
 	MailThreads         Page[MailThread]             `json:"mail_threads,omitempty"`
+	MailDrafts          Page[MailDraftItem]          `json:"mail_drafts,omitempty"`
+	CalendarLists       []CalendarListItem           `json:"calendar_lists,omitempty"`
+	CalendarID          string                       `json:"calendar_id,omitempty"`
 	Events              Page[CalendarEvent]          `json:"events,omitempty"`
 	MeetSpaces          []MeetSpace                  `json:"meet_spaces,omitempty"`
+	TaskLists           []TaskList                   `json:"task_lists,omitempty"`
+	Tasks               Page[TaskItem]               `json:"tasks,omitempty"`
+	TaskListID          string                       `json:"task_list_id,omitempty"`
+	DriveFiles          Page[DriveFile]              `json:"drive_files,omitempty"`
+	DocFiles            Page[DriveFile]              `json:"doc_files,omitempty"`
+	Doc                 DocDocument                  `json:"doc,omitempty"`
 	UserLabels          map[string]string            `json:"user_labels,omitempty"`
 	MembersBySpace      map[string][]SpaceMember     `json:"members_by_space,omitempty"`
 	SelfUserIDs         map[string]bool              `json:"self_user_ids,omitempty"`
@@ -121,8 +130,15 @@ func (s WorkspaceSnapshot) HasData() bool {
 	return len(s.Spaces) > 0 ||
 		len(s.MailLabels) > 0 ||
 		len(s.MailThreads.Items) > 0 ||
+		len(s.MailDrafts.Items) > 0 ||
+		len(s.CalendarLists) > 0 ||
 		len(s.Events.Items) > 0 ||
-		len(s.MeetSpaces) > 0
+		len(s.MeetSpaces) > 0 ||
+		len(s.TaskLists) > 0 ||
+		len(s.Tasks.Items) > 0 ||
+		len(s.DriveFiles.Items) > 0 ||
+		len(s.DocFiles.Items) > 0 ||
+		s.Doc.ID != ""
 }
 
 // Clone returns a deep copy of the snapshot. Maps and the top-level slices of
@@ -148,11 +164,29 @@ func (s WorkspaceSnapshot) Clone() WorkspaceSnapshot {
 	if s.MailThreads.Items != nil {
 		out.MailThreads.Items = append([]MailThread(nil), s.MailThreads.Items...)
 	}
+	if s.MailDrafts.Items != nil {
+		out.MailDrafts.Items = append([]MailDraftItem(nil), s.MailDrafts.Items...)
+	}
+	if s.CalendarLists != nil {
+		out.CalendarLists = append([]CalendarListItem(nil), s.CalendarLists...)
+	}
 	if s.Events.Items != nil {
 		out.Events.Items = append([]CalendarEvent(nil), s.Events.Items...)
 	}
 	if s.MeetSpaces != nil {
 		out.MeetSpaces = append([]MeetSpace(nil), s.MeetSpaces...)
+	}
+	if s.TaskLists != nil {
+		out.TaskLists = append([]TaskList(nil), s.TaskLists...)
+	}
+	if s.Tasks.Items != nil {
+		out.Tasks.Items = append([]TaskItem(nil), s.Tasks.Items...)
+	}
+	if s.DriveFiles.Items != nil {
+		out.DriveFiles.Items = append([]DriveFile(nil), s.DriveFiles.Items...)
+	}
+	if s.DocFiles.Items != nil {
+		out.DocFiles.Items = append([]DriveFile(nil), s.DocFiles.Items...)
 	}
 	if s.UserLabels != nil {
 		out.UserLabels = make(map[string]string, len(s.UserLabels))

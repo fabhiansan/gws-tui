@@ -161,7 +161,7 @@ func (m Model) mouseClick(target pane, rect paneRect, x, y int) (Model, tea.Cmd)
 			if length > 0 && idx >= 0 && idx < length {
 				if idx != m.selected[m.feature] {
 					m.selected[m.feature] = idx
-					return m.loadSelectedChat()
+					return m.loadSelectedItem()
 				}
 			}
 		}
@@ -182,7 +182,7 @@ func (m Model) listRowAt(rect paneRect, y int) (int, bool) {
 		return 0, false
 	}
 	switch m.feature {
-	case FeatureChat, FeatureMeet:
+	case FeatureChat, FeatureMeet, FeatureTasks, FeatureDrive, FeatureDocs:
 		return row, true
 	case FeatureMail:
 		// Each thread renders as three lines (sender, subject, separator).

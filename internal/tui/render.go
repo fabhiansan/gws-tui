@@ -218,7 +218,7 @@ func (m Model) renderList(width, height int) string {
 			lines = append(lines, "", m.subtle("["+truncate(strings.Join(tabs, "  "), width-8)+"]"))
 		}
 	case FeatureCalendar:
-		title = fmt.Sprintf(" [1]-This week (%d) ", len(m.events))
+		title = fmt.Sprintf(" [1]-%s (%d) ", truncate(m.selectedCalendar().Summary, 24), len(m.events))
 		lastDay := ""
 		for i, event := range sortedEvents(m.events) {
 			day := event.Start.Format("Mon 02 Jan")
@@ -252,6 +252,63 @@ func (m Model) renderList(width, height int) string {
 			}
 			lines = append(lines, prefix+truncate(label, width-14)+status)
 			if i == m.selected[FeatureMeet] {
+				selEnd = len(lines) - 1
+			}
+		}
+	case FeatureTasks:
+		list := m.selectedTaskList()
+		title = fmt.Sprintf(" [1]-Tasks: %s (%d) ", truncate(fallback(list.Title, "Tasks"), 18), len(m.tasks))
+		for i, task := range m.tasks {
+			prefix := "  "
+			if i == m.selected[FeatureTasks] {
+				selStart = len(lines)
+			}
+			marker := m.icon("☐", "-")
+			if strings.EqualFold(task.Status, "completed") {
+				marker = m.live(m.icon("☑", "x"))
+			}
+			due := ""
+			if !task.Due.IsZero() {
+				due = " " + m.subtle(task.Due.Format("Jan 02"))
+			}
+			lines = append(lines, prefix+marker+" "+truncate(task.Title, width-14)+due)
+			if i == m.selected[FeatureTasks] {
+				selEnd = len(lines) - 1
+			}
+		}
+		if len(m.taskLists) > 1 {
+			lines = append(lines, "", m.subtle("[/[ previous list  ] next list]"))
+		}
+	case FeatureDrive:
+		title = fmt.Sprintf(" [1]-Drive (%d) ", len(m.driveFiles))
+		for i, file := range m.driveFiles {
+			prefix := "  "
+			if i == m.selected[FeatureDrive] {
+				selStart = len(lines)
+			}
+			kind := driveFileKind(file.MimeType)
+			meta := kind
+			if !file.ModifiedTime.IsZero() {
+				meta += " " + relative(file.ModifiedTime)
+			}
+			lines = append(lines, prefix+m.icon("◫", "f")+" "+truncate(file.Name, width-16)+" "+m.subtle(meta))
+			if i == m.selected[FeatureDrive] {
+				selEnd = len(lines) - 1
+			}
+		}
+	case FeatureDocs:
+		title = fmt.Sprintf(" [1]-Docs (%d) ", len(m.docFiles))
+		for i, file := range m.docFiles {
+			prefix := "  "
+			if i == m.selected[FeatureDocs] {
+				selStart = len(lines)
+			}
+			meta := ""
+			if !file.ModifiedTime.IsZero() {
+				meta = " " + m.subtle(relative(file.ModifiedTime))
+			}
+			lines = append(lines, prefix+m.icon("▤", "d")+" "+truncate(file.Name, width-12)+meta)
+			if i == m.selected[FeatureDocs] {
 				selEnd = len(lines) - 1
 			}
 		}
@@ -337,6 +394,12 @@ func (m Model) featureLabel(f Feature) string {
 		return "Calendar"
 	case FeatureMeet:
 		return "Meet"
+	case FeatureTasks:
+		return "Tasks"
+	case FeatureDrive:
+		return "Drive"
+	case FeatureDocs:
+		return "Docs"
 	default:
 		return string(f)
 	}
@@ -352,6 +415,12 @@ func (m Model) featureIcon(f Feature) string {
 		return m.icon("◫", "k")
 	case FeatureMeet:
 		return m.icon("◎", "v")
+	case FeatureTasks:
+		return m.icon("☑", "t")
+	case FeatureDrive:
+		return m.icon("◫", "d")
+	case FeatureDocs:
+		return m.icon("▤", "o")
 	default:
 		return m.icon("◦", "-")
 	}
@@ -546,10 +615,12 @@ func (m Model) renderHelp(width, height int) string {
 		}},
 		{"Calendar", []binding{
 			{"c", "new event"},
+			{"E", "edit event"},
+			{">", "move event"},
 			{"y / n / M", "RSVP yes / no / maybe"},
 			{"d", "delete event"},
 			{"t", "jump to today"},
-			{"] · [", "next / prev week"},
+			{"] · [", "next / prev calendar"},
 		}},
 		{"Meet", []binding{
 			{"n", "new space"},
@@ -729,6 +800,12 @@ func (m Model) detailTitle() string {
 		base = fallback(m.selectedEvent().Summary, "Calendar")
 	case FeatureMeet:
 		base = fallback(lastSegment(m.selectedMeet().Name), "Meet")
+	case FeatureTasks:
+		base = fallback(m.selectedTask().Title, "Tasks")
+	case FeatureDrive:
+		base = fallback(m.selectedDriveFile().Name, "Drive")
+	case FeatureDocs:
+		base = fallback(m.selectedDocFile().Name, "Docs")
 	default:
 		base = "gws"
 	}
@@ -752,6 +829,12 @@ func (m *Model) detailContent() string {
 		return m.calendarDetail()
 	case FeatureMeet:
 		return m.meetDetail()
+	case FeatureTasks:
+		return m.taskDetail()
+	case FeatureDrive:
+		return m.driveDetail()
+	case FeatureDocs:
+		return m.docsDetail()
 	default:
 		return ""
 	}
@@ -908,7 +991,7 @@ func (m *Model) mailDetail() string {
 	if thread.QuotedLines > 0 {
 		lines = append(lines, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
 	}
-	lines = append(lines, "", m.subtle("R reply · f forward · e archive · # trash · s star"))
+	lines = append(lines, "", m.subtle("R reply · f forward · e archive · # trash · s star · u read/unread"))
 	return displayText(strings.Join(lines, "\n"))
 }
 
@@ -928,7 +1011,7 @@ func (m Model) calendarDetail() string {
 		"",
 		fallback(event.Description, "(no description)"),
 		"",
-		m.subtle("[Y]es  [N]o  [M]aybe · c new event · d delete · ]/[ week"),
+		m.subtle("[Y]es  [N]o  [M]aybe · c new · E edit · d delete · > move · ]/[ calendar"),
 	}
 	return displayText(strings.Join(lines, "\n"))
 }
@@ -955,12 +1038,106 @@ func (m Model) meetDetail() string {
 	if !space.Created.IsZero() {
 		lines = append(lines, "Created:    "+space.Created.Format("02 Jan 2006"))
 	}
+	if !space.StartTime.IsZero() {
+		lines = append(lines, "Started:    "+space.StartTime.Format("02 Jan 2006 15:04"))
+	}
+	if !space.EndTime.IsZero() {
+		lines = append(lines, "Ended:      "+space.EndTime.Format("02 Jan 2006 15:04"))
+	}
+	if len(space.Participants) > 0 {
+		lines = append(lines, "", "─── Participants ───")
+		for _, participant := range space.Participants {
+			label := fallback(participant.DisplayName, fallback(participant.User, participant.Name))
+			lines = append(lines, "• "+label)
+		}
+	}
+	if len(space.Recordings) > 0 {
+		lines = append(lines, "", "─── Recordings ───")
+		for _, recording := range space.Recordings {
+			lines = append(lines, "• "+fallback(recording.File, recording.Name)+" "+fallback(recording.State, ""))
+		}
+	}
+	if len(space.Transcripts) > 0 {
+		lines = append(lines, "", "─── Transcripts ───")
+		for _, transcript := range space.Transcripts {
+			lines = append(lines, "• "+fallback(transcript.File, transcript.Name)+" "+fallback(transcript.State, ""))
+		}
+	}
 	lines = append(lines,
 		"",
 		"─── Actions ───",
 		"",
 		m.subtle("[J]oin  [C]opy link  [E]nd  n new space"),
 	)
+	return displayText(strings.Join(lines, "\n"))
+}
+
+func (m Model) taskDetail() string {
+	list := m.selectedTaskList()
+	if list.ID == "" {
+		return centerText("No task lists found.", m.detail.Width)
+	}
+	task := m.selectedTask()
+	if task.ID == "" {
+		return centerText("No tasks in "+list.Title+".", m.detail.Width)
+	}
+	lines := []string{
+		"List:      " + fallback(list.Title, list.ID),
+		"Status:    " + fallback(task.Status, "needsAction"),
+		"Due:       " + formatOptionalTime(task.Due, "Mon, 02 Jan 2006"),
+		"Completed: " + formatOptionalTime(task.Completed, "Mon, 02 Jan 2006 15:04"),
+		"Updated:   " + formatOptionalTime(task.Updated, "Mon, 02 Jan 2006 15:04"),
+		"Resource:  " + task.ID,
+		"",
+		"─── Notes ───",
+		"",
+		fallback(task.Notes, "(no notes)"),
+		"",
+		m.subtle("[/] switch task list · m load more"),
+	}
+	return displayText(strings.Join(lines, "\n"))
+}
+
+func (m Model) driveDetail() string {
+	file := m.selectedDriveFile()
+	if file.ID == "" {
+		return centerText("No Drive files found.", m.detail.Width)
+	}
+	lines := []string{
+		"Name:     " + file.Name,
+		"Type:     " + fallback(driveFileKind(file.MimeType), "-"),
+		"Modified: " + formatOptionalTime(file.ModifiedTime, "Mon, 02 Jan 2006 15:04"),
+		"Size:     " + formatBytes(file.Size),
+		"Link:     " + fallback(file.WebViewLink, "-"),
+		"Resource: " + file.ID,
+		"",
+		m.subtle("y yank metadata · / search · m load more"),
+	}
+	return displayText(strings.Join(lines, "\n"))
+}
+
+func (m Model) docsDetail() string {
+	file := m.selectedDocFile()
+	if file.ID == "" {
+		return centerText("No Google Docs files found.", m.detail.Width)
+	}
+	if m.docLoadingID == file.ID {
+		return centerText("Loading document...", m.detail.Width)
+	}
+	title := fallback(m.doc.Title, file.Name)
+	body := fallback(m.doc.Body, "(empty document)")
+	lines := []string{
+		"Title:    " + title,
+		"Modified: " + formatOptionalTime(file.ModifiedTime, "Mon, 02 Jan 2006 15:04"),
+		"Link:     " + fallback(file.WebViewLink, "-"),
+		"Resource: " + file.ID,
+		"",
+		"─── Document ───",
+		"",
+		body,
+		"",
+		m.subtle("y yank text · / search · m load more"),
+	}
 	return displayText(strings.Join(lines, "\n"))
 }
 
@@ -975,6 +1152,12 @@ func (m Model) paneHints() string {
 		}
 		return "j/k scroll  g/G top/bot  i compose"
 	case paneAction:
+		if m.feature == FeatureChat && m.createSpaceMode {
+			return "Enter create  Esc cancel"
+		}
+		if m.feature == FeatureChat && m.editMessageName != "" {
+			return "Enter save  Esc cancel"
+		}
 		return "Enter send  Esc cancel"
 	default:
 		if m.spaceFilterActive && m.feature == FeatureChat {
@@ -988,13 +1171,27 @@ func (m Model) actionTitle() string {
 	base := ""
 	switch m.feature {
 	case FeatureChat:
+		if m.createSpaceMode {
+			base = "new chat space · Enter create"
+			break
+		}
+		if m.editMessageName != "" {
+			base = "edit message · Enter save"
+			break
+		}
 		base = "message · Enter send · Shift+Enter newline"
 	case FeatureMail:
-		base = "quick reply · c compose · R reply"
+		base = "quick reply · c compose · R reply · u read/unread"
 	case FeatureCalendar:
 		base = "quick add · Enter create"
 	case FeatureMeet:
 		base = "create space · Enter create"
+	case FeatureTasks:
+		base = "tasks · [/] switch list · m more"
+	case FeatureDrive:
+		base = "drive · / search · m more"
+	case FeatureDocs:
+		base = "docs · / search · m more"
 	default:
 		base = "action"
 	}
@@ -1007,13 +1204,25 @@ func (m Model) actionTitle() string {
 func (m Model) actionPlaceholder() string {
 	switch m.feature {
 	case FeatureChat:
+		if m.createSpaceMode {
+			return "Type a space name, optionally followed by | user emails, Enter to create."
+		}
+		if m.editMessageName != "" {
+			return "Edit the message text, Enter to save."
+		}
 		return "Press i, type a message, Enter to send."
 	case FeatureMail:
-		return "Press c to compose, R to reply, / to search."
+		return "Press c to compose, R to reply, u to toggle read state."
 	case FeatureCalendar:
 		return "Type quick-add text here with i, or press c for full event."
 	case FeatureMeet:
 		return "Press n then Enter to create a new Meet space."
+	case FeatureTasks:
+		return "Use [ and ] to switch task lists, m to load more tasks."
+	case FeatureDrive:
+		return "Use / to search Drive, m to load more files."
+	case FeatureDocs:
+		return "Use / to search Docs, m to load more documents."
 	default:
 		return ""
 	}
@@ -1224,6 +1433,56 @@ func relative(t time.Time) string {
 		return fmt.Sprintf("%dd", int(diff.Hours()/24))
 	}
 	return t.Format("02 Jan")
+}
+
+func formatOptionalTime(t time.Time, layout string) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format(layout)
+}
+
+func driveFileKind(mime string) string {
+	switch mime {
+	case "application/vnd.google-apps.folder":
+		return "folder"
+	case "application/vnd.google-apps.document":
+		return "doc"
+	case "application/vnd.google-apps.spreadsheet":
+		return "sheet"
+	case "application/vnd.google-apps.presentation":
+		return "slides"
+	case "application/pdf":
+		return "pdf"
+	default:
+		if strings.HasPrefix(mime, "image/") {
+			return "image"
+		}
+		if strings.HasPrefix(mime, "video/") {
+			return "video"
+		}
+		if strings.HasPrefix(mime, "text/") {
+			return "text"
+		}
+		return strings.TrimPrefix(mime, "application/")
+	}
+}
+
+func formatBytes(size int64) string {
+	if size <= 0 {
+		return "-"
+	}
+	units := []string{"B", "KB", "MB", "GB"}
+	value := float64(size)
+	unit := 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d %s", size, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", value, units[unit])
 }
 
 func fallback(value, fallback string) string {

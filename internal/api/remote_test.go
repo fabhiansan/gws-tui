@@ -67,6 +67,60 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 			},
 		},
 		{
+			name:   "EditChatMessage",
+			method: "EditChatMessage",
+			result: ChatMessage{ID: "msg-1", Space: "spaces/engineering", Text: "edited"},
+			call: func(c *RemoteClient) error {
+				got, err := c.EditChatMessage(ctx, "spaces/engineering/messages/msg-1", "edited")
+				if got.Text != "edited" {
+					return fmt.Errorf("edited=%#v", got)
+				}
+				return err
+			},
+		},
+		{name: "DeleteChatMessage", method: "DeleteChatMessage", call: func(c *RemoteClient) error {
+			return c.DeleteChatMessage(ctx, "spaces/engineering/messages/msg-1")
+		}},
+		{
+			name:   "CreateChatSpace",
+			method: "CreateChatSpace",
+			result: Space{Name: "spaces/created", DisplayName: "Created"},
+			call: func(c *RemoteClient) error {
+				got, err := c.CreateChatSpace(ctx, "Created")
+				if got.Name != "spaces/created" {
+					return fmt.Errorf("space=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "SetupChatSpace",
+			method: "SetupChatSpace",
+			result: Space{Name: "spaces/setup", DisplayName: "Setup"},
+			call: func(c *RemoteClient) error {
+				got, err := c.SetupChatSpace(ctx, "Setup", []string{"alice@example.com"})
+				if got.Name != "spaces/setup" {
+					return fmt.Errorf("space=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "AddChatReaction",
+			method: "AddChatReaction",
+			result: "spaces/engineering/messages/msg-1/reactions/reaction-1",
+			call: func(c *RemoteClient) error {
+				got, err := c.AddChatReaction(ctx, "spaces/engineering/messages/msg-1", "\U0001F44D")
+				if got == "" {
+					return fmt.Errorf("reaction=%q", got)
+				}
+				return err
+			},
+		},
+		{name: "DeleteChatReaction", method: "DeleteChatReaction", call: func(c *RemoteClient) error {
+			return c.DeleteChatReaction(ctx, "spaces/engineering/messages/msg-1/reactions/reaction-1")
+		}},
+		{
 			name:   "ChatMembers",
 			method: "ChatMembers",
 			result: []SpaceMember{{UserID: "alice"}},
@@ -129,6 +183,42 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name:   "MailDrafts",
+			method: "MailDrafts",
+			result: Page[MailDraftItem]{Items: []MailDraftItem{{ID: "draft-1", Subject: "Draft"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.MailDrafts(ctx, "")
+				if len(got.Items) != 1 || got.Items[0].ID != "draft-1" {
+					return fmt.Errorf("drafts=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "CreateMailDraft",
+			method: "CreateMailDraft",
+			result: MailDraftItem{ID: "draft-created", Subject: "Draft"},
+			call: func(c *RemoteClient) error {
+				got, err := c.CreateMailDraft(ctx, MailDraft{To: "alice@example.com", Subject: "Draft"})
+				if got.ID != "draft-created" {
+					return fmt.Errorf("draft=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "SendMailDraft",
+			method: "SendMailDraft",
+			result: MailThread{ID: "mail-draft-sent"},
+			call: func(c *RemoteClient) error {
+				got, err := c.SendMailDraft(ctx, "draft-1")
+				if got.ID != "mail-draft-sent" {
+					return fmt.Errorf("thread=%#v", got)
+				}
+				return err
+			},
+		},
 		{name: "ArchiveMail", method: "ArchiveMail", call: func(c *RemoteClient) error { return c.ArchiveMail(ctx, "mail-1") }},
 		{name: "TrashMail", method: "TrashMail", call: func(c *RemoteClient) error { return c.TrashMail(ctx, "mail-1") }},
 		{
@@ -139,6 +229,30 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 				got, err := c.ToggleStar(ctx, "mail-1")
 				if !got.Starred {
 					return fmt.Errorf("thread=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "SetMailUnread",
+			method: "SetMailUnread",
+			result: MailThread{ID: "mail-1", Unread: true},
+			call: func(c *RemoteClient) error {
+				got, err := c.SetMailUnread(ctx, "mail-1", true)
+				if !got.Unread {
+					return fmt.Errorf("thread=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "CalendarLists",
+			method: "CalendarLists",
+			result: Page[CalendarListItem]{Items: []CalendarListItem{{ID: "primary", Summary: "Primary"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.CalendarLists(ctx)
+				if len(got.Items) != 1 || got.Items[0].ID != "primary" {
+					return fmt.Errorf("calendars=%#v", got)
 				}
 				return err
 			},
@@ -174,6 +288,30 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 			call: func(c *RemoteClient) error {
 				got, err := c.CreateEvent(ctx, EventDraft{Summary: "New"})
 				if got.ID != "event-new" {
+					return fmt.Errorf("event=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "UpdateEvent",
+			method: "UpdateEvent",
+			result: CalendarEvent{ID: "event-1", Summary: "Updated"},
+			call: func(c *RemoteClient) error {
+				got, err := c.UpdateEvent(ctx, "event-1", EventDraft{Summary: "Updated"})
+				if got.Summary != "Updated" {
+					return fmt.Errorf("event=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "MoveEvent",
+			method: "MoveEvent",
+			result: CalendarEvent{ID: "event-1", CalendarID: "team@example.com"},
+			call: func(c *RemoteClient) error {
+				got, err := c.MoveEvent(ctx, "event-1", "primary", "team@example.com")
+				if got.CalendarID != "team@example.com" {
 					return fmt.Errorf("event=%#v", got)
 				}
 				return err
@@ -217,6 +355,66 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 			},
 		},
 		{name: "EndMeetSpace", method: "EndMeetSpace", call: func(c *RemoteClient) error { return c.EndMeetSpace(ctx, "spaces/meet") }},
+		{
+			name:   "TaskLists",
+			method: "TaskLists",
+			result: Page[TaskList]{Items: []TaskList{{ID: "tasks-default", Title: "My Tasks"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.TaskLists(ctx)
+				if len(got.Items) != 1 || got.Items[0].ID != "tasks-default" {
+					return fmt.Errorf("taskLists=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "Tasks",
+			method: "Tasks",
+			result: Page[TaskItem]{Items: []TaskItem{{ID: "task-1", TaskListID: "tasks-default", Title: "Review"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.Tasks(ctx, TaskQuery{TaskListID: "tasks-default"})
+				if len(got.Items) != 1 || got.Items[0].ID != "task-1" {
+					return fmt.Errorf("tasks=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "DriveFiles",
+			method: "DriveFiles",
+			result: Page[DriveFile]{Items: []DriveFile{{ID: "drive-1", Name: "Release checklist.pdf"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.DriveFiles(ctx, DriveQuery{})
+				if len(got.Items) != 1 || got.Items[0].ID != "drive-1" {
+					return fmt.Errorf("driveFiles=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "Docs",
+			method: "Docs",
+			result: Page[DriveFile]{Items: []DriveFile{{ID: "doc-1", Name: "Launch notes"}}},
+			call: func(c *RemoteClient) error {
+				got, err := c.Docs(ctx, DriveQuery{})
+				if len(got.Items) != 1 || got.Items[0].ID != "doc-1" {
+					return fmt.Errorf("docs=%#v", got)
+				}
+				return err
+			},
+		},
+		{
+			name:   "Doc",
+			method: "Doc",
+			result: DocDocument{ID: "doc-1", Title: "Launch notes", Body: "Body"},
+			call: func(c *RemoteClient) error {
+				got, err := c.Doc(ctx, "doc-1")
+				if got.ID != "doc-1" || got.Body == "" {
+					return fmt.Errorf("doc=%#v", got)
+				}
+				return err
+			},
+		},
 		{
 			name:   "Snapshot",
 			method: "Snapshot",

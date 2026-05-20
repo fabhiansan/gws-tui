@@ -246,14 +246,34 @@ type MailDraft struct {
 	ThreadID string `json:"threadId,omitempty"`
 }
 
+type MailDraftItem struct {
+	ID        string    `json:"id"`
+	MessageID string    `json:"messageId,omitempty"`
+	ThreadID  string    `json:"threadId,omitempty"`
+	To        string    `json:"to,omitempty"`
+	Subject   string    `json:"subject,omitempty"`
+	Snippet   string    `json:"snippet,omitempty"`
+	Date      time.Time `json:"date,omitempty"`
+}
+
 type CalendarQuery struct {
-	Search    string
-	WeekStart time.Time
-	PageToken string
+	CalendarID string
+	Search     string
+	WeekStart  time.Time
+	PageToken  string
+}
+
+type CalendarListItem struct {
+	ID          string `json:"id"`
+	Summary     string `json:"summary"`
+	Description string `json:"description,omitempty"`
+	Primary     bool   `json:"primary,omitempty"`
+	AccessRole  string `json:"accessRole,omitempty"`
 }
 
 type CalendarEvent struct {
 	ID          string    `json:"id"`
+	CalendarID  string    `json:"calendarId,omitempty"`
 	Summary     string    `json:"summary"`
 	Start       time.Time `json:"start"`
 	End         time.Time `json:"end"`
@@ -266,6 +286,7 @@ type CalendarEvent struct {
 }
 
 type EventDraft struct {
+	CalendarID  string
 	Summary     string
 	Start       time.Time
 	End         time.Time
@@ -279,12 +300,17 @@ type MeetSpace struct {
 	MeetingURI         string                `json:"meetingUri"`
 	MeetingCode        string                `json:"meetingCode,omitempty"`
 	Created            time.Time             `json:"created,omitempty"`
+	StartTime          time.Time             `json:"startTime,omitempty"`
+	EndTime            time.Time             `json:"endTime,omitempty"`
 	Type               string                `json:"type,omitempty"`
 	ActiveParticipants int                   `json:"activeParticipants,omitempty"`
 	Recording          bool                  `json:"recording"`
 	Active             bool                  `json:"active"`
 	Config             *MeetSpaceConfig      `json:"config,omitempty"`
 	ActiveConference   *MeetActiveConference `json:"activeConference,omitempty"`
+	Participants       []MeetParticipant     `json:"participants,omitempty"`
+	Recordings         []MeetArtifact        `json:"recordings,omitempty"`
+	Transcripts        []MeetArtifact        `json:"transcripts,omitempty"`
 }
 
 type MeetSpaceConfig struct {
@@ -294,6 +320,68 @@ type MeetSpaceConfig struct {
 
 type MeetActiveConference struct {
 	ConferenceRecord string `json:"conferenceRecord,omitempty"`
+}
+
+type MeetParticipant struct {
+	Name        string    `json:"name"`
+	DisplayName string    `json:"displayName,omitempty"`
+	User        string    `json:"user,omitempty"`
+	JoinTime    time.Time `json:"joinTime,omitempty"`
+	LeaveTime   time.Time `json:"leaveTime,omitempty"`
+}
+
+type MeetArtifact struct {
+	Name      string    `json:"name"`
+	State     string    `json:"state,omitempty"`
+	File      string    `json:"file,omitempty"`
+	StartTime time.Time `json:"startTime,omitempty"`
+	EndTime   time.Time `json:"endTime,omitempty"`
+}
+
+type TaskList struct {
+	ID      string    `json:"id"`
+	Title   string    `json:"title"`
+	Updated time.Time `json:"updated,omitempty"`
+}
+
+type TaskItem struct {
+	ID         string    `json:"id"`
+	TaskListID string    `json:"taskListId,omitempty"`
+	Title      string    `json:"title"`
+	Notes      string    `json:"notes,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	Due        time.Time `json:"due,omitempty"`
+	Completed  time.Time `json:"completed,omitempty"`
+	Updated    time.Time `json:"updated,omitempty"`
+	Parent     string    `json:"parent,omitempty"`
+	Position   string    `json:"position,omitempty"`
+}
+
+type TaskQuery struct {
+	TaskListID string
+	PageToken  string
+}
+
+type DriveFile struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	MimeType     string    `json:"mimeType,omitempty"`
+	ModifiedTime time.Time `json:"modifiedTime,omitempty"`
+	WebViewLink  string    `json:"webViewLink,omitempty"`
+	Size         int64     `json:"size,omitempty"`
+	Parents      []string  `json:"parents,omitempty"`
+}
+
+type DriveQuery struct {
+	Search    string
+	PageToken string
+	MimeType  string
+}
+
+type DocDocument struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
 func (s MeetSpace) AccessType() string {
@@ -329,6 +417,12 @@ type WorkspaceClient interface {
 	ChatSpaces(context.Context) (Page[Space], error)
 	ChatMessages(ctx context.Context, spaceName, pageToken string) (Page[ChatMessage], error)
 	SendChatMessage(ctx context.Context, spaceName, text, threadID string, attachments []LocalAttachment) (ChatMessage, error)
+	EditChatMessage(ctx context.Context, messageName, text string) (ChatMessage, error)
+	DeleteChatMessage(ctx context.Context, messageName string) error
+	CreateChatSpace(ctx context.Context, displayName string) (Space, error)
+	SetupChatSpace(ctx context.Context, displayName string, members []string) (Space, error)
+	AddChatReaction(ctx context.Context, messageName, emoji string) (string, error)
+	DeleteChatReaction(ctx context.Context, reactionName string) error
 	SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error)
 	ChatMembers(ctx context.Context, spaceName string) ([]SpaceMember, error)
 	PeopleGet(ctx context.Context, userID string) (Person, error)
@@ -337,19 +431,33 @@ type WorkspaceClient interface {
 	MailLabels(context.Context) ([]MailLabel, error)
 	MailThreads(context.Context, MailQuery) (Page[MailThread], error)
 	SendMail(context.Context, MailDraft) (MailThread, error)
+	MailDrafts(context.Context, string) (Page[MailDraftItem], error)
+	CreateMailDraft(context.Context, MailDraft) (MailDraftItem, error)
+	SendMailDraft(context.Context, string) (MailThread, error)
 	ArchiveMail(context.Context, string) error
 	TrashMail(context.Context, string) error
 	ToggleStar(context.Context, string) (MailThread, error)
+	SetMailUnread(context.Context, string, bool) (MailThread, error)
 
+	CalendarLists(context.Context) (Page[CalendarListItem], error)
 	CalendarEvents(context.Context, CalendarQuery) (Page[CalendarEvent], error)
 	QuickAddEvent(ctx context.Context, text string) (CalendarEvent, error)
 	CreateEvent(context.Context, EventDraft) (CalendarEvent, error)
+	UpdateEvent(context.Context, string, EventDraft) (CalendarEvent, error)
+	MoveEvent(context.Context, string, string, string) (CalendarEvent, error)
 	RSVPEvent(ctx context.Context, eventID, response string) (CalendarEvent, error)
 	DeleteEvent(context.Context, string) error
 
 	MeetSpaces(context.Context) (Page[MeetSpace], error)
 	CreateMeetSpace(context.Context, string) (MeetSpace, error)
 	EndMeetSpace(context.Context, string) error
+
+	TaskLists(context.Context) (Page[TaskList], error)
+	Tasks(context.Context, TaskQuery) (Page[TaskItem], error)
+
+	DriveFiles(context.Context, DriveQuery) (Page[DriveFile], error)
+	Docs(context.Context, DriveQuery) (Page[DriveFile], error)
+	Doc(context.Context, string) (DocDocument, error)
 	Close() error
 }
 
