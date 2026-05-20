@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/png"
@@ -327,6 +328,27 @@ func TestRenderAttachmentsTrackedMapsFallback(t *testing.T) {
 	}
 }
 
+func TestRenderAttachmentsTrackedMapsNonImage(t *testing.T) {
+	model := Model{
+		cfg:    Config{InlineImages: true},
+		detail: viewport.New(80, 20),
+	}
+	lines, ranges := model.renderAttachmentsTracked([]api.Attachment{{
+		Name:         "Annex I - Term of Reference.pdf",
+		ResourceName: "spaces/AAA/attachments/pdf-1",
+		ContentType:  "application/pdf",
+	}})
+	if len(lines) != 1 {
+		t.Fatalf("expected one attachment line, got %d: %#v", len(lines), lines)
+	}
+	if len(ranges) != 1 || ranges[0].rows != 1 {
+		t.Fatalf("expected non-image range of 1 row, got %#v", ranges)
+	}
+	if ranges[0].attachment.ResourceName != "spaces/AAA/attachments/pdf-1" {
+		t.Fatalf("range attachment did not round-trip: %#v", ranges[0].attachment)
+	}
+}
+
 func TestAppendAttachmentLinesMapsSecondImagePastMultilinePreview(t *testing.T) {
 	t.Setenv("TERM", "xterm-kitty")
 	dir := t.TempDir()
@@ -429,6 +451,53 @@ func TestEnterAwayFromImageFallsBack(t *testing.T) {
 	}
 }
 
+func TestEnterOnNonImageAttachmentDownloads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	att := api.Attachment{
+		Name:         "Annex I - Term of Reference.pdf",
+		ResourceName: "spaces/AAA/attachments/pdf-1",
+		ContentType:  "application/pdf",
+	}
+	client := &recordingAttachmentDownloadClient{}
+	model := Model{
+		ctx:                context.Background(),
+		client:             client,
+		detail:             viewport.New(80, 20),
+		focusedPane:        paneDetail,
+		detailAttachmentAt: map[int]api.Attachment{5: att},
+		detailCursor:       5,
+		detailLines:        make([]string, 10),
+	}
+	model.detailLineCount = len(model.detailLines)
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected attachment download command")
+	}
+	if !strings.Contains(updated.toast, "downloading Annex I - Term of Reference.pdf") {
+		t.Fatalf("expected downloading toast, got %q", updated.toast)
+	}
+
+	msg := cmd()
+	next, _ := updated.Update(msg)
+	final := next.(Model)
+
+	wantPath := filepath.Join(home, "Downloads", "Annex I - Term of Reference.pdf")
+	if client.calls != 1 {
+		t.Fatalf("expected one download call, got %d", client.calls)
+	}
+	if client.attachment.ResourceName != att.ResourceName {
+		t.Fatalf("downloaded wrong attachment: %#v", client.attachment)
+	}
+	if client.outputPath != wantPath {
+		t.Fatalf("download path mismatch: got %q want %q", client.outputPath, wantPath)
+	}
+	if final.toast != "downloaded to ~/Downloads/Annex I - Term of Reference.pdf" {
+		t.Fatalf("expected downloaded toast, got %q", final.toast)
+	}
+}
+
 func TestImageDownloadSkipsFailedSourceUntilRefresh(t *testing.T) {
 	source := "spaces/AAA/messages/BBB/attachments/CCC"
 	model := Model{
@@ -449,4 +518,19 @@ func TestImageDownloadSkipsFailedSourceUntilRefresh(t *testing.T) {
 	if len(cmds) != 0 {
 		t.Fatalf("expected failed image source to be skipped, got %d commands", len(cmds))
 	}
+}
+
+type recordingAttachmentDownloadClient struct {
+	api.WorkspaceClient
+
+	calls      int
+	attachment api.Attachment
+	outputPath string
+}
+
+func (c *recordingAttachmentDownloadClient) DownloadAttachment(_ context.Context, attachment api.Attachment, outputPath string) error {
+	c.calls++
+	c.attachment = attachment
+	c.outputPath = outputPath
+	return os.WriteFile(outputPath, []byte("pdf"), 0o644)
 }

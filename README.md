@@ -25,6 +25,22 @@ Unix-style process and socket behavior.
 
 ## Install
 
+### Quick install
+
+After cloning the repository, run the installer. It installs the upstream
+Google Workspace CLI, builds and installs the TUI, and walks you through a
+bring-your-own Google Cloud project for authentication:
+
+```sh
+bash scripts/install.sh
+```
+
+Pass `--no-auth` to skip the Google Cloud setup step. To undo everything, run
+`bash scripts/uninstall.sh` (add `--purge` to also delete cached config,
+state, and image data).
+
+### Manual install
+
 Prerequisite: install and authenticate the upstream Google Workspace CLI as
 `gws` first, then verify it works:
 

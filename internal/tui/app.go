@@ -88,6 +88,7 @@ type Model struct {
 	chatLoading   bool
 	chatLoadID    int
 	chatLoadSpace string
+	chatLoadIDs   map[string]int
 	seenMessages  map[string]bool
 	realtimeRetry time.Duration
 
@@ -131,21 +132,22 @@ type Model struct {
 	vimRegister     string
 	vimRegisterLine bool
 
-	detailCursor     int
-	detailCol        int
-	detailAnchor     int
-	detailAnchorCol  int
-	detailVisual     bool
-	detailVisualLine bool
-	detailPending    string
-	detailLines      []string
-	detailLineCount  int
-	detailKey        string
-	detailRenderKey  string
-	detailImageAt    map[int]api.Attachment
-	detailMessageAt  map[int]string
-	replyThreadID    string
-	replyTargetName  string
+	detailCursor       int
+	detailCol          int
+	detailAnchor       int
+	detailAnchorCol    int
+	detailVisual       bool
+	detailVisualLine   bool
+	detailPending      string
+	detailLines        []string
+	detailLineCount    int
+	detailKey          string
+	detailRenderKey    string
+	detailImageAt      map[int]api.Attachment
+	detailAttachmentAt map[int]api.Attachment
+	detailMessageAt    map[int]string
+	replyThreadID      string
+	replyTargetName    string
 
 	// pendingChatAttachments holds files staged for the next chat send.
 	// Populated by Ctrl+V pasting an image; drained (and the temp files
@@ -247,6 +249,12 @@ type imageCachedMsg struct {
 	err    error
 }
 
+type attachmentDownloadedMsg struct {
+	name string
+	path string
+	err  error
+}
+
 type daemonEventMsg struct {
 	events <-chan api.DaemonEvent
 	event  api.DaemonEvent
@@ -320,6 +328,7 @@ func New(opts Options) Model {
 		detail:         detail,
 		focusedPane:    paneList,
 		loading:        !cacheLoaded,
+		chatLoadIDs:    map[string]int{},
 		seenMessages:   map[string]bool{},
 		userLabels:     map[string]string{},
 		pendingUsers:   map[string]bool{},
@@ -333,16 +342,17 @@ func New(opts Options) Model {
 			FeatureCalendar: persisted.Selections[string(FeatureCalendar)],
 			FeatureMeet:     persisted.Selections[string(FeatureMeet)],
 		},
-		persisted:       persisted,
-		cache:           cache,
-		cacheLoaded:     cacheLoaded,
-		imageFiles:      map[string]string{},
-		imageLoading:    map[string]bool{},
-		imageErrors:     map[string]string{},
-		imageRenders:    map[string]inlineImageRender{},
-		imageFramePend:  map[string]bool{},
-		detailImageAt:   map[int]api.Attachment{},
-		detailMessageAt: map[int]string{},
+		persisted:          persisted,
+		cache:              cache,
+		cacheLoaded:        cacheLoaded,
+		imageFiles:         map[string]string{},
+		imageLoading:       map[string]bool{},
+		imageErrors:        map[string]string{},
+		imageRenders:       map[string]inlineImageRender{},
+		imageFramePend:     map[string]bool{},
+		detailImageAt:      map[int]api.Attachment{},
+		detailAttachmentAt: map[int]api.Attachment{},
+		detailMessageAt:    map[int]string{},
 	}
 	if cacheLoaded {
 		model.hydrateWorkspaceCache(cache)
@@ -424,38 +434,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
 		cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	case chatLoadedMsg:
-		if msg.loadID != m.chatLoadID || msg.spaceName != m.selectedSpace().Name {
+		if !m.finishChatLoad(msg.spaceName, msg.loadID) {
 			break
 		}
-		m.loading = false
-		m.chatLoading = false
-		m.chatLoadSpace = ""
+		selected := msg.spaceName == m.selectedSpace().Name
+		if m.chatLoadSpace == msg.spaceName {
+			m.loading = false
+			m.chatLoading = false
+			m.chatLoadSpace = ""
+		}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			if selected || msg.refresh {
+				m.err = msg.err.Error()
+			}
 			break
 		}
-		m.chatMessages = dedupeChatMessages(msg.messages.Items)
-		m.chatOlder = msg.messages.NextPageToken
-		m.markSeenChatMessages(m.chatMessages)
+		messages := dedupeChatMessages(msg.messages.Items)
+		m.markSeenChatMessages(messages)
 		if msg.refresh {
 			m.toast = "chat refreshed"
 		}
 		m.rememberChatPage(msg.spaceName, api.Page[api.ChatMessage]{
-			Items:         m.chatMessages,
+			Items:         messages,
 			NextPageToken: msg.messages.NextPageToken,
 		})
-		// Opening a space implicitly marks it read.
-		for i := range m.spaces {
-			if m.spaces[i].Name == msg.spaceName {
-				m.spaces[i].Unread = false
-				break
-			}
+		if selected {
+			m.chatMessages = messages
+			m.chatOlder = msg.messages.NextPageToken
 		}
-		cmds = append(cmds, m.markChatReadCmd(msg.spaceName))
+		if selected || msg.refresh {
+			// Opening or explicitly refreshing a space means the user has seen it,
+			// even if they navigated away before the background request finished.
+			m.setSpaceUnread(msg.spaceName, false)
+			cmds = append(cmds, m.markChatReadCmd(msg.spaceName))
+		}
 		m.persistWorkspaceCache()
-		cmds = append(cmds, m.enrichSendersCmds()...)
-		cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
-		cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
+		if selected {
+			cmds = append(cmds, m.enrichSendersCmds()...)
+			cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
+			cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
+		} else {
+			cmds = append(cmds, m.imageDownloadCmdsForChat(messages)...)
+		}
 	case featureLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -608,6 +628,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.imagePlacement++
 			m.imageVersion++
+		}
+	case attachmentDownloadedMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			break
+		}
+		if msg.path != "" {
+			m.toast = "downloaded to " + compactHomePath(msg.path)
 		}
 	case daemonEventMsg:
 		if msg.events != nil {
@@ -904,9 +932,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.loadSelectedChat()
 	case "enter", "o":
 		if m.focusedPane == paneDetail {
-			if att, ok := m.detailImageAt[m.detailCursor]; ok {
-				m.openImageViewer(att)
-				return m, nil
+			if att, ok := m.detailAttachmentAtCursor(); ok {
+				if att.IsImage() {
+					m.openImageViewer(att)
+					return m, nil
+				}
+				return m.downloadAttachment(att)
 			}
 		}
 		m.toast = m.openHint()
@@ -1409,6 +1440,30 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) startChatLoad(spaceName string) int {
+	m.chatLoadID++
+	if m.chatLoadIDs == nil {
+		m.chatLoadIDs = map[string]int{}
+	}
+	m.chatLoadIDs[spaceName] = m.chatLoadID
+	return m.chatLoadID
+}
+
+func (m *Model) finishChatLoad(spaceName string, loadID int) bool {
+	if m.chatLoadIDs == nil {
+		return loadID == m.chatLoadID
+	}
+	latest, ok := m.chatLoadIDs[spaceName]
+	if !ok {
+		return loadID == m.chatLoadID
+	}
+	if latest != loadID {
+		return false
+	}
+	delete(m.chatLoadIDs, spaceName)
+	return true
+}
+
 func (m Model) refreshSelectedChat() (Model, tea.Cmd) {
 	space := m.selectedSpace()
 	if space.Name == "" {
@@ -1420,9 +1475,8 @@ func (m Model) refreshSelectedChat() (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.chatLoadID++
-	loadID := m.chatLoadID
 	spaceName := space.Name
+	loadID := m.startChatLoad(spaceName)
 	m.loading = true
 	m.chatLoading = true
 	m.chatLoadSpace = spaceName
@@ -1745,12 +1799,15 @@ func (m Model) loadSelectedChat() (Model, tea.Cmd) {
 		m.loading = false
 		m.chatLoading = false
 		m.chatLoadSpace = ""
-		return m, tea.Batch(m.precomputeFrameCmdsForChat(m.chatMessages)...)
+		m.setSpaceUnread(space.Name, false)
+		m.persistWorkspaceCache()
+		cmds := []tea.Cmd{m.markChatReadCmd(space.Name)}
+		cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
+		return m, tea.Batch(cmds...)
 	}
 
-	m.chatLoadID++
-	loadID := m.chatLoadID
 	spaceName := space.Name
+	loadID := m.startChatLoad(spaceName)
 	m.loading = true
 	m.chatLoading = true
 	m.chatLoadSpace = spaceName
@@ -2328,6 +2385,13 @@ func (m *Model) updateDetailContent() {
 	} else {
 		for k := range m.detailImageAt {
 			delete(m.detailImageAt, k)
+		}
+	}
+	if m.detailAttachmentAt == nil {
+		m.detailAttachmentAt = map[int]api.Attachment{}
+	} else {
+		for k := range m.detailAttachmentAt {
+			delete(m.detailAttachmentAt, k)
 		}
 	}
 	if m.detailMessageAt == nil {

@@ -388,6 +388,55 @@ func TestRefreshKeyOnlyReloadsSelectedChatSpace(t *testing.T) {
 	}
 }
 
+func TestChatRefreshUpdatesOriginalSpaceAfterSelectionMoves(t *testing.T) {
+	client := &countingChatReaderClient{
+		countingWorkspaceClient: &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()},
+	}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design", Unread: true},
+	}
+	model.selected[FeatureChat] = 1
+	model.chatMessages = []api.ChatMessage{{ID: "stale-design", Space: "spaces/design", Text: "stale"}}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected selected chat refresh command")
+	}
+	model.selected[FeatureChat] = 0
+	model.chatMessages = []api.ChatMessage{{ID: "eng-visible", Space: "spaces/engineering", Text: "visible engineering"}}
+
+	msg := cmd()
+	updatedModel, sideEffects := model.Update(msg)
+	model = updatedModel.(Model)
+
+	cached := model.cache.ChatMessagesBySpace["spaces/design"]
+	if len(cached.Items) != 2 || cached.Items[0].Space != "spaces/design" {
+		t.Fatalf("background refresh should update original space cache, got %#v", cached.Items)
+	}
+	if len(model.chatMessages) != 1 || model.chatMessages[0].ID != "eng-visible" {
+		t.Fatalf("background refresh should not overwrite current visible space, got %#v", model.chatMessages)
+	}
+	if model.spaces[1].Unread {
+		t.Fatalf("background refresh should clear original space unread badge: %#v", model.spaces)
+	}
+
+	runBatchSideEffects(t, sideEffects)
+	if client.readCalls != 1 || client.lastReadSpace != "spaces/design" {
+		t.Fatalf("expected daemon read marker for refreshed space, calls=%d space=%q", client.readCalls, client.lastReadSpace)
+	}
+}
+
 func TestDaemonNotifyEventMarksOtherSpaceUnread(t *testing.T) {
 	model := New(Options{
 		Client: newTestWorkspaceClient(),
@@ -479,6 +528,44 @@ func TestDaemonChatMessageEventHydratesOtherSpaceCache(t *testing.T) {
 	}
 	if len(model.chatMessages) != 2 || model.chatMessages[1].Text != "new from daemon" {
 		t.Fatalf("cached daemon message should render after opening space, got %#v", model.chatMessages)
+	}
+}
+
+func TestCachedChatSelectionMarksSpaceRead(t *testing.T) {
+	client := &countingChatReaderClient{
+		countingWorkspaceClient: &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()},
+	}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design", Unread: true},
+	}
+	model.selected[FeatureChat] = 0
+	model.chatMessages = []api.ChatMessage{{ID: "eng-1", Space: "spaces/engineering", Text: "current"}}
+	model.rememberChatPage("spaces/design", api.Page[api.ChatMessage]{
+		Items: []api.ChatMessage{{ID: "design-cached", Space: "spaces/design", Text: "cached unread"}},
+	})
+
+	updated, cmd := model.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'j'}}))
+	model = updated.(Model)
+
+	if model.spaces[1].Unread {
+		t.Fatalf("cached space open should clear unread badge: %#v", model.spaces)
+	}
+	if len(model.chatMessages) != 1 || model.chatMessages[0].ID != "design-cached" {
+		t.Fatalf("cached space open should render cached messages, got %#v", model.chatMessages)
+	}
+	runBatchSideEffects(t, cmd)
+	if client.readCalls != 1 || client.lastReadSpace != "spaces/design" {
+		t.Fatalf("expected daemon read marker for cached-open space, calls=%d space=%q", client.readCalls, client.lastReadSpace)
 	}
 }
 
@@ -854,6 +941,29 @@ func runTestCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
 	}
 }
 
+func runBatchSideEffects(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	runBatchSideEffectsDepth(t, cmd, 0)
+}
+
+func runBatchSideEffectsDepth(t *testing.T, cmd tea.Cmd, depth int) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	if depth > 4 {
+		t.Fatal("command batch nesting too deep")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, inner := range batch {
+		runBatchSideEffectsDepth(t, inner, depth+1)
+	}
+}
+
 type countingWorkspaceClient struct {
 	api.WorkspaceClient
 
@@ -904,4 +1014,17 @@ func (c *countingWorkspaceClient) CalendarEvents(ctx context.Context, query api.
 func (c *countingWorkspaceClient) MeetSpaces(ctx context.Context) (api.Page[api.MeetSpace], error) {
 	c.meetSpacesCalls++
 	return c.WorkspaceClient.MeetSpaces(ctx)
+}
+
+type countingChatReaderClient struct {
+	*countingWorkspaceClient
+
+	readCalls     int
+	lastReadSpace string
+}
+
+func (c *countingChatReaderClient) MarkChatRead(_ context.Context, spaceName string) error {
+	c.readCalls++
+	c.lastReadSpace = spaceName
+	return nil
 }

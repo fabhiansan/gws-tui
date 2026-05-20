@@ -828,11 +828,11 @@ func (m *Model) chatDetail() string {
 	return displayText(strings.Join(lines, "\n"))
 }
 
-// appendAttachmentLines renders msg.Attachments and records each image's
-// line range in m.detailImageAt so the vim cursor can resolve "which image
-// is under me" when Enter is pressed in the detail pane. The indent argument
-// shifts the rendered lines right so attachments under a reply bubble stay
-// visually attached to it.
+// appendAttachmentLines renders msg.Attachments and records each attachment's
+// line range so the vim cursor can resolve "which attachment is under me"
+// when Enter is pressed in the detail pane. The indent argument shifts the
+// rendered lines right so attachments under a reply bubble stay visually
+// attached to it.
 func (m *Model) appendAttachmentLines(lines []string, attachments []api.Attachment, indent int) []string {
 	attLines, ranges := m.renderAttachmentsTracked(attachments)
 	if indent > 0 {
@@ -844,10 +844,23 @@ func (m *Model) appendAttachmentLines(lines []string, attachments []api.Attachme
 	base := countDisplayLines(lines)
 	for _, r := range ranges {
 		for i := 0; i < r.rows; i++ {
-			m.detailImageAt[base+r.start+i] = r.attachment
+			m.mapDetailAttachmentLine(base+r.start+i, r.attachment)
 		}
 	}
 	return append(lines, attLines...)
+}
+
+func (m *Model) mapDetailAttachmentLine(line int, attachment api.Attachment) {
+	if m.detailAttachmentAt == nil {
+		m.detailAttachmentAt = map[int]api.Attachment{}
+	}
+	m.detailAttachmentAt[line] = attachment
+	if attachment.IsImage() {
+		if m.detailImageAt == nil {
+			m.detailImageAt = map[int]api.Attachment{}
+		}
+		m.detailImageAt[line] = attachment
+	}
 }
 
 func (m Model) isSelfMessage(msg api.ChatMessage, displayName string) bool {
@@ -887,7 +900,7 @@ func (m *Model) mailDetail() string {
 		base := countDisplayLines(lines)
 		for _, r := range ranges {
 			for i := 0; i < r.rows; i++ {
-				m.detailImageAt[base+r.start+i] = r.attachment
+				m.mapDetailAttachmentLine(base+r.start+i, r.attachment)
 			}
 		}
 		lines = append(lines, attLines...)

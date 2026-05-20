@@ -171,7 +171,7 @@ func downloadImageCmd(ctx context.Context, client api.WorkspaceClient, attachmen
 }
 
 // attachmentLineRange records which lines of the attachment block belong to
-// which image attachment, so the chat-history Enter handler can look up the
+// which attachment, so the chat-history Enter handler can look up the
 // attachment under the vim cursor without re-walking message attachments.
 // `start` is relative to the first attachment line returned alongside.
 type attachmentLineRange struct {
@@ -227,7 +227,13 @@ func (m *Model) renderAttachmentsTracked(attachments []api.Attachment) ([]string
 		if source != "" {
 			fallback += "  " + source
 		}
+		start := countDisplayLines(lines)
 		lines = append(lines, m.subtle("  "+truncate(fallback, width)))
+		ranges = append(ranges, attachmentLineRange{
+			start:      start,
+			rows:       1,
+			attachment: attachment,
+		})
 	}
 	return lines, ranges
 }
