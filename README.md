@@ -186,6 +186,7 @@ daemon_socket = "$XDG_RUNTIME_DIR/gws/daemon.sock"
 daemon_autospawn = true
 daemon_log = "~/.cache/gws/daemon.log"
 daemon_pid_file = "$XDG_RUNTIME_DIR/gws/daemon.pid"
+chat_events = true
 state_path = "~/.config/gws/tui-state.json"
 cache_path = "~/.cache/gws/tui-cache.json"
 image_cache_dir = "~/.cache/gws/images"
@@ -222,10 +223,25 @@ gws daemon stop
 ```
 
 When `daemon = true` or `--daemon` is set, the TUI attaches to a per-user Unix
-socket and becomes a thin client. Workspace calls, cache writes, chat polling,
+socket and becomes a thin client. Workspace calls, cache writes, chat delivery,
 desktop notifications, attachment downloads, and draft autosave are owned by
 the daemon. UI state such as selection, scroll, focus, search, and vim mode
 stays local to each TUI session.
+
+### Real-time chat
+
+With `chat_events = true` (the default) the daemon checks once, on startup,
+whether it can receive chat messages in real time through the Google Workspace
+Events API. When your Google Cloud project has the **Pub/Sub** and **Workspace
+Events** APIs enabled, a single `gws events +subscribe` stream covers every
+space at once and the daemon renews the subscription automatically. Otherwise
+it falls back to polling each space every 5 seconds. Either way chat works —
+`gws daemon logs | grep 'chat'` shows which mode is active.
+
+Set `chat_events = false` to force polling. The project is auto-detected from
+`gws auth status`; override it with `chat_events_project` /
+`chat_events_subscription` (or the `GWS_EVENTS_PROJECT` /
+`GWS_EVENTS_SUBSCRIPTION` environment variables).
 
 If `$XDG_RUNTIME_DIR` is unavailable, the socket and PID file fall back under
 `~/.cache/gws`. `daemon_autospawn = true` makes `gws tui --daemon` start the

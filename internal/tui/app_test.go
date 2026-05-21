@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
@@ -24,7 +25,10 @@ func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
 		},
 		Version: "test",
 	})
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	// 140 cols leaves room for the full-label tab strip. Below ~126 cols the
+	// status bar collapses to compact icon+number tabs to avoid wrapping
+	// onto a second row, which would drop the word labels asserted below.
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 32})
 	model = updated.(Model)
 	msg := model.loadAllCmd()().(loadedMsg)
 	updated, _ = model.Update(msg)
@@ -34,6 +38,93 @@ func TestModelInitialRenderContainsFeatureTabs(t *testing.T) {
 	for _, want := range []string{"Chat", "Mail", "Calendar", "Meet", "Tasks", "Drive", "Docs", "#engineering"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("render missing %q:\n%s", want, view)
+		}
+	}
+}
+
+// TestNarrowRenderStaysWithinBounds guards the layout overflow that made the
+// UI look "cut off": the status bar used to render wider than the terminal
+// (lipgloss .Width() wraps overflow onto a second row, pushing the layout
+// past m.height), and detail-pane lines were clipped at the viewport edge.
+// Every rendered line must now fit inside the requested width and height.
+func TestNarrowRenderStaysWithinBounds(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	msg := model.loadAllCmd()().(loadedMsg)
+	updated, _ := model.Update(msg)
+	model = updated.(Model)
+
+	for _, size := range []struct{ w, h int }{
+		{60, 20}, {80, 24}, {100, 32}, {140, 40},
+	} {
+		updated, _ := model.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+		m := updated.(Model)
+		view := m.View()
+		lines := strings.Split(view, "\n")
+		if len(lines) > size.h {
+			t.Fatalf("%dx%d: rendered %d lines, exceeds height %d", size.w, size.h, len(lines), size.h)
+		}
+		for i, line := range lines {
+			if w := lipgloss.Width(line); w > size.w {
+				t.Fatalf("%dx%d: line %d width %d exceeds %d:\n%q", size.w, size.h, i, w, size.w, line)
+			}
+		}
+	}
+}
+
+func TestLoadAllCommandEmitsProgressStages(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	progress := make(chan loadProgressMsg, len(workspaceInitialLoadStages)+2)
+	msg := model.loadAllWithProgressCmd(progress)().(loadedMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	var labels []string
+	for update := range progress {
+		labels = append(labels, update.Label)
+	}
+	if len(labels) != len(workspaceInitialLoadStages) {
+		t.Fatalf("expected %d progress updates, got %d: %#v", len(workspaceInitialLoadStages), len(labels), labels)
+	}
+	if labels[0] != "Auth" || labels[len(labels)-1] != "Document preview" {
+		t.Fatalf("unexpected progress boundaries: %#v", labels)
+	}
+}
+
+func TestInitialLoadingViewShowsFetchProgress(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	model = updated.(Model)
+	updated, _ = model.Update(loadProgressMsg{Step: 5, Total: len(workspaceInitialLoadStages), Label: "Inbox"})
+	model = updated.(Model)
+
+	view := model.View()
+	for _, want := range []string{"Loading workspace", "Inbox", "5/13"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("loading view missing %q:\n%s", want, view)
 		}
 	}
 }
@@ -109,7 +200,13 @@ func TestModelHydratesWorkspaceCacheWithoutInitialLoad(t *testing.T) {
 		},
 		ChatMessagesBySpace: map[string]api.Page[api.ChatMessage]{
 			"spaces/design": {
-				Items: []api.ChatMessage{{ID: "cached-design", Space: "spaces/design", Text: "cached"}},
+				Items: []api.ChatMessage{{
+					ID:         "cached-design",
+					Space:      "spaces/design",
+					SenderID:   "users/alice",
+					SenderName: "users/alice",
+					Text:       "cached",
+				}},
 			},
 		},
 		MailLabels: []api.MailLabel{{Name: "Inbox"}},
@@ -152,8 +249,148 @@ func TestModelHydratesWorkspaceCacheWithoutInitialLoad(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected startup batch without loadAll, got %T", msg)
 	}
-	if len(batch) != 2 {
-		t.Fatalf("cached startup should only start spinner and autosave, got %d commands", len(batch))
+	if len(batch) < 3 {
+		t.Fatalf("cached startup should include identity enrichment without full load, got %d commands", len(batch))
+	}
+	if !model.pendingUsers["alice"] {
+		t.Fatalf("cached startup should resolve raw sender labels, pending=%#v", model.pendingUsers)
+	}
+}
+
+func TestSelfResolutionReenablesCachedSenderEnrichment(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.peopleAPIDown = true
+	model.chatMessages = []api.ChatMessage{{
+		ID:         "cached-design",
+		Space:      "spaces/design",
+		SenderID:   "users/alice",
+		SenderName: "users/alice",
+		Text:       "cached",
+	}}
+
+	updated, cmd := model.Update(selfResolvedMsg{userID: "me", label: "Me"})
+	model = updated.(Model)
+
+	if model.peopleAPIDown {
+		t.Fatal("successful self resolution should clear stale people API down state")
+	}
+	if !model.pendingUsers["alice"] {
+		t.Fatalf("self resolution should retry cached sender enrichment, pending=%#v", model.pendingUsers)
+	}
+	if cmd == nil {
+		t.Fatal("expected cached sender enrichment command")
+	}
+}
+
+func TestSpaceLabelUsesOtherMemberForDM(t *testing.T) {
+	model := Model{
+		userLabels: map[string]string{
+			"me": "Fabhianto Maoludyo",
+		},
+		selfUserIDs: map[string]bool{"me": true},
+		membersBySpace: map[string][]api.SpaceMember{
+			"spaces/alice": {
+				{UserID: "users/me", Type: "HUMAN"},
+				{UserID: "users/alice", DisplayName: "Alice From Membership", Type: "HUMAN"},
+			},
+		},
+	}
+	got := model.spaceLabel(api.Space{
+		Name:        "spaces/alice",
+		DisplayName: "Fabhianto Maoludyo, Alice",
+		SpaceType:   "DM",
+	})
+	if got != "Alice From Membership" {
+		t.Fatalf("expected self to be hidden from DM label, got %q", got)
+	}
+}
+
+func TestSpaceLabelStripsSelfFromFallbackTitle(t *testing.T) {
+	model := Model{
+		userLabels:  map[string]string{"me": "Fabhianto Maoludyo"},
+		selfUserIDs: map[string]bool{"me": true},
+	}
+	got := model.spaceLabel(api.Space{
+		Name:        "spaces/alice",
+		DisplayName: "Fabhianto Maoludyo, Alice",
+		SpaceType:   "DM",
+	})
+	if got != "Alice" {
+		t.Fatalf("expected fallback label to strip self, got %q", got)
+	}
+}
+
+func TestSpaceLabelInfersSelfFromRepeatedDMMembers(t *testing.T) {
+	model := Model{
+		spaces: []api.Space{
+			{Name: "spaces/alice", SpaceType: "DIRECT_MESSAGE"},
+			{Name: "spaces/bob", SpaceType: "DIRECT_MESSAGE"},
+		},
+		userLabels: map[string]string{
+			"115178986287865547502": "Fabhianto Maoludyo",
+			"alice":                 "Alice",
+			"bob":                   "Bob",
+		},
+		selfUserIDs: map[string]bool{},
+		membersBySpace: map[string][]api.SpaceMember{
+			"spaces/alice": {
+				{UserID: "115178986287865547502", Type: "HUMAN"},
+				{UserID: "alice", Type: "HUMAN"},
+			},
+			"spaces/bob": {
+				{UserID: "115178986287865547502", Type: "HUMAN"},
+				{UserID: "bob", Type: "HUMAN"},
+			},
+		},
+	}
+	model.normalizeUserCaches()
+
+	got := model.spaceLabel(model.spaces[0])
+	if got != "Alice" {
+		t.Fatalf("expected repeated self member to be hidden, got %q", got)
+	}
+}
+
+func TestLoadMembersCommandIncludesDMType(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	cmd := model.loadMembersCmd(api.Space{Name: "spaces/alice", SpaceType: "DM"})
+	if cmd == nil {
+		t.Fatal("expected DM spaces to auto-load members")
+	}
+}
+
+func TestEnrichSpacesResolvesCachedMembers(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.spaces = []api.Space{{Name: "spaces/alice", SpaceType: "DM"}}
+	model.membersBySpace["spaces/alice"] = []api.SpaceMember{{UserID: "users/alice", Type: "HUMAN"}}
+
+	cmds := model.enrichSpacesCmds()
+	if len(cmds) == 0 {
+		t.Fatal("expected cached members to trigger user label resolution")
+	}
+	if !model.pendingUsers["alice"] {
+		t.Fatalf("expected alice to be pending resolution, got %#v", model.pendingUsers)
 	}
 }
 
@@ -528,6 +765,46 @@ func TestDaemonChatMessageEventHydratesOtherSpaceCache(t *testing.T) {
 	}
 	if len(model.chatMessages) != 2 || model.chatMessages[1].Text != "new from daemon" {
 		t.Fatalf("cached daemon message should render after opening space, got %#v", model.chatMessages)
+	}
+}
+
+func TestIncomingSelfChatMessageDoesNotToastOrMarkUnread(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design"},
+	}
+	model.selected[FeatureChat] = 0
+	model.markSelfUser("users/me")
+
+	selfMessage := api.ChatMessage{
+		ID:         "design-self",
+		Name:       "spaces/design/messages/design-self",
+		Space:      "spaces/design",
+		SenderID:   "users/me",
+		SenderName: "Me",
+		Text:       "sent from another client",
+		CreateTime: time.Date(2026, 5, 19, 10, 5, 0, 0, time.UTC),
+	}
+	updated, _ := model.Update(realtimeMsg{message: selfMessage})
+	model = updated.(Model)
+
+	if model.spaces[1].Unread {
+		t.Fatalf("self message should not mark other space unread: %#v", model.spaces)
+	}
+	if model.toast != "" {
+		t.Fatalf("self message should not show toast, got %q", model.toast)
+	}
+	cached := model.cache.ChatMessagesBySpace["spaces/design"]
+	if len(cached.Items) != 1 || cached.Items[0].ID != "design-self" {
+		t.Fatalf("self message should still hydrate cache, got %#v", cached.Items)
 	}
 }
 

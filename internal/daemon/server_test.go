@@ -94,6 +94,77 @@ func TestServerFansOutSingleChatSubscriptionToMultipleClients(t *testing.T) {
 	}
 }
 
+func TestServerDoesNotNotifyForSelfChatMessage(t *testing.T) {
+	dir := t.TempDir()
+	socketDir := shortSocketDir(t)
+	socketPath := filepath.Join(socketDir, "daemon.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := &pushChatClient{
+		WorkspaceClient: newTestWorkspaceClient(),
+		events:          make(chan api.ChatMessage, 1),
+		started:         make(chan struct{}),
+	}
+	server := NewServer(backend, Options{
+		SocketPath: socketPath,
+		CachePath:  filepath.Join(dir, "cache.json"),
+		DraftDir:   filepath.Join(dir, "drafts"),
+	})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	client, err := api.NewRemoteClient(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	events, err := client.SubscribeEvents(ctx, []string{"notify", "chat.message", api.ChatMessageTopic("spaces/engineering")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSubscription(t, backend, "spaces/engineering")
+
+	backend.events <- api.ChatMessage{
+		ID:         "self-1",
+		Name:       "spaces/engineering/messages/self-1",
+		Space:      "spaces/engineering",
+		SenderID:   "users/me",
+		SenderName: "Me",
+		Text:       "sent elsewhere",
+		CreateTime: time.Now(),
+	}
+
+	select {
+	case event := <-events:
+		if event.Topic != "chat.message" {
+			t.Fatalf("self message should not emit notify before chat.message, got %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for self chat.message")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("self message should not emit extra notify event, got %#v", event)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down")
+	}
+}
+
 func TestServerSnapshotAndDraftRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	socketDir := shortSocketDir(t)
@@ -410,6 +481,51 @@ func TestServerPersistsPinAcrossRestart(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not shut down")
+	}
+}
+
+func TestNotifyTitleForSpaceHidesSelfMember(t *testing.T) {
+	server := NewServer(newTestWorkspaceClient(), Options{})
+	server.snapshot = api.NewWorkspaceSnapshot()
+	server.snapshotLoaded = true
+	server.snapshot.Spaces = []api.Space{{
+		Name:        "spaces/alice",
+		DisplayName: "Fabhianto Maoludyo, Alice",
+		SpaceType:   "DM",
+	}, {
+		Name:        "spaces/bob",
+		DisplayName: "Fabhianto Maoludyo, Bob",
+		SpaceType:   "DM",
+	}}
+	server.snapshot.MembersBySpace["spaces/alice"] = []api.SpaceMember{
+		{UserID: "users/115178986287865547502", Type: "HUMAN"},
+		{UserID: "users/alice", Type: "HUMAN"},
+	}
+	server.snapshot.MembersBySpace["spaces/bob"] = []api.SpaceMember{
+		{UserID: "users/115178986287865547502", Type: "HUMAN"},
+		{UserID: "users/bob", Type: "HUMAN"},
+	}
+	server.snapshot.UserLabels["115178986287865547502"] = "Fabhianto Maoludyo"
+	server.snapshot.UserLabels["alice"] = "Alice"
+	server.snapshot.UserLabels["bob"] = "Bob"
+
+	got := server.notifyTitleForSpace("spaces/alice")
+	if got != "gws chat · Alice" {
+		t.Fatalf("expected notification title to hide self, got %q", got)
+	}
+}
+
+func TestPeopleGetMeMarksResolvedUserAsSelf(t *testing.T) {
+	server := NewServer(newTestWorkspaceClient(), Options{})
+	params, err := api.MarshalRaw(api.UserIDParams{UserID: "me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.dispatch(nil, "PeopleGet", params); err != nil {
+		t.Fatal(err)
+	}
+	if !server.snapshot.SelfUserIDs["alice"] {
+		t.Fatalf("expected resolved user to be marked self, got %#v", server.snapshot.SelfUserIDs)
 	}
 }
 

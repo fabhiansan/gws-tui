@@ -140,6 +140,10 @@ func (c *testWorkspaceClient) SetMailUnread(_ context.Context, threadID string, 
 	return api.MailThread{ID: threadID, Subject: "Launch notes", Unread: unread, Date: c.now}, nil
 }
 
+func (c *testWorkspaceClient) ToggleMailLabel(_ context.Context, threadID, labelID string) (api.MailThread, error) {
+	return api.MailThread{ID: threadID, Subject: "Launch notes", Labels: []string{labelID}, Date: c.now}, nil
+}
+
 func (c *testWorkspaceClient) CalendarLists(context.Context) (api.Page[api.CalendarListItem], error) {
 	return api.Page[api.CalendarListItem]{Items: []api.CalendarListItem{
 		{ID: "primary", Summary: "Primary", Primary: true},

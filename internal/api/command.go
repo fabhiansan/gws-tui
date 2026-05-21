@@ -1,13 +1,11 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/mail"
 	"os"
 	"os/exec"
@@ -23,6 +21,16 @@ type CommandClient struct {
 	path     string
 	subMu    sync.Mutex
 	lastSeen map[string]time.Time
+
+	// closeCtx is cancelled by Close; it bounds the lifetime of the shared
+	// chat event stream and its renewal loop.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+
+	chatEventMu       sync.Mutex
+	chatEventOpts     ChatEventOptions
+	chatEventResolved bool
+	chatEventHub      *chatEventHub
 }
 
 type rawChatAttachment struct {
@@ -184,7 +192,8 @@ type rawMeetArtifact struct {
 }
 
 func NewCommandClient(path string) *CommandClient {
-	return &CommandClient{path: path}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &CommandClient{path: path, closeCtx: ctx, closeCancel: cancel}
 }
 
 func (c *CommandClient) AuthStatus(ctx context.Context) (AuthStatus, error) {
@@ -508,19 +517,16 @@ func (c *CommandClient) DeleteChatReaction(ctx context.Context, reactionName str
 	return c.runVoid(ctx, "chat", "spaces", "messages", "reactions", "delete", "--params", string(params), "--format", "json")
 }
 
-// SubscribeChat opens a long-running stream of new chat messages for the given
-// space. When `GWS_EVENTS_PROJECT` or `GWS_EVENTS_SUBSCRIPTION` is configured,
-// it spawns `gws events +subscribe` and forwards CloudEvents NDJSON as they
-// arrive; otherwise it falls back to a 5-second polling loop so environments
-// without Pub/Sub plumbing keep working.
+// SubscribeChat opens a stream of new chat messages for the given space. When
+// real-time delivery is available (see resolveChatHub) every space shares a
+// single Workspace Events subprocess; otherwise the space is polled every 5
+// seconds so environments without Pub/Sub plumbing keep working.
 func (c *CommandClient) SubscribeChat(ctx context.Context, spaceName string) (<-chan ChatMessage, error) {
 	if spaceName == "" {
 		return nil, errors.New("space name required")
 	}
-	project := strings.TrimSpace(os.Getenv("GWS_EVENTS_PROJECT"))
-	subscription := strings.TrimSpace(os.Getenv("GWS_EVENTS_SUBSCRIPTION"))
-	if project != "" || subscription != "" {
-		return c.subscribeChatStream(ctx, spaceName, project, subscription), nil
+	if hub := c.resolveChatHub(); hub != nil {
+		return hub.subscribe(ctx, spaceName), nil
 	}
 	return c.subscribeChatPoll(ctx, spaceName), nil
 }
@@ -569,86 +575,6 @@ func (c *CommandClient) subscribeChatPoll(ctx context.Context, spaceName string)
 		}
 	}()
 	return ch
-}
-
-func (c *CommandClient) subscribeChatStream(ctx context.Context, spaceName, project, subscription string) <-chan ChatMessage {
-	ch := make(chan ChatMessage, 16)
-	go func() {
-		defer close(ch)
-		backoff := time.Second
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			err := c.runChatEventStream(ctx, spaceName, project, subscription, ch)
-			if ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if backoff < 30*time.Second {
-					backoff *= 2
-					if backoff > 30*time.Second {
-						backoff = 30 * time.Second
-					}
-				}
-				continue
-			}
-			backoff = time.Second
-			// Stream exited cleanly (helper finished a batch). Re-subscribe.
-		}
-	}()
-	return ch
-}
-
-func (c *CommandClient) runChatEventStream(ctx context.Context, spaceName, project, subscription string, out chan<- ChatMessage) error {
-	if c.path == "" {
-		return errors.New("gws path is empty")
-	}
-	args := []string{
-		"events", "+subscribe",
-		"--target", "//chat.googleapis.com/" + spaceName,
-		"--event-types", "google.workspace.chat.message.v1.created",
-		"--format", "json",
-	}
-	if subscription != "" {
-		args = append(args, "--subscription", subscription)
-	} else {
-		args = append(args, "--project", project)
-	}
-
-	cmd := exec.CommandContext(ctx, c.path, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	defer func() { _ = cmd.Wait() }()
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		msg, ok := parseChatCloudEvent(scanner.Bytes(), spaceName)
-		if !ok {
-			continue
-		}
-		select {
-		case out <- msg:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return nil
 }
 
 // parseChatCloudEvent decodes a single CloudEvent NDJSON line emitted by
@@ -744,8 +670,9 @@ func (c *CommandClient) ChatMembers(ctx context.Context, spaceName string) ([]Sp
 		Memberships []struct {
 			Name   string `json:"name"`
 			Member struct {
-				Name string `json:"name"`
-				Type string `json:"type"`
+				Name        string `json:"name"`
+				DisplayName string `json:"displayName"`
+				Type        string `json:"type"`
 			} `json:"member"`
 		} `json:"memberships"`
 	}
@@ -762,7 +689,7 @@ func (c *CommandClient) ChatMembers(ctx context.Context, spaceName string) ([]Sp
 		if userID == "" {
 			continue
 		}
-		members = append(members, SpaceMember{UserID: userID, Type: m.Member.Type})
+		members = append(members, SpaceMember{UserID: userID, DisplayName: m.Member.DisplayName, Type: m.Member.Type})
 	}
 	return members, nil
 }
@@ -1366,6 +1293,8 @@ func mailThreadFromRawMessage(raw rawGmailMessage, threadID string) MailThread {
 		ID:          fallback(threadID, raw.ThreadID),
 		Sender:      fallback(senderName, fallback(senderEmail, "(unknown)")),
 		SenderEmail: senderEmail,
+		To:          headers["to"],
+		Cc:          headers["cc"],
 		Subject:     fallback(headers["subject"], "(no subject)"),
 		Snippet:     snippet,
 		Date:        parseGmailDate(raw.InternalDate, headers["date"]),
@@ -1550,6 +1479,32 @@ func (c *CommandClient) SetMailUnread(ctx context.Context, threadID string, unre
 	if err != nil {
 		return MailThread{}, err
 	}
+	if thread.ID == "" {
+		thread.ID = threadID
+	}
+	return thread, nil
+}
+
+func (c *CommandClient) ToggleMailLabel(ctx context.Context, threadID, labelID string) (MailThread, error) {
+	if strings.TrimSpace(labelID) == "" {
+		return MailThread{}, errors.New("label id is required")
+	}
+	thread, err := c.fetchMailThread(ctx, threadID)
+	if err != nil {
+		return MailThread{}, err
+	}
+	if containsLabel(thread.Labels, labelID) {
+		err = c.modifyMailThreadLabels(ctx, threadID, nil, []string{labelID})
+		thread.Labels = removeLabel(thread.Labels, labelID)
+	} else {
+		err = c.modifyMailThreadLabels(ctx, threadID, []string{labelID}, nil)
+		thread.Labels = append(thread.Labels, labelID)
+	}
+	if err != nil {
+		return MailThread{}, err
+	}
+	thread.Starred = containsLabel(thread.Labels, "STARRED")
+	thread.Unread = containsLabel(thread.Labels, "UNREAD")
 	if thread.ID == "" {
 		thread.ID = threadID
 	}
@@ -2144,7 +2099,12 @@ func (c *CommandClient) Doc(ctx context.Context, documentID string) (DocDocument
 	}, nil
 }
 
-func (c *CommandClient) Close() error { return nil }
+func (c *CommandClient) Close() error {
+	if c.closeCancel != nil {
+		c.closeCancel()
+	}
+	return nil
+}
 
 func (c *CommandClient) runJSON(ctx context.Context, out any, args ...string) error {
 	if c.path == "" {

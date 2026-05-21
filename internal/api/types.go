@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -38,8 +39,9 @@ type Member struct {
 }
 
 type SpaceMember struct {
-	UserID string `json:"userId"`
-	Type   string `json:"type,omitempty"`
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName,omitempty"`
+	Type        string `json:"type,omitempty"`
 }
 
 type Person struct {
@@ -56,6 +58,69 @@ type Space struct {
 	Unread        bool     `json:"unread,omitempty"`
 	Live          bool     `json:"live,omitempty"`
 	Members       []Member `json:"members,omitempty"`
+}
+
+func (s Space) UsesMemberLabels() bool {
+	switch strings.ToUpper(strings.TrimSpace(s.SpaceType)) {
+	case "DIRECT_MESSAGE", "DM", "GROUP_CHAT":
+		return true
+	default:
+		return false
+	}
+}
+
+func NormalizeUserID(value string) string {
+	value = strings.TrimSpace(UserIDFromName(value))
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(value)
+}
+
+func InferSelfUserIDs(spaces []Space, membersBySpace map[string][]SpaceMember, existing map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(existing)+1)
+	for userID, isSelf := range existing {
+		if !isSelf {
+			continue
+		}
+		if key := NormalizeUserID(userID); key != "" {
+			out[key] = true
+		}
+	}
+	counts := map[string]int{}
+	for _, space := range spaces {
+		if !space.UsesMemberLabels() {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, member := range membersBySpace[space.Name] {
+			if member.Type != "" && member.Type != "HUMAN" {
+				continue
+			}
+			key := NormalizeUserID(member.UserID)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			counts[key]++
+		}
+	}
+	bestID := ""
+	bestCount := 0
+	secondCount := 0
+	for userID, count := range counts {
+		if count > bestCount {
+			secondCount = bestCount
+			bestID = userID
+			bestCount = count
+		} else if count > secondCount {
+			secondCount = count
+		}
+	}
+	if bestID != "" && bestCount >= 2 && bestCount > secondCount {
+		out[bestID] = true
+	}
+	return out
 }
 
 func (s Space) Title() string {
@@ -227,6 +292,8 @@ type MailThread struct {
 	ID          string       `json:"id"`
 	Sender      string       `json:"sender"`
 	SenderEmail string       `json:"senderEmail,omitempty"`
+	To          string       `json:"to,omitempty"`
+	Cc          string       `json:"cc,omitempty"`
 	Subject     string       `json:"subject"`
 	Snippet     string       `json:"snippet"`
 	Date        time.Time    `json:"date"`
@@ -438,6 +505,7 @@ type WorkspaceClient interface {
 	TrashMail(context.Context, string) error
 	ToggleStar(context.Context, string) (MailThread, error)
 	SetMailUnread(context.Context, string, bool) (MailThread, error)
+	ToggleMailLabel(context.Context, string, string) (MailThread, error)
 
 	CalendarLists(context.Context) (Page[CalendarListItem], error)
 	CalendarEvents(context.Context, CalendarQuery) (Page[CalendarEvent], error)

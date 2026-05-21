@@ -212,6 +212,12 @@ func (c *RemoteClient) SetMailUnread(ctx context.Context, threadID string, unrea
 	return out, err
 }
 
+func (c *RemoteClient) ToggleMailLabel(ctx context.Context, threadID, labelID string) (MailThread, error) {
+	var out MailThread
+	err := c.request(ctx, "ToggleMailLabel", ToggleMailLabelParams{ThreadID: threadID, LabelID: labelID}, &out)
+	return out, err
+}
+
 func (c *RemoteClient) CalendarLists(ctx context.Context) (Page[CalendarListItem], error) {
 	var out Page[CalendarListItem]
 	err := c.request(ctx, "CalendarLists", nil, &out)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -15,6 +16,17 @@ const (
 	modalMail   modalKind = "mail"
 	modalEvent  modalKind = "event"
 	modalSearch modalKind = "search"
+	modalLabel  modalKind = "label"
+)
+
+// mailComposeMode selects how openMailCompose pre-fills the compose modal.
+type mailComposeMode int
+
+const (
+	mailComposeNew mailComposeMode = iota
+	mailComposeReply
+	mailComposeReplyAll
+	mailComposeForward
 )
 
 type modalField struct {
@@ -71,24 +83,31 @@ func (m *composeModal) setField(name, value string) {
 	}
 }
 
-func (m *Model) openMailCompose(thread *api.MailThread, reply bool) {
+func (m *Model) openMailCompose(thread *api.MailThread, mode mailComposeMode) {
 	subject := ""
 	to := ""
+	cc := ""
 	body := ""
 	replyTo := ""
 	title := "Compose · ^s send · ^d draft · Tab next · ^q cancel"
 	if thread != nil && thread.ID != "" {
 		replyTo = thread.ID
 		to = thread.SenderEmail
-		if reply {
-			title = "Reply · ^s send · ^d draft · Tab next · ^q cancel"
+		switch mode {
+		case mailComposeReply, mailComposeReplyAll:
 			if strings.HasPrefix(strings.ToLower(thread.Subject), "re:") {
 				subject = thread.Subject
 			} else {
 				subject = "Re: " + thread.Subject
 			}
-			body = "\n\n> " + strings.ReplaceAll(thread.Body, "\n", "\n> ")
-		} else {
+			body = quotedReplyBody(thread)
+			if mode == mailComposeReplyAll {
+				title = "Reply all · ^s send · ^d draft · Tab next · ^q cancel"
+				cc = replyAllCc(thread, m.selfEmail)
+			} else {
+				title = "Reply · ^s send · ^d draft · Tab next · ^q cancel"
+			}
+		case mailComposeForward:
 			title = "Forward · ^s send · ^d draft · Tab next · ^q cancel"
 			subject = "Fwd: " + thread.Subject
 			body = "\n\n---------- Forwarded message ---------\n" + thread.Body
@@ -102,11 +121,105 @@ func (m *Model) openMailCompose(thread *api.MailThread, reply bool) {
 		replyTo:  replyTo,
 		fields: []modalField{
 			{Name: "to", Label: "To", Value: to},
-			{Name: "cc", Label: "Cc"},
+			{Name: "cc", Label: "Cc", Value: cc},
 			{Name: "subject", Label: "Subject", Value: subject},
 			{Name: "body", Label: "Body", Value: body, Multiline: true},
 		},
 	}
+}
+
+// quotedReplyBody builds a mail-client style reply body: a blank space at the
+// top for the new reply, an attribution line, then the previous message quoted
+// underneath.
+func quotedReplyBody(thread *api.MailThread) string {
+	attribution := fmt.Sprintf("On %s, %s wrote:",
+		thread.Date.Format("Mon, Jan 2, 2006 at 3:04 PM"),
+		replyAttributionName(thread))
+	quoted := "> " + strings.ReplaceAll(thread.Body, "\n", "\n> ")
+	return "\n\n" + attribution + "\n" + quoted
+}
+
+func replyAttributionName(thread *api.MailThread) string {
+	name := strings.TrimSpace(thread.Sender)
+	email := strings.TrimSpace(thread.SenderEmail)
+	switch {
+	case name != "" && email != "" && !strings.EqualFold(name, email):
+		return fmt.Sprintf("%s <%s>", name, email)
+	case email != "":
+		return email
+	case name != "":
+		return name
+	default:
+		return "someone"
+	}
+}
+
+// replyAllCc collects every recipient of the original thread (its To and Cc
+// headers), dropping the account's own address and the original sender (who
+// already lands in the To field), de-duplicated.
+func replyAllCc(thread *api.MailThread, selfEmail string) string {
+	exclude := map[string]bool{}
+	if e := strings.ToLower(strings.TrimSpace(selfEmail)); e != "" {
+		exclude[e] = true
+	}
+	if e := strings.ToLower(strings.TrimSpace(thread.SenderEmail)); e != "" {
+		exclude[e] = true
+	}
+	var recipients []string
+	seen := map[string]bool{}
+	for _, raw := range []string{thread.To, thread.Cc} {
+		addrs, err := mail.ParseAddressList(raw)
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			key := strings.ToLower(strings.TrimSpace(addr.Address))
+			if key == "" || exclude[key] || seen[key] {
+				continue
+			}
+			seen[key] = true
+			recipients = append(recipients, addr.String())
+		}
+	}
+	return strings.Join(recipients, ", ")
+}
+
+func (m *Model) openMailLabelModal() {
+	thread := m.selectedMail()
+	if thread.ID == "" {
+		return
+	}
+	m.modal = &composeModal{
+		id:      fmt.Sprintf("label-%d", time.Now().UnixNano()),
+		kind:    modalLabel,
+		title:   "Toggle label · ^s apply · ^q cancel",
+		replyTo: thread.ID,
+		fields: []modalField{
+			{Name: "label", Label: "Label", Value: ""},
+		},
+	}
+}
+
+// resolveMailLabelID maps a user-typed label name (or raw label id) to a
+// Gmail label id, ignoring pseudo-labels that only carry a search query.
+func (m Model) resolveMailLabelID(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, label := range m.mailLabels {
+		if strings.EqualFold(label.Name, name) && len(label.LabelIDs) > 0 {
+			return label.LabelIDs[0]
+		}
+	}
+	for _, label := range m.mailLabels {
+		for _, id := range label.LabelIDs {
+			if strings.EqualFold(id, name) {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 func (m *Model) openEventCompose(event *api.CalendarEvent) {
@@ -288,6 +401,22 @@ func (m Model) submitModal() (Model, tea.Cmd) {
 				event, err = m.client.CreateEvent(m.ctx, draft)
 			}
 			return eventActionMsg{event: event, err: err, label: "event saved"}
+		}
+	case modalLabel:
+		name := strings.TrimSpace(modal.field("label"))
+		threadID := modal.replyTo
+		m.modal = nil
+		if name == "" || threadID == "" {
+			return m, nil
+		}
+		labelID := m.resolveMailLabelID(name)
+		if labelID == "" {
+			m.err = fmt.Sprintf("unknown label: %s", name)
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			thread, err := m.client.ToggleMailLabel(m.ctx, threadID, labelID)
+			return mailActionMsg{thread: thread, err: err, label: "label toggled"}
 		}
 	}
 	return m, nil

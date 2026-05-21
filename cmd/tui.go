@@ -87,6 +87,17 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 		client = api.NewDefaultClient(api.ClientOptions{
 			UpstreamPath: upstream,
 		})
+		// Standalone mode talks to the upstream CLI directly. Resolve the
+		// chat delivery strategy in the background so opening a space later
+		// does not block on the project lookup + viability probe.
+		if configurer, ok := client.(api.ChatEventConfigurer); ok {
+			configurer.ConfigureChatEvents(api.ChatEventOptions{
+				Disabled:     !cfg.ChatEvents,
+				Project:      cfg.ChatEventsProject,
+				Subscription: cfg.ChatEventsSubscription,
+			})
+			go configurer.PrepareChatEvents()
+		}
 	}
 	defer client.Close()
 

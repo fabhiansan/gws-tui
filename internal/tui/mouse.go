@@ -32,6 +32,32 @@ func (m Model) paneRects() (list, detail, action paneRect) {
 	actionVBorder := m.theme.Input.GetVerticalBorderSize()
 	statusH := 1
 
+	// Mail uses the Gmail-style layout: a sidebar on the left, then the inbox
+	// list and the reading pane sharing one slot on the right. Only whichever
+	// of the two is currently visible is reported as a hit-testable pane.
+	if m.feature == FeatureMail {
+		sidebarW := mailSidebarWidth(w)
+		mainW := max(30, w-sidebarW-leftHBorder-detailHBorder)
+		sidebarTotalW := sidebarW + leftHBorder
+		mainTotalW := mainW + detailHBorder
+
+		// The composer pane is only on screen (and hit-testable) while it is
+		// the focused pane — otherwise the main pane fills the right column.
+		mainContentH := max(5, h-statusH-detailVBorder)
+		if m.focusedPane == paneAction {
+			actionContentH := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
+			mainContentH = max(5, h-statusH-detailVBorder-actionContentH-actionVBorder)
+			action = paneRect{x: sidebarTotalW, y: mainContentH + detailVBorder, w: mainTotalW, h: actionContentH + actionVBorder}
+		}
+		mainRect := paneRect{x: sidebarTotalW, y: 0, w: mainTotalW, h: mainContentH + detailVBorder}
+		if m.focusedPane == paneList {
+			list = mainRect
+		} else {
+			detail = mainRect
+		}
+		return
+	}
+
 	leftW := max(20, int(float64(w)*0.30)-leftHBorder)
 	rightW := max(20, w-leftW-leftHBorder-detailHBorder)
 	actionContentH := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
@@ -185,8 +211,8 @@ func (m Model) listRowAt(rect paneRect, y int) (int, bool) {
 	case FeatureChat, FeatureMeet, FeatureTasks, FeatureDrive, FeatureDocs:
 		return row, true
 	case FeatureMail:
-		// Each thread renders as three lines (sender, subject, separator).
-		return row / 3, true
+		// Gmail-style inbox: one terminal line per thread.
+		return row, true
 	case FeatureCalendar:
 		// Day headers are interleaved with events, so walk the rendered
 		// sequence to find which event sits at this row.

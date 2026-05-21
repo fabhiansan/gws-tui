@@ -24,10 +24,9 @@ secara eksplisit.
 
 1. **Seam-nya sudah ada.** `internal/api.WorkspaceClient` adalah interface
    tunggal yang dipakai TUI untuk semua I/O workspace. Daemon mode = tambah
-   implementasi ke-4: `RemoteClient` yang ngomong ke daemon via socket.
-   TUI tidak peduli `client` itu `CommandClient`, `HybridClient`, atau
-   `RemoteClient`.
-2. **Daemon = headless TUI backend.** Daemon membungkus `HybridClient` +
+   implementasi tambahan: `RemoteClient` yang ngomong ke daemon via socket.
+   TUI tidak peduli `client` itu `CommandClient` atau `RemoteClient`.
+2. **Daemon = headless TUI backend.** Daemon membungkus `CommandClient` +
    `workspaceCache` + subscription loop + notify dispatch. Tidak ada Bubble
    Tea di daemon, tidak ada rendering.
 3. **State split jelas.** Data workspace (spaces, threads, events, cache,
@@ -183,7 +182,7 @@ tipe `WorkspaceSnapshot`.
 ### Phase 2 — Daemon binary
 - `cmd daemon start` (foreground only, no detach yet).
 - `internal/daemon/server.go`: listen Unix socket, satu goroutine per koneksi.
-- Daemon membungkus `HybridClient` + `workspaceCache` + satu `SubscribeChat`
+- Daemon membungkus `CommandClient` + `workspaceCache` + satu `SubscribeChat`
   loop per space (lazy, on-demand).
 - Hub: fan-out `ChatMessage` ke semua client yang subscribe space tersebut.
 - `gws tui --daemon` connect ke socket, gagal kalau daemon belum ada.
@@ -251,7 +250,7 @@ tipe `WorkspaceSnapshot`.
 - **Unit:** RemoteClient (mock conn dengan net.Pipe), daemon hub
   (in-memory clients), protocol encode/decode round-trip, snapshot apply.
 - **Integration:** `internal/daemon/integration_test.go` — spawn daemon dengan
-  `FixtureClient` sebagai backend, connect 2 RemoteClient, verify event
+  fake `WorkspaceClient` test backend, connect 2 RemoteClient, verify event
   fan-out, lifecycle (start/stop/restart).
 - **Existing tests:** `internal/tui/...` harus tetap hijau tanpa modifikasi
   signifikan — `WorkspaceClient` interface tidak berubah.

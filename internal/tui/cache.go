@@ -48,6 +48,7 @@ func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
 	m.userLabels = cache.UserLabels
 	m.membersBySpace = cache.MembersBySpace
 	m.selfUserIDs = cache.SelfUserIDs
+	m.normalizeUserCaches()
 	m.peopleAPIDown = cache.PeopleAPIDown
 	m.clampSelections()
 	if m.persisted.LastSpace != "" {

@@ -220,6 +220,11 @@ print_manual_setup() {
        Calendar  https://console.cloud.google.com/apis/library/calendar-json.googleapis.com
        Meet      https://console.cloud.google.com/apis/library/meet.googleapis.com
 
+     Optional — enable these two for instant ("real-time") chat. Skip them and
+     chat still works, just by polling every 5 seconds:
+       Pub/Sub   https://console.cloud.google.com/apis/library/pubsub.googleapis.com
+       Events    https://console.cloud.google.com/apis/library/workspaceevents.googleapis.com
+
   3. Configure the OAuth consent screen — User type "External", and add your
      own Google account under "Test users":
        https://console.cloud.google.com/apis/credentials/consent
@@ -353,4 +358,15 @@ printf '\n%s\n' "Next steps:"
 echo "    gws tui                  # launch the TUI"
 echo "    gws tui --feature mail   # jump straight to a feature"
 [[ -n "$PATH_HINT" ]] && echo "    (apply the PATH export above first, then restart your shell)"
+
+printf '\n%s\n' "How chat stays up to date:"
+echo "    A background daemon keeps your workspace in sync. The first time it"
+echo "    starts it checks once how it can watch for new chat messages:"
+echo "      real-time  one shared event stream for every space — instant,"
+echo "                 low CPU. Needs the Pub/Sub + Workspace Events APIs"
+echo "                 (step 2 above) enabled on your Google Cloud project."
+echo "      polling    each space is checked every 5 seconds. The automatic"
+echo "                 fallback when those APIs are not available — still fine."
+echo "    The daemon picks whichever works; see which one with:"
+echo "        gws daemon logs | grep 'chat'"
 echo

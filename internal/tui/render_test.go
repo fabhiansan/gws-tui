@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/fabhiansan/gws-tui/internal/api"
 )
@@ -196,6 +197,75 @@ func TestRenderCardsHandlesCardOnlyMessage(t *testing.T) {
 	}
 	if !strings.Contains(got, "Review → Done") {
 		t.Fatalf("card-only message dropped decoded status:\n%s", got)
+	}
+}
+
+func TestRenderStatusFitsNarrowWidth(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			// NoIcons stays false on purpose: the wide symbol icons are
+			// exactly what made the row overflow onto a second line, so the
+			// regression has to be exercised with icons enabled.
+		},
+	})
+	model.spaces = []api.Space{
+		{Name: "spaces/a", DisplayName: "A", Live: true},
+		{Name: "spaces/b", DisplayName: "B", Live: true},
+	}
+
+	check := func(t *testing.T, label string, width int) {
+		t.Helper()
+		model.width = width
+		model.height = 30
+		model.resize()
+		status := model.renderStatus(width)
+		// statusWidth is the pessimistic terminal-cell estimate; if it
+		// exceeds width the terminal wraps the row onto a second line.
+		if got := statusWidth(status); got > width {
+			t.Fatalf("%s width=%d: status visual width = %d, want <= %d:\n%q",
+				label, width, got, width, ansi.Strip(status))
+		}
+	}
+
+	for _, width := range []int{16, 20, 24, 30, 40, 60, 80, 100, 120} {
+		check(t, "plain", width)
+	}
+
+	model.err = "upstream daemon is not responding, retry shortly"
+	for _, width := range []int{16, 20, 24, 30, 40, 60, 80, 100, 120} {
+		check(t, "with-error", width)
+	}
+}
+
+func TestWrapDetailLinesAccountsForAmbiguousWidth(t *testing.T) {
+	// The mail action hint is separated by · (U+00B7), an East Asian
+	// "ambiguous" glyph some terminals draw two cells wide. ansi.Wrap
+	// measures it as one cell, so without an ambiguous-width budget the
+	// wrapped line still overflows the viewport and gets clipped.
+	hint := "R reply · f forward · e archive · # trash · s star · u read/unread"
+	width := lipgloss.Width(hint) // fits exactly by the one-cell measurement
+
+	out := wrapDetailLines([]string{hint}, width)
+	if len(out) < 2 {
+		t.Fatalf("hint with ambiguous · should wrap on a wide-ambiguous budget, got %d line(s): %q", len(out), out)
+	}
+	for _, line := range out {
+		if w := lipgloss.Width(line) + ambiguousDrift(line); w > width {
+			t.Fatalf("wrapped line still overflows a wide-ambiguous terminal: %d > %d\n%q", w, width, line)
+		}
+	}
+
+	// A pure-ASCII line carries no ambiguous drift, so it must not wrap
+	// early — the budget only kicks in for glyphs that actually drift.
+	ascii := strings.Repeat("a", width)
+	if got := wrapDetailLines([]string{ascii}, width); len(got) != 1 {
+		t.Fatalf("ASCII line at exact width should stay on one line, got %d", len(got))
 	}
 }
 

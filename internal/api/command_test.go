@@ -42,6 +42,7 @@ func TestCommandClientSubscribeChatStreamsCloudEvents(t *testing.T) {
 	t.Setenv("GWS_EVENTS_PROJECT", "test-project")
 
 	client := NewCommandClient(os.Args[0])
+	defer client.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -72,15 +73,55 @@ func TestCommandClientSubscribeChatStreamsCloudEvents(t *testing.T) {
 	}
 }
 
+func TestPrepareChatEventsSelectsMode(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+	t.Setenv("GWS_EVENTS_PROJECT", "")
+	t.Setenv("GWS_EVENTS_SUBSCRIPTION", "")
+
+	disabled := NewCommandClient(os.Args[0])
+	defer disabled.Close()
+	disabled.ConfigureChatEvents(ChatEventOptions{Disabled: true})
+	if mode := disabled.PrepareChatEvents(); mode != "polling" {
+		t.Fatalf("disabled events should poll, got %q", mode)
+	}
+
+	realtime := NewCommandClient(os.Args[0])
+	defer realtime.Close()
+	realtime.ConfigureChatEvents(ChatEventOptions{Project: "test-project"})
+	if mode := realtime.PrepareChatEvents(); mode != "realtime" {
+		t.Fatalf("configured project should enable real-time, got %q", mode)
+	}
+}
+
+func TestCommandClientChatMembersIncludesDisplayName(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	members, err := client.ChatMembers(context.Background(), "spaces/engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members, got %#v", members)
+	}
+	if members[0].UserID != "alice" || members[0].DisplayName != "Alice" {
+		t.Fatalf("displayName was not parsed: %#v", members[0])
+	}
+}
+
 func emitFakeChatEventStream() {
 	target := ""
+	once := false
 	for i, arg := range os.Args {
 		if arg == "--target" && i+1 < len(os.Args) {
 			target = os.Args[i+1]
-			break
+		}
+		if arg == "--once" {
+			once = true
 		}
 	}
-	if target != "//chat.googleapis.com/spaces/engineering" {
+	// The hub subscribes to every space at once with the spaces/- target.
+	if target != "//chat.googleapis.com/spaces/-" {
 		fmt.Fprintf(os.Stderr, "unexpected target: %q\n", target)
 		os.Exit(2)
 	}
@@ -97,6 +138,11 @@ func emitFakeChatEventStream() {
 	if !hasProject && !hasSubscription {
 		fmt.Fprintln(os.Stderr, "events +subscribe missing --project/--subscription")
 		os.Exit(2)
+	}
+	if once {
+		// Viability probe (`--once`): exit cleanly so the hub commits to
+		// real-time delivery without streaming anything.
+		os.Exit(0)
 	}
 	event := map[string]any{
 		"type":    "google.workspace.chat.message.v1.created",
@@ -357,6 +403,22 @@ func TestCommandClientArchiveTrashAndToggleStarUseThreadResources(t *testing.T) 
 	}
 }
 
+func TestCommandClientToggleMailLabelModifiesThreadLabels(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	thread, err := client.ToggleMailLabel(context.Background(), "thread-unlabeled", "Label_42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsLabel(thread.Labels, "Label_42") {
+		t.Fatalf("expected Label_42 in returned thread labels: %#v", thread.Labels)
+	}
+	if _, err := client.ToggleMailLabel(context.Background(), "thread-unlabeled", ""); err == nil {
+		t.Fatal("expected error when label id is empty")
+	}
+}
+
 func TestCommandClientRSVPAndDeleteEventUseCalendarEndpoints(t *testing.T) {
 	t.Setenv("GWS_FAKE_COMMAND", "1")
 
@@ -504,6 +566,19 @@ func fakeCommand() {
 	}
 
 	switch {
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "members" &&
+		os.Args[4] == "list":
+		if params["parent"] != "spaces/engineering" {
+			fmt.Fprintf(os.Stderr, "unexpected members parent: %v\n", params["parent"])
+			os.Exit(2)
+		}
+		fmt.Print(`{"memberships":[
+			{"member":{"name":"users/alice","displayName":"Alice","type":"HUMAN"}},
+			{"member":{"name":"users/me","displayName":"Fabhianto Maoludyo","type":"HUMAN"}}
+		]}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "chat" &&
 		os.Args[2] == "spaces" &&
@@ -879,6 +954,11 @@ func fakeCommand() {
 				fmt.Fprintf(os.Stderr, "mark-unread did not add UNREAD: %v\n", body)
 				os.Exit(2)
 			}
+		case "thread-unlabeled":
+			if !fakeStringSliceContains(body["addLabelIds"], "Label_42") {
+				fmt.Fprintf(os.Stderr, "toggle label did not add Label_42: %v\n", body)
+				os.Exit(2)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "unexpected thread modify id: %v\n", params["id"])
 			os.Exit(2)
@@ -906,7 +986,7 @@ func fakeCommand() {
 		threadID, _ := params["id"].(string)
 		labels := `["INBOX"]`
 		switch threadID {
-		case "thread-unstarred", "thread-unread":
+		case "thread-unstarred", "thread-unread", "thread-unlabeled":
 		case "thread-read":
 			labels = `["INBOX","UNREAD"]`
 		default:

@@ -36,6 +36,22 @@ var featureOrder = []Feature{FeatureChat, FeatureMail, FeatureCalendar, FeatureM
 
 const defaultChatReaction = "\U0001F44D"
 
+var workspaceInitialLoadStages = []string{
+	"Auth",
+	"Chat spaces",
+	"Current chat",
+	"Mail labels",
+	"Inbox",
+	"Calendars",
+	"Calendar events",
+	"Meet",
+	"Task lists",
+	"Tasks",
+	"Drive files",
+	"Docs",
+	"Document preview",
+}
+
 type pane int
 
 const (
@@ -80,6 +96,10 @@ type Model struct {
 
 	focusedPane       pane
 	loading           bool
+	loadProgress      chan loadProgressMsg
+	loadStep          int
+	loadTotal         int
+	loadStage         string
 	err               string
 	toast             string
 	search            string
@@ -127,6 +147,7 @@ type Model struct {
 	membersBySpace map[string][]api.SpaceMember
 	pendingMembers map[string]bool
 	selfUserIDs    map[string]bool
+	selfEmail      string
 	peopleAPIDown  bool
 
 	senderColorIdx   map[string]int
@@ -209,6 +230,14 @@ type loadedMsg struct {
 	err          error
 	authRequired bool
 }
+
+type loadProgressMsg struct {
+	Step  int
+	Total int
+	Label string
+}
+
+type loadProgressDoneMsg struct{}
 
 type featureLoadedMsg struct {
 	feature Feature
@@ -354,6 +383,7 @@ type membersLoadedMsg struct {
 type selfResolvedMsg struct {
 	userID    string
 	label     string
+	email     string
 	err       error
 	apiAbsent bool
 }
@@ -371,6 +401,14 @@ func New(opts Options) Model {
 		cacheLoaded = cache.HasData()
 	} else if !cfg.Daemon {
 		cache, cacheLoaded = loadWorkspaceCache(cfg.CachePath)
+	}
+	var loadProgress chan loadProgressMsg
+	loadTotal := 0
+	loadStage := ""
+	if !cacheLoaded {
+		loadProgress = make(chan loadProgressMsg, len(workspaceInitialLoadStages)+2)
+		loadTotal = len(workspaceInitialLoadStages)
+		loadStage = "Starting workspace fetch"
 	}
 	feature := Feature(cfg.InitialFeature)
 	if persisted.LastFeature != "" && cfg.InitialFeature == "chat" {
@@ -405,6 +443,9 @@ func New(opts Options) Model {
 		detail:         detail,
 		focusedPane:    paneList,
 		loading:        !cacheLoaded,
+		loadProgress:   loadProgress,
+		loadTotal:      loadTotal,
+		loadStage:      loadStage,
 		chatLoadIDs:    map[string]int{},
 		seenMessages:   map[string]bool{},
 		userLabels:     map[string]string{},
@@ -445,9 +486,17 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.autosaveTick()}
 	cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
 	if !m.cacheLoaded {
-		cmds = append(cmds, m.loadAllCmd(), m.whoamiCmd())
-	} else if m.cfg.Daemon {
-		cmds = append(cmds, m.subscribeCmd())
+		cmds = append(cmds, m.loadAllWithProgressCmd(m.loadProgress), m.whoamiCmd())
+		if m.loadProgress != nil {
+			cmds = append(cmds, m.loadProgressCmd())
+		}
+	} else {
+		cmds = append(cmds, m.whoamiCmd())
+		cmds = append(cmds, m.enrichSpacesCmds()...)
+		cmds = append(cmds, m.enrichSendersCmds()...)
+		if m.cfg.Daemon {
+			cmds = append(cmds, m.subscribeCmd())
+		}
 	}
 	if m.cfg.Daemon {
 		cmds = append(cmds, m.daemonEventCmd())
@@ -472,12 +521,14 @@ func (m Model) whoamiCmd() tea.Cmd {
 		if label == "" {
 			label = person.Email
 		}
-		return selfResolvedMsg{userID: person.UserID, label: label}
+		return selfResolvedMsg{userID: person.UserID, label: label, email: person.Email}
 	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	prevFeature := m.feature
+	prevFocus := m.focusedPane
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -488,12 +539,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+	case loadProgressMsg:
+		m.loading = true
+		m.loadStep = msg.Step
+		m.loadTotal = msg.Total
+		m.loadStage = msg.Label
+		cmds = append(cmds, m.loadProgressCmd())
+	case loadProgressDoneMsg:
+		m.loadProgress = nil
 	case loadedMsg:
 		m.loading = false
 		m.chatLoading = false
 		m.chatLoadSpace = ""
+		m.loadProgress = nil
+		m.loadStage = ""
+		m.loadStep = 0
+		m.loadTotal = 0
 		if msg.err != nil {
 			m.err = msg.err.Error()
+		}
+		if msg.err == nil {
+			m.cacheLoaded = true
 		}
 		m.auth = msg.auth
 		m.authRequired = m.authRequired || msg.authRequired
@@ -895,13 +961,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil || msg.userID == "" {
 			break
 		}
-		m.selfUserIDs[msg.userID] = true
+		m.peopleAPIDown = false
+		m.markSelfUser(msg.userID)
+		m.markSelfUser(msg.email)
+		if msg.email != "" {
+			m.selfEmail = msg.email
+		}
 		if msg.label != "" {
-			m.userLabels[msg.userID] = msg.label
+			m.userLabels[normalizeUserKey(msg.userID)] = msg.label
 		}
 		m.persistWorkspaceCache()
+		cmds = append(cmds, m.enrichSpacesCmds()...)
+		cmds = append(cmds, m.enrichSendersCmds()...)
 	case userResolvedMsg:
-		delete(m.pendingUsers, msg.userID)
+		delete(m.pendingUsers, normalizeUserKey(msg.userID))
 		if msg.apiAbsent {
 			m.peopleAPIDown = true
 			break
@@ -909,8 +982,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			break
 		}
+		m.peopleAPIDown = false
 		if msg.label != "" {
-			m.userLabels[msg.userID] = msg.label
+			m.userLabels[normalizeUserKey(msg.userID)] = msg.label
 			m.persistWorkspaceCache()
 		}
 	case membersLoadedMsg:
@@ -919,9 +993,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.membersBySpace[msg.spaceName] = msg.members
+		m.selfUserIDs = api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
 		m.persistWorkspaceCache()
 		for _, member := range msg.members {
 			if member.Type != "" && member.Type != "HUMAN" {
+				continue
+			}
+			if m.isSelfUserID(member.UserID) {
 				continue
 			}
 			if cmd := m.resolveUserCmd(member.UserID); cmd != nil {
@@ -953,6 +1031,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	// Mail uses a different pane layout than the other features, and its
+	// composer pane appears only while focused — so the viewport sizes have
+	// to be recomputed whenever the feature or the focused pane changes.
+	if m.feature != prevFeature || m.focusedPane != prevFocus {
+		m.resize()
+	}
 	cmds = append(cmds, m.imageDownloadCmdsForCurrentDetail()...)
 	m.updateDetailContent()
 	return m, tea.Batch(cmds...)
@@ -1142,6 +1226,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return m.downloadAttachment(att)
 			}
 		}
+		if m.feature == FeatureMail && m.focusedPane == paneList {
+			// Mail browses the inbox full-screen; opening a thread swaps in
+			// the reading pane the same way clicking a Gmail row does.
+			m.focusedPane = paneDetail
+			return m, nil
+		}
 		if m.feature == FeatureDrive {
 			return m.downloadSelectedDriveFile()
 		}
@@ -1204,14 +1294,14 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "c":
 		if m.feature == FeatureMail {
-			m.openMailCompose(nil, false)
+			m.openMailCompose(nil, mailComposeNew)
 		} else if m.feature == FeatureCalendar {
 			m.openEventCompose(nil)
 		}
 	case "R":
 		if m.feature == FeatureMail {
 			thread := m.selectedMail()
-			m.openMailCompose(&thread, true)
+			m.openMailCompose(&thread, mailComposeReply)
 		} else if m.feature == FeatureChat {
 			m.loading = true
 			if len(m.imageErrors) > 0 {
@@ -1220,10 +1310,19 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			}
 			return m, m.loadAllCmd()
 		}
+	case "A":
+		if m.feature == FeatureMail {
+			thread := m.selectedMail()
+			m.openMailCompose(&thread, mailComposeReplyAll)
+		}
+	case "l":
+		if m.feature == FeatureMail {
+			m.openMailLabelModal()
+		}
 	case "f":
 		if m.feature == FeatureMail {
 			thread := m.selectedMail()
-			m.openMailCompose(&thread, false)
+			m.openMailCompose(&thread, mailComposeForward)
 		}
 	case "e":
 		if m.feature == FeatureMail {
@@ -1615,11 +1714,130 @@ func spaceFromMessageName(value string) string {
 	return ""
 }
 
+func normalizeUserKey(value string) string {
+	return api.NormalizeUserID(value)
+}
+
+func (m *Model) markSelfUser(value string) {
+	key := normalizeUserKey(value)
+	if key == "" {
+		return
+	}
+	m.selfUserIDs[key] = true
+}
+
+func (m Model) isSelfUserID(value string) bool {
+	key := normalizeUserKey(value)
+	if key == "" {
+		return false
+	}
+	if key == "me" {
+		return true
+	}
+	return m.inferredSelfUserIDs()[key]
+}
+
+func (m Model) inferredSelfUserIDs() map[string]bool {
+	return api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
+}
+
+func (m Model) stripSelfFromSpaceTitle(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := splitSpaceTitleParts(value)
+	if len(parts) <= 1 {
+		if m.isSelfSpaceLabel(value) {
+			return ""
+		}
+		return value
+	}
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || m.isSelfSpaceLabel(part) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, ", ")
+}
+
+func splitSpaceTitleParts(value string) []string {
+	raw := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ',', ';', '|', '\n', '\r', '·', '•':
+			return true
+		default:
+			return false
+		}
+	})
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func (m Model) isSelfSpaceLabel(value string) bool {
+	needle := normalizeSpaceLabel(value)
+	if needle == "" {
+		return false
+	}
+	for userID := range m.inferredSelfUserIDs() {
+		if normalizeSpaceLabel(userID) == needle {
+			return true
+		}
+		if label := m.userLabels[userID]; normalizeSpaceLabel(label) == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSpaceLabel(value string) string {
+	value = strings.TrimSpace(api.UserIDFromName(value))
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.ToLower(value)
+}
+
+func (m *Model) normalizeUserCaches() {
+	if m.userLabels != nil {
+		normalized := make(map[string]string, len(m.userLabels))
+		for userID, label := range m.userLabels {
+			key := normalizeUserKey(userID)
+			if key == "" {
+				continue
+			}
+			normalized[key] = label
+		}
+		m.userLabels = normalized
+	}
+	if m.selfUserIDs != nil {
+		normalized := make(map[string]bool, len(m.selfUserIDs))
+		for userID, isSelf := range m.selfUserIDs {
+			if !isSelf {
+				continue
+			}
+			key := normalizeUserKey(userID)
+			if key != "" {
+				normalized[key] = true
+			}
+		}
+		m.selfUserIDs = normalized
+	}
+	m.selfUserIDs = api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
+}
+
 func (m *Model) resolveUserCmd(userID string) tea.Cmd {
+	userID = normalizeUserKey(userID)
 	if userID == "" || m.peopleAPIDown {
 		return nil
 	}
-	if _, ok := m.userLabels[userID]; ok {
+	if label, ok := m.userLabels[userID]; ok && label != "" && label != userID && label != "users/"+userID {
 		return nil
 	}
 	if m.pendingUsers[userID] {
@@ -1653,7 +1871,7 @@ func (m *Model) loadMembersCmd(space api.Space) tea.Cmd {
 	if space.Name == "" {
 		return nil
 	}
-	if space.SpaceType != "DIRECT_MESSAGE" && space.SpaceType != "GROUP_CHAT" {
+	if !space.UsesMemberLabels() {
 		return nil
 	}
 	if _, ok := m.membersBySpace[space.Name]; ok {
@@ -1677,6 +1895,17 @@ func (m *Model) loadMembersCmd(space api.Space) tea.Cmd {
 func (m *Model) enrichSpacesCmds() []tea.Cmd {
 	var cmds []tea.Cmd
 	for _, space := range m.spaces {
+		for _, member := range m.membersBySpace[space.Name] {
+			if member.Type != "" && member.Type != "HUMAN" {
+				continue
+			}
+			if m.isSelfUserID(member.UserID) {
+				continue
+			}
+			if cmd := m.resolveUserCmd(member.UserID); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		if cmd := m.loadMembersCmd(space); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1698,36 +1927,80 @@ func (m *Model) enrichSendersCmds() []tea.Cmd {
 	return cmds
 }
 
-func (m Model) loadAllCmd() tea.Cmd {
+func (m Model) loadProgressCmd() tea.Cmd {
+	progress := m.loadProgress
+	if progress == nil {
+		return nil
+	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		msg, ok := <-progress
+		if !ok {
+			return loadProgressDoneMsg{}
+		}
+		return msg
+	}
+}
+
+func sendLoadProgress(progress chan loadProgressMsg, step int, label string) {
+	if progress == nil {
+		return
+	}
+	select {
+	case progress <- loadProgressMsg{Step: step, Total: len(workspaceInitialLoadStages), Label: label}:
+	default:
+	}
+}
+
+func (m Model) loadAllCmd() tea.Cmd {
+	return m.loadAllWithProgressCmd(nil)
+}
+
+func (m Model) loadAllWithProgressCmd(progress chan loadProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		if progress != nil {
+			defer close(progress)
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, 45*time.Second)
 		defer cancel()
 
+		sendLoadProgress(progress, 1, "Auth")
 		auth, authErr := m.client.AuthStatus(ctx)
+		sendLoadProgress(progress, 2, "Chat spaces")
 		spaces, spacesErr := m.client.ChatSpaces(ctx)
 		selectedSpace := ""
 		if len(spaces.Items) > 0 {
 			selectedSpace = spaces.Items[clamp(m.selected[FeatureChat], len(spaces.Items))].Name
 		}
+		sendLoadProgress(progress, 3, "Current chat")
 		messages, messagesErr := m.client.ChatMessages(ctx, selectedSpace, "")
+		sendLoadProgress(progress, 4, "Mail labels")
 		labels, labelsErr := m.client.MailLabels(ctx)
+		sendLoadProgress(progress, 5, "Inbox")
 		threads, threadsErr := m.client.MailThreads(ctx, api.MailQuery{Label: "Inbox"})
+		sendLoadProgress(progress, 6, "Calendars")
 		calendars, calendarsErr := m.client.CalendarLists(ctx)
 		calendarID := selectedCalendarID(calendars.Items, m.calendarIndex)
+		sendLoadProgress(progress, 7, "Calendar events")
 		events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendarID})
+		sendLoadProgress(progress, 8, "Meet")
 		meet, meetErr := m.client.MeetSpaces(ctx)
+		sendLoadProgress(progress, 9, "Task lists")
 		taskLists, taskListsErr := m.client.TaskLists(ctx)
 		tasks := api.Page[api.TaskItem]{}
 		taskListID := ""
 		var tasksErr error
+		sendLoadProgress(progress, 10, "Tasks")
 		if len(taskLists.Items) > 0 {
 			taskListID = taskLists.Items[clamp(m.taskListIndex, len(taskLists.Items))].ID
 			tasks, tasksErr = m.client.Tasks(ctx, api.TaskQuery{TaskListID: taskListID})
 		}
+		sendLoadProgress(progress, 11, "Drive files")
 		driveFiles, driveErr := m.client.DriveFiles(ctx, api.DriveQuery{})
+		sendLoadProgress(progress, 12, "Docs")
 		docFiles, docsErr := m.client.Docs(ctx, api.DriveQuery{})
 		doc := api.DocDocument{}
 		var docErr error
+		sendLoadProgress(progress, 13, "Document preview")
 		if len(docFiles.Items) > 0 {
 			doc = api.DocDocument{ID: docFiles.Items[clamp(m.selected[FeatureDocs], len(docFiles.Items))].ID}
 			doc, docErr = m.client.Doc(ctx, doc.ID)
@@ -1995,7 +2268,7 @@ func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandalone
 	// selfUserIDs is keyed by the bare numeric id; message.SenderID has the
 	// "users/" resource prefix. Normalize before lookup.
 	senderBareID := api.UserIDFromName(message.SenderID)
-	fromSelf := senderBareID != "" && m.selfUserIDs[senderBareID]
+	fromSelf := m.isSelfUserID(senderBareID)
 	if m.isSelectedSpace(message.Space) {
 		m.chatMessages, _ = upsertChatMessage(m.chatMessages, message)
 		// User is actively viewing; keep the daemon's read marker in sync so the
@@ -2004,13 +2277,15 @@ func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandalone
 	} else if !fromSelf {
 		m.setSpaceUnread(message.Space, true)
 	}
-	m.toast = "new chat message"
+	if !fromSelf {
+		m.toast = "new chat message"
+	}
 	if cmd := m.resolveUserCmd(senderBareID); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{message})...)
-	if sendStandaloneNotify && !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(message.Space)) {
-		notify.Send("gws chat", message.SenderName+": "+message.Text, notify.Options{
+	if sendStandaloneNotify && !fromSelf && !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(message.Space)) {
+		notify.Send(m.chatNotifyTitle(message.Space), message.SenderName+": "+message.Text, notify.Options{
 			Desktop:   m.cfg.NotifyDesktop,
 			Sound:     m.cfg.NotifySound,
 			SoundFile: m.cfg.NotifySoundFile,
@@ -2018,6 +2293,21 @@ func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandalone
 	}
 	m.persistWorkspaceCache()
 	return cmds
+}
+
+func (m Model) chatNotifyTitle(spaceName string) string {
+	if spaceName == "" {
+		return "gws chat"
+	}
+	for _, space := range m.spaces {
+		if space.Name == spaceName {
+			if label := m.spaceLabel(space); label != "" {
+				return "gws chat · " + label
+			}
+			break
+		}
+	}
+	return "gws chat"
 }
 
 func (m Model) markChatReadCmd(spaceName string) tea.Cmd {
@@ -2084,6 +2374,30 @@ func (m *Model) resize() {
 	detailHPad := m.theme.Active.GetHorizontalPadding()
 	actionHPad := m.theme.Input.GetHorizontalPadding()
 	statusH := 1
+
+	// Mail's Gmail-style layout puts the sidebar on the left, so the reading
+	// pane and composer are sized against the wider right column instead of
+	// the shared 30/70 split below.
+	if m.feature == FeatureMail {
+		sidebarW := mailSidebarWidth(w)
+		mainW := max(30, w-sidebarW-leftHBorder-detailHBorder)
+		actionHeight := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
+		// The composer pane only takes height while it is focused; otherwise
+		// the reading pane fills the whole right column.
+		mainContentH := max(5, h-statusH-detailVBorder)
+		if m.focusedPane == paneAction {
+			mainContentH = max(5, h-statusH-detailVBorder-actionHeight-actionVBorder)
+		}
+		mailDetailWidth := max(10, mainW-detailHPad)
+		if m.cfg.VimMode {
+			mailDetailWidth = max(10, mailDetailWidth-2)
+		}
+		m.detail.Width = mailDetailWidth
+		m.detail.Height = max(3, mainContentH)
+		m.input.SetWidth(max(10, mainW-actionHPad))
+		m.input.SetHeight(max(2, actionHeight))
+		return
+	}
 
 	left := max(20, int(float64(w)*0.30)-leftHBorder)
 	right := max(20, w-left-leftHBorder-detailHBorder)

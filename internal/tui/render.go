@@ -9,10 +9,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/fabhiansan/gws-tui/internal/api"
+	"github.com/mattn/go-runewidth"
 )
 
 func (m Model) spaceLabel(space api.Space) string {
-	if space.SpaceType == "DIRECT_MESSAGE" || space.SpaceType == "GROUP_CHAT" {
+	if space.UsesMemberLabels() {
 		members, ok := m.membersBySpace[space.Name]
 		if ok && len(members) > 0 {
 			labels := make([]string, 0, len(members))
@@ -20,17 +21,20 @@ func (m Model) spaceLabel(space api.Space) string {
 				if member.Type != "" && member.Type != "HUMAN" {
 					continue
 				}
-				if m.selfUserIDs[member.UserID] {
+				if m.isSelfUserID(member.UserID) {
 					continue
 				}
-				labels = append(labels, m.userLabelOrID(member.UserID))
+				labels = append(labels, m.memberLabel(member))
 			}
 			if len(labels) > 0 {
 				return strings.Join(labels, ", ")
 			}
 		}
-		if space.SpaceType == "GROUP_CHAT" && space.DisplayName != "" {
-			return space.DisplayName
+		if label := m.stripSelfFromSpaceTitle(space.DisplayName); label != "" {
+			return label
+		}
+		if label := m.stripSelfFromSpaceTitle(space.FormattedName); label != "" {
+			return label
 		}
 	}
 	if space.DisplayName != "" {
@@ -49,13 +53,35 @@ func (m Model) spaceLabel(space api.Space) string {
 }
 
 func (m Model) userLabelOrID(userID string) string {
+	key := normalizeUserKey(userID)
+	if key != "" {
+		if label, ok := m.userLabels[key]; ok && label != "" {
+			return label
+		}
+		if label, ok := m.userLabels["users/"+key]; ok && label != "" {
+			return label
+		}
+	}
 	if label, ok := m.userLabels[userID]; ok && label != "" {
 		return label
 	}
-	if userID == "" {
+	if key == "" {
 		return "unknown"
 	}
-	return userID
+	return key
+}
+
+func (m Model) memberLabel(member api.SpaceMember) string {
+	key := normalizeUserKey(member.UserID)
+	if key != "" {
+		if label, ok := m.userLabels[key]; ok && label != "" && label != key {
+			return label
+		}
+	}
+	if member.DisplayName != "" && !strings.HasPrefix(member.DisplayName, "users/") {
+		return member.DisplayName
+	}
+	return m.userLabelOrID(member.UserID)
 }
 
 func (m Model) senderLabel(msg api.ChatMessage) string {
@@ -81,6 +107,9 @@ func (m Model) View() string {
 	if m.authRequired {
 		return m.theme.Root.Width(width).Height(height).Render(m.authView(width, height))
 	}
+	if m.loading && !m.cacheLoaded {
+		return m.theme.Root.Width(width).Height(height).Render(m.loadingView(width, height))
+	}
 
 	body := m.mainView(width, height)
 	if m.helpVisible {
@@ -97,7 +126,81 @@ func (m Model) View() string {
 	return body
 }
 
+func (m Model) loadingView(width, height int) string {
+	total := m.loadTotal
+	if total <= 0 {
+		total = len(workspaceInitialLoadStages)
+	}
+	step := m.loadStep
+	if step < 0 {
+		step = 0
+	}
+	if step > total {
+		step = total
+	}
+	stage := m.loadStage
+	if stage == "" {
+		stage = "Starting workspace fetch"
+	}
+
+	boxWidth := min(76, max(24, width-4))
+	lineWidth := max(8, boxWidth-4)
+	progressWidth := max(12, boxWidth-18)
+	filled := 0
+	if total > 0 {
+		filled = progressWidth * step / total
+	}
+	bar := m.accent(strings.Repeat(m.icon("█", "="), filled)) + m.subtle(strings.Repeat(m.icon("░", "-"), progressWidth-filled))
+	header := fmt.Sprintf("%s Loading workspace", m.spinner.View())
+	progress := fmt.Sprintf("[%s] %d/%d", bar, step, total)
+
+	lines := []string{
+		header,
+		m.subtle(truncate("Fetching Google Workspace data through "+m.upstreamHint, lineWidth)),
+		"",
+		progress,
+		m.accent(truncate(stage, lineWidth)),
+		"",
+	}
+	stageLimit := len(workspaceInitialLoadStages)
+	if height > 0 {
+		stageLimit = min(stageLimit, max(3, height-11))
+	}
+	stageStart := 0
+	if stageLimit < len(workspaceInitialLoadStages) && step > stageLimit {
+		stageStart = min(step-stageLimit, len(workspaceInitialLoadStages)-stageLimit)
+	}
+	stageEnd := min(len(workspaceInitialLoadStages), stageStart+stageLimit)
+	if stageStart > 0 {
+		lines = append(lines, m.subtle("  ..."))
+	}
+	for i := stageStart; i < stageEnd; i++ {
+		label := workspaceInitialLoadStages[i]
+		marker := "  "
+		text := label
+		switch {
+		case i+1 < step:
+			marker = m.accent(m.icon("✓", "v") + " ")
+			text = m.subtle(label)
+		case i+1 == step:
+			marker = m.accent(m.icon("→", ">") + " ")
+		}
+		lines = append(lines, marker+truncate(text, lineWidth-2))
+	}
+	if stageEnd < len(workspaceInitialLoadStages) {
+		lines = append(lines, m.subtle("  ..."))
+	}
+	lines = append(lines, "", m.subtle(truncate("q quits · the TUI will open as soon as the first workspace snapshot is ready", lineWidth)))
+
+	content := strings.Join(lines, "\n")
+	box := paneWithTitle(m.theme.Active, m.title(" gws · startup "), content, boxWidth, lipgloss.Height(content))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m Model) mainView(width, height int) string {
+	if m.feature == FeatureMail {
+		return m.mailView(width, height)
+	}
 	leftHBorder := m.theme.Pane.GetHorizontalBorderSize()
 	leftVBorder := m.theme.Pane.GetVerticalBorderSize()
 	detailHBorder := m.theme.Active.GetHorizontalBorderSize()
@@ -123,6 +226,128 @@ func (m Model) mainView(width, height int) string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	status := m.renderStatus(width)
 	return m.theme.Root.Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, row, status))
+}
+
+// mailView lays out the Mail feature like Gmail: a labels sidebar on the
+// left, a wide single-line message list on the right, and a reading pane
+// that takes the list's place once a message is opened. Every other feature
+// keeps the shared three-pane layout in mainView.
+func (m Model) mailView(width, height int) string {
+	sidebarHBorder := m.theme.Pane.GetHorizontalBorderSize()
+	sidebarVBorder := m.theme.Pane.GetVerticalBorderSize()
+	mainHBorder := m.theme.Active.GetHorizontalBorderSize()
+	mainVBorder := m.theme.Active.GetVerticalBorderSize()
+	actionVBorder := m.theme.Input.GetVerticalBorderSize()
+	statusH := 1
+
+	sidebarW := mailSidebarWidth(width)
+	mainW := max(30, width-sidebarW-sidebarHBorder-mainHBorder)
+
+	sidebarContentH := max(5, height-statusH-sidebarVBorder)
+	sidebar := m.renderMailSidebar(sidebarW, sidebarContentH)
+
+	// The composer pane is hidden while browsing or reading mail so the inbox
+	// uses the full height like Gmail; it only slides in below the reading
+	// pane when the user focuses the composer to write a quick reply.
+	var right string
+	if m.focusedPane == paneAction {
+		actionContentH := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
+		mainContentH := max(5, height-statusH-mainVBorder-actionContentH-actionVBorder)
+		right = lipgloss.JoinVertical(lipgloss.Left,
+			m.mailMainPane(mainW, mainContentH),
+			m.renderAction(mainW, actionContentH))
+	} else {
+		mainContentH := max(5, height-statusH-mainVBorder)
+		right = m.mailMainPane(mainW, mainContentH)
+	}
+	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, right)
+	status := m.renderStatus(width)
+	return m.theme.Root.Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, row, status))
+}
+
+// mailMainPane renders the slot shared by the inbox list and the reading
+// pane: browsing shows the wide message list, and opening a message swaps in
+// the reading pane until the user goes back to the list.
+func (m Model) mailMainPane(width, height int) string {
+	if m.focusedPane == paneList {
+		return m.renderList(width, height)
+	}
+	detailStyle := m.theme.Pane
+	if m.focusedPane == paneDetail {
+		detailStyle = m.theme.Active
+	}
+	return paneWithTitle(detailStyle, m.title(" [2]-"+m.detailTitle()+" "), m.detail.View(), width, height)
+}
+
+// mailSidebarWidth is the content width of the Gmail-style label rail. It is
+// shared by the renderer, the resize math, and mouse hit-testing so all three
+// always agree on where the sidebar ends.
+func mailSidebarWidth(width int) int {
+	return max(14, min(26, width/5))
+}
+
+var mailSystemFolders = []string{"Inbox", "Starred", "Important", "Sent", "Drafts", "Spam", "Trash", "All Mail"}
+
+var mailSystemLabelIDs = map[string]bool{
+	"INBOX": true, "STARRED": true, "IMPORTANT": true, "SENT": true,
+	"DRAFT": true, "DRAFTS": true, "SPAM": true, "TRASH": true,
+	"UNREAD": true, "CHAT": true, "CHATS": true, "ALL MAIL": true,
+	"SNOOZED": true, "SCHEDULED": true, "OUTBOX": true,
+}
+
+// mailSidebarLabels splits the Gmail labels into the fixed system folders
+// pinned at the top of the sidebar and the user-created labels listed under a
+// "Labels" header. Gmail's system labels and CATEGORY_* buckets are filtered
+// out of the custom list so they are not shown twice.
+func (m Model) mailSidebarLabels() (system, custom []string) {
+	for _, label := range m.mailLabels {
+		name := strings.TrimSpace(label.Name)
+		if name == "" {
+			continue
+		}
+		upper := strings.ToUpper(name)
+		isSystem := mailSystemLabelIDs[upper] || strings.HasPrefix(upper, "CATEGORY_")
+		for _, folder := range mailSystemFolders {
+			if strings.EqualFold(folder, name) {
+				isSystem = true
+			}
+		}
+		for _, id := range label.LabelIDs {
+			u := strings.ToUpper(strings.TrimSpace(id))
+			if mailSystemLabelIDs[u] || strings.HasPrefix(u, "CATEGORY_") {
+				isSystem = true
+			}
+		}
+		if !isSystem {
+			custom = append(custom, name)
+		}
+	}
+	return mailSystemFolders, custom
+}
+
+// renderMailSidebar draws the Gmail-style folder rail: the standard system
+// folders first, then a "Labels" group with the user's own labels. The rail
+// is informational — Inbox is highlighted as the active folder.
+func (m Model) renderMailSidebar(width, height int) string {
+	innerW := max(6, width-m.theme.Pane.GetHorizontalPadding())
+	system, custom := m.mailSidebarLabels()
+
+	var lines []string
+	for _, name := range system {
+		if strings.EqualFold(name, "Inbox") {
+			lines = append(lines, m.accent(m.icon("▸", ">")+" "+truncate(name, innerW-2)))
+			continue
+		}
+		lines = append(lines, "  "+truncate(name, innerW-2))
+	}
+	if len(custom) > 0 {
+		lines = append(lines, "", m.subtle("Labels"))
+		for _, name := range custom {
+			lines = append(lines, "  "+m.subtle(truncate(name, innerW-2)))
+		}
+	}
+	body := fitLines(lines, innerW, height)
+	return paneWithTitle(m.theme.Pane, m.title(" Mail "), body, width, height)
 }
 
 func (m Model) authView(width, height int) string {
@@ -186,36 +411,16 @@ func (m Model) renderList(width, height int) string {
 		}
 	case FeatureMail:
 		title = fmt.Sprintf(" [1]-Inbox (%d) ", len(m.mailThreads))
+		rowW := max(20, width-m.theme.Pane.GetHorizontalPadding())
 		for i, thread := range m.mailThreads {
-			marker := "  "
-			if thread.Unread {
-				marker = m.accent(m.icon("●", "*")) + " "
-			}
-			if thread.Starred {
-				marker = m.warn(m.icon("★", "*")) + " "
-			}
-			prefix := "  "
 			selected := i == m.selected[FeatureMail]
 			if selected {
 				selStart = len(lines)
 			}
-			lines = append(lines, prefix+marker+truncate(thread.Sender, width-8))
-			subject := truncate(thread.Subject+"  "+relative(thread.Date), width-6)
-			lines = append(lines, "    "+subject)
-			lines = append(lines, m.subtle("    "+strings.Repeat("─", max(1, width-8))))
+			lines = append(lines, m.mailRow(thread, rowW))
 			if selected {
 				selEnd = len(lines) - 1
 			}
-		}
-		if len(m.mailLabels) > 0 {
-			var tabs []string
-			for i, label := range m.mailLabels {
-				if i >= 9 {
-					break
-				}
-				tabs = append(tabs, fmt.Sprintf("%d:%s", i+1, label.Name))
-			}
-			lines = append(lines, "", m.subtle("["+truncate(strings.Join(tabs, "  "), width-8)+"]"))
 		}
 	case FeatureCalendar:
 		title = fmt.Sprintf(" [1]-%s (%d) ", truncate(m.selectedCalendar().Summary, 24), len(m.events))
@@ -336,6 +541,96 @@ func (m Model) renderList(width, height int) string {
 	return paneWithTitle(style, m.title(title), body, width, height)
 }
 
+// mailRow renders one inbox entry as a single Gmail-style line: a star
+// column, a fixed-width sender column, the subject followed by a dimmed
+// snippet, and a right-aligned date. Unread threads are drawn brighter so the
+// inbox scans the same way Gmail's list view does. The row is padded to the
+// full width so the selection highlight covers it edge to edge.
+func (m Model) mailRow(thread api.MailThread, width int) string {
+	starGlyph := m.icon("☆", "-")
+	if thread.Starred {
+		starGlyph = m.icon("★", "*")
+	}
+	star := padCell(starGlyph, 2)
+	if thread.Starred {
+		star = m.warn(star)
+	} else {
+		star = m.subtle(star)
+	}
+
+	senderW := 18
+	if width < 64 {
+		senderW = 13
+	}
+	dateW := 6
+	midW := max(8, width-6-senderW-dateW)
+
+	sender := m.mailEmphasis(padCell(fallback(thread.Sender, "(unknown)"), senderW), thread.Unread)
+
+	subject := strings.TrimSpace(thread.Subject)
+	if subject == "" {
+		subject = "(no subject)"
+	}
+	subjectPlain := truncate(subject, midW)
+	used := lipgloss.Width(subjectPlain)
+	middle := m.mailEmphasis(subjectPlain, thread.Unread)
+	if snippet := mailSnippet(thread); snippet != "" && midW-used > 8 {
+		snipPlain := truncate(snippet, midW-used-3)
+		middle += m.subtle(" - " + snipPlain)
+		used += 3 + lipgloss.Width(snipPlain)
+	}
+	if pad := midW - used; pad > 0 {
+		middle += strings.Repeat(" ", pad)
+	}
+
+	date := truncate(relative(thread.Date), dateW)
+	if pad := dateW - lipgloss.Width(date); pad > 0 {
+		date = strings.Repeat(" ", pad) + date
+	}
+
+	return " " + star + sender + "  " + middle + " " + m.subtle(date)
+}
+
+// mailSnippet returns a one-line preview for a thread, preferring Gmail's own
+// snippet and falling back to the first non-quoted line of the body. Runs of
+// whitespace are collapsed so the preview stays on a single line.
+func mailSnippet(thread api.MailThread) string {
+	s := strings.TrimSpace(thread.Snippet)
+	if s == "" {
+		for _, line := range strings.Split(thread.Body, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, ">") {
+				s = line
+				break
+			}
+		}
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// mailEmphasis brightens unread mail text and dims text that has already been
+// read, mirroring Gmail's bold-unread / muted-read inbox styling.
+func (m Model) mailEmphasis(value string, unread bool) string {
+	if !unread {
+		return m.subtle(value)
+	}
+	style := lipgloss.NewStyle().Bold(true)
+	if !m.cfg.NoColor {
+		style = style.Foreground(lipgloss.Color(m.theme.Fg))
+	}
+	return style.Render(displayText(value))
+}
+
+// padCell truncates value to width display cells, then right-pads it with
+// spaces so column-aligned rows line up regardless of the text inside.
+func padCell(value string, width int) string {
+	value = truncate(value, width)
+	if pad := width - lipgloss.Width(value); pad > 0 {
+		value += strings.Repeat(" ", pad)
+	}
+	return value
+}
+
 func computeListOffset(total, viewportH, selStart, selEnd int) int {
 	if total <= viewportH || selEnd < 0 {
 		return 0
@@ -426,31 +721,90 @@ func (m Model) featureIcon(f Feature) string {
 	}
 }
 
-func (m Model) renderStatus(width int) string {
-	brand := m.theme.StatusBrand.Render(" gws ")
+// wideGlyphs lists the symbol runes the status bar draws that many
+// terminals render two cells wide even though lipgloss measures them as
+// one. statusWidth counts them as 2 so the compact-mode and truncate
+// decisions below fire before the row overflows onto a second line.
+var wideGlyphs = map[rune]struct{}{
+	'◉': {}, '✉': {}, '◫': {}, '◎': {}, '☑': {}, '▤': {}, '●': {}, '◦': {},
+}
 
-	tabs := make([]string, 0, len(featureOrder))
-	tabSep := m.theme.StatusSeparator.Render("│")
-	for i, feature := range featureOrder {
-		label := fmt.Sprintf("%s %s ^%d", m.featureIcon(feature), m.featureLabel(feature), i+1)
-		if feature == m.feature {
-			tabs = append(tabs, m.theme.ActiveTab.Render(label))
-		} else {
-			tabs = append(tabs, m.theme.Tab.Render(label))
+// statusWidth is a pessimistic estimate of how many terminal columns s
+// occupies: lipgloss.Width plus one extra cell per wide glyph. The status
+// row budget uses this instead of lipgloss.Width so it stays in sync with
+// what the terminal actually draws — lipgloss undercounts the symbol
+// icons, which is what lets the row silently overflow onto a second line.
+func statusWidth(s string) int {
+	w := lipgloss.Width(s)
+	for _, r := range ansi.Strip(s) {
+		if _, ok := wideGlyphs[r]; ok {
+			w++
 		}
 	}
-	tabsRendered := strings.Join(tabs, tabSep)
-	left := brand + tabsRendered
+	return w
+}
+
+func (m Model) renderStatus(width int) string {
+	brand := m.theme.StatusBrand.Render(" gws ")
+	tabSep := m.theme.StatusSeparator.Render("│")
+
+	// renderTabs builds the feature tab strip. The compact form drops the
+	// word label and keeps just the icon + Ctrl-number, so a narrow
+	// terminal still shows every tab instead of overflowing the row.
+	renderTabs := func(compact bool) string {
+		tabs := make([]string, 0, len(featureOrder))
+		for i, feature := range featureOrder {
+			var label string
+			if compact {
+				label = fmt.Sprintf("%s ^%d", m.featureIcon(feature), i+1)
+			} else {
+				label = fmt.Sprintf("%s %s ^%d", m.featureIcon(feature), m.featureLabel(feature), i+1)
+			}
+			if feature == m.feature {
+				tabs = append(tabs, m.theme.ActiveTab.Render(label))
+			} else {
+				tabs = append(tabs, m.theme.Tab.Render(label))
+			}
+		}
+		return strings.Join(tabs, tabSep)
+	}
+
+	// finalize stretches left/right to fill the row, then hard-truncates to
+	// width. An over-long row *wraps* onto a second line — that extra row
+	// pushes the layout past m.height and clips the UI, so this truncate
+	// guard is what keeps the status bar exactly one row tall.
+	//
+	// Every width calculation uses statusWidth, not lipgloss.Width, because
+	// the terminal draws the symbol icons wider than lipgloss measures.
+	// ansi.Truncate still counts the lipgloss way, so we aim it at
+	// width-drift to shave the overflow; the final padding is also done by
+	// hand, since lipgloss .Width() would re-pad by its own undercount and
+	// re-introduce the overflow for any wide glyph left in the row.
+	finalize := func(left, right string) string {
+		gap := width - statusWidth(left) - statusWidth(right)
+		filler := m.theme.Status.Render(strings.Repeat(" ", max(1, gap)))
+		line := left + filler + right
+		if statusWidth(line) > width {
+			drift := statusWidth(line) - lipgloss.Width(line)
+			line = ansi.Truncate(line, max(0, width-drift), "")
+		}
+		if pad := width - statusWidth(line); pad > 0 {
+			line += m.theme.Status.Render(strings.Repeat(" ", pad))
+		}
+		return line
+	}
+
+	left := brand + renderTabs(false)
 
 	if m.err != "" {
 		errSeg := m.theme.StatusError.Render(fmt.Sprintf(" ! %s · x dismiss ", m.err))
-		gap := width - lipgloss.Width(left) - lipgloss.Width(errSeg)
-		if gap < 1 {
-			errSeg = m.theme.StatusError.Render(" ! " + truncate(m.err, max(10, width-lipgloss.Width(left)-12)) + " · x ")
-			gap = width - lipgloss.Width(left) - lipgloss.Width(errSeg)
+		if width-statusWidth(left)-statusWidth(errSeg) < 1 {
+			errSeg = m.theme.StatusError.Render(" ! " + truncate(m.err, max(10, width-statusWidth(left)-12)) + " · x ")
 		}
-		filler := m.theme.Status.Render(strings.Repeat(" ", max(1, gap)))
-		return m.theme.Status.Width(width).Render(left + filler + errSeg)
+		if width-statusWidth(left)-statusWidth(errSeg) < 1 {
+			left = brand + renderTabs(true)
+		}
+		return finalize(left, errSeg)
 	}
 
 	segments := make([]string, 0, 5)
@@ -483,19 +837,21 @@ func (m Model) renderStatus(width int) string {
 	rightSep := m.theme.StatusSeparator.Render(" ")
 	right := strings.Join(segments, rightSep)
 
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
+	// When the row is too tight, shrink the right segments first, then fall
+	// back to compact tabs. finalize still truncates as a last resort.
+	if width-statusWidth(left)-statusWidth(right) < 1 {
 		minSegments := []string{}
 		if liveCount > 0 {
 			minSegments = append(minSegments, m.theme.StatusAccent.Render(" "+liveLabel+" "))
 		}
 		minSegments = append(minSegments, m.theme.StatusSegment.Render("? q"))
 		right = strings.Join(minSegments, rightSep)
-		gap = width - lipgloss.Width(left) - lipgloss.Width(right)
+	}
+	if width-statusWidth(left)-statusWidth(right) < 1 {
+		left = brand + renderTabs(true)
 	}
 
-	filler := m.theme.Status.Render(strings.Repeat(" ", max(1, gap)))
-	return m.theme.Status.Width(width).Render(left + filler + right)
+	return finalize(left, right)
 }
 
 func (m Model) renderModal(width int) string {
@@ -609,7 +965,10 @@ func (m Model) renderHelp(width, height int) string {
 			{"s", "toggle star"},
 			{"c", "compose"},
 			{"R", "reply"},
+			{"A", "reply all"},
 			{"f", "forward"},
+			{"l", "toggle label"},
+			{"u", "mark read / unread"},
 			{"e", "archive"},
 			{"#", "trash"},
 		}},
@@ -978,6 +1337,11 @@ func (m *Model) mailDetail() string {
 			lines = append(lines, line)
 		}
 	}
+	// Wrap header + body to the viewport width *before* the attachment
+	// section, so countDisplayLines below (and the attachment line map) is
+	// measured against the final, wrapped line count.
+	width := m.detailTextWidth()
+	lines = wrapDetailLines(lines, width)
 	if attLines, ranges := m.renderAttachmentsTracked(thread.Attachments); len(attLines) > 0 {
 		lines = append(lines, "", m.subtle("Attachments"))
 		base := countDisplayLines(lines)
@@ -988,10 +1352,12 @@ func (m *Model) mailDetail() string {
 		}
 		lines = append(lines, attLines...)
 	}
+	tail := []string{}
 	if thread.QuotedLines > 0 {
-		lines = append(lines, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
+		tail = append(tail, "", m.subtle(fmt.Sprintf("[+ %d lines quoted]", thread.QuotedLines)))
 	}
-	lines = append(lines, "", m.subtle("R reply · f forward · e archive · # trash · s star · u read/unread"))
+	tail = append(tail, "", m.subtle("R reply · A reply-all · f forward · l label · e archive · # trash · s star · u read/unread"))
+	lines = append(lines, wrapDetailLines(tail, width)...)
 	return displayText(strings.Join(lines, "\n"))
 }
 
@@ -1013,7 +1379,7 @@ func (m Model) calendarDetail() string {
 		"",
 		m.subtle("[Y]es  [N]o  [M]aybe · c new · E edit · d delete · > move · ]/[ calendar"),
 	}
-	return displayText(strings.Join(lines, "\n"))
+	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
 func (m Model) meetDetail() string {
@@ -1069,7 +1435,7 @@ func (m Model) meetDetail() string {
 		"",
 		m.subtle("[J]oin  [C]opy link  [E]nd  n new space"),
 	)
-	return displayText(strings.Join(lines, "\n"))
+	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
 func (m Model) taskDetail() string {
@@ -1095,7 +1461,7 @@ func (m Model) taskDetail() string {
 		"",
 		m.subtle("[/] switch task list · m load more"),
 	}
-	return displayText(strings.Join(lines, "\n"))
+	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
 func (m Model) driveDetail() string {
@@ -1113,7 +1479,7 @@ func (m Model) driveDetail() string {
 		"",
 		m.subtle("y yank metadata · / search · m load more"),
 	}
-	return displayText(strings.Join(lines, "\n"))
+	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
 func (m Model) docsDetail() string {
@@ -1138,7 +1504,7 @@ func (m Model) docsDetail() string {
 		"",
 		m.subtle("y yank text · / search · m load more"),
 	}
-	return displayText(strings.Join(lines, "\n"))
+	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
 func (m Model) paneHints() string {
@@ -1181,7 +1547,7 @@ func (m Model) actionTitle() string {
 		}
 		base = "message · Enter send · Shift+Enter newline"
 	case FeatureMail:
-		base = "quick reply · c compose · R reply · u read/unread"
+		base = "quick reply · c compose · R reply · A reply-all · l label · u read/unread"
 	case FeatureCalendar:
 		base = "quick add · Enter create"
 	case FeatureMeet:
@@ -1366,6 +1732,58 @@ func fitLines(lines []string, width, height int) string {
 		lines[i] = truncate(line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// narrowCond and wideCond measure string width with East Asian "ambiguous"
+// glyphs (·, arrows, …) counted as one and two cells respectively. The
+// EastAsianWidth field is pinned explicitly so the result does not depend on
+// the host locale that runewidth.NewCondition would otherwise inherit.
+var (
+	narrowCond = newAmbiguousCond(false)
+	wideCond   = newAmbiguousCond(true)
+)
+
+func newAmbiguousCond(eastAsian bool) *runewidth.Condition {
+	c := runewidth.NewCondition()
+	c.EastAsianWidth = eastAsian
+	return c
+}
+
+// ambiguousDrift is how many extra columns s occupies on a terminal that
+// renders East Asian "ambiguous" glyphs two cells wide. lipgloss and
+// ansi.Wrap count those glyphs as one cell, so wrapping has to budget for
+// this drift or the wrapped line still overflows the viewport and clips.
+func ambiguousDrift(s string) int {
+	plain := ansi.Strip(s)
+	return wideCond.StringWidth(plain) - narrowCond.StringWidth(plain)
+}
+
+// wrapDetailLines folds each line to width display cells so long detail
+// content (mail bodies, action hints, URLs) wraps onto extra rows instead of
+// being clipped at the viewport's right edge. Blank lines are kept as-is so
+// the vertical spacing of the detail panes is preserved.
+func wrapDetailLines(lines []string, width int) []string {
+	if width <= 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			out = append(out, line)
+			continue
+		}
+		// Shrink the wrap target by the ambiguous-width drift: on a
+		// terminal that draws ·/arrows two cells wide a line ansi.Wrap
+		// thinks fits would still spill past the viewport edge and clip.
+		target := max(1, width-ambiguousDrift(line))
+		wrapped := wrapAnsi(line, target)
+		if len(wrapped) == 0 {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, wrapped...)
+	}
+	return out
 }
 
 func centerText(value string, width int) string {

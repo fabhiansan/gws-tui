@@ -119,6 +119,11 @@ type SetMailUnreadParams struct {
 	Unread   bool   `json:"unread"`
 }
 
+type ToggleMailLabelParams struct {
+	ThreadID string `json:"thread_id"`
+	LabelID  string `json:"label_id"`
+}
+
 type CalendarEventsParams struct {
 	Query CalendarQuery `json:"query"`
 }
@@ -199,6 +204,8 @@ type DaemonStatus struct {
 	PID             int          `json:"pid"`
 	SocketPath      string       `json:"socket_path"`
 	UptimeSeconds   int64        `json:"uptime_seconds"`
+	SnapshotLoaded  bool         `json:"snapshot_loaded"`
+	SnapshotHasData bool         `json:"snapshot_has_data"`
 	Clients         []ClientInfo `json:"clients"`
 }
 

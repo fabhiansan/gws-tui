@@ -173,15 +173,18 @@ func runDaemonLogs(cfg tui.Config, stdout, stderr io.Writer) int {
 
 func daemonOptions(cfg tui.Config) daemonpkg.Options {
 	return daemonpkg.Options{
-		SocketPath:         cfg.DaemonSocket,
-		CachePath:          cfg.CachePath,
-		DraftDir:           cfg.DraftDir,
-		ImageCacheDir:      cfg.ImageCacheDir,
-		NotifyDesktop:      cfg.NotifyDesktop,
-		NotifySound:        cfg.NotifySound,
-		NotifySoundFile:    cfg.NotifySoundFile,
-		AutoSubscribeChats: cfg.DaemonAutoSubscribe,
-		AutoSubscribeMax:   cfg.DaemonAutoSubscribeMax,
+		SocketPath:             cfg.DaemonSocket,
+		CachePath:              cfg.CachePath,
+		DraftDir:               cfg.DraftDir,
+		ImageCacheDir:          cfg.ImageCacheDir,
+		NotifyDesktop:          cfg.NotifyDesktop,
+		NotifySound:            cfg.NotifySound,
+		NotifySoundFile:        cfg.NotifySoundFile,
+		AutoSubscribeChats:     cfg.DaemonAutoSubscribe,
+		AutoSubscribeMax:       cfg.DaemonAutoSubscribeMax,
+		ChatEvents:             cfg.ChatEvents,
+		ChatEventsProject:      cfg.ChatEventsProject,
+		ChatEventsSubscription: cfg.ChatEventsSubscription,
 	}
 }
 
@@ -203,7 +206,7 @@ func connectDaemonClient(cfg tui.Config) (*api.RemoteClient, *api.WorkspaceSnaps
 		if startErr := daemonpkg.StartDetached(cfg.DaemonLog, "daemon", "start"); startErr != nil {
 			return nil, nil, startErr
 		}
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(12 * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(150 * time.Millisecond)
 			client, err = api.NewRemoteClient(cfg.DaemonSocket)
@@ -215,10 +218,25 @@ func connectDaemonClient(cfg tui.Config) (*api.RemoteClient, *api.WorkspaceSnaps
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = client.ClientHello(ctx, os.Getpid(), os.Getenv("TTY"))
-	snapshot, err := client.Snapshot(ctx)
+	status, err := client.DaemonStatus(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	if status.ProtocolVersion != api.ProtocolVersion {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("daemon protocol version %d is incompatible with client protocol version %d; restart the daemon", status.ProtocolVersion, api.ProtocolVersion)
+	}
+	if !status.SnapshotHasData {
+		snapshot := api.NewWorkspaceSnapshot()
+		return client, &snapshot, nil
+	}
+	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer snapshotCancel()
+	snapshot, err := client.Snapshot(snapshotCtx)
 	if err != nil {
 		_ = client.Close()
 		return nil, nil, err

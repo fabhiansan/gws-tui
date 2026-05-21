@@ -22,6 +22,9 @@ type Config struct {
 	DaemonPIDFile          string
 	DaemonAutoSubscribe    bool
 	DaemonAutoSubscribeMax int
+	ChatEvents             bool
+	ChatEventsProject      string
+	ChatEventsSubscription string
 	NotifyDesktop          bool
 	NotifySound            bool
 	NotifySoundFile        string
@@ -50,6 +53,7 @@ func LoadConfig() (Config, error) {
 		DaemonPIDFile:          defaultDaemonPIDFile(cacheBase),
 		DaemonAutoSubscribe:    true,
 		DaemonAutoSubscribeMax: 20,
+		ChatEvents:             true,
 		NotifyDesktop:          true,
 		NotifySound:            true,
 		NotifySoundFile:        "/System/Library/Sounds/Glass.aiff",
@@ -109,6 +113,12 @@ func LoadConfig() (Config, error) {
 			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
 				cfg.DaemonAutoSubscribeMax = n
 			}
+		case "chat_events", "daemon_chat_events":
+			cfg.ChatEvents = parseBool(value)
+		case "chat_events_project":
+			cfg.ChatEventsProject = value
+		case "chat_events_subscription":
+			cfg.ChatEventsSubscription = value
 		case "notify_desktop":
 			cfg.NotifyDesktop = parseBool(value)
 		case "notify_sound":

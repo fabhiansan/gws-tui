@@ -32,6 +32,12 @@ type Options struct {
 	NotifySoundFile    string
 	AutoSubscribeChats bool
 	AutoSubscribeMax   int
+	// ChatEvents enables real-time chat delivery via the Workspace Events API
+	// when the account has a usable Google Cloud project. ChatEventsProject
+	// and ChatEventsSubscription override auto-detection.
+	ChatEvents             bool
+	ChatEventsProject      string
+	ChatEventsSubscription string
 }
 
 type Server struct {
@@ -187,8 +193,27 @@ func (s *Server) bootstrap() {
 		}
 	}
 	s.seedReadMarkers()
+	s.configureChatEvents()
 	s.restorePinnedSubscriptions()
 	s.autoSubscribeTopSpaces()
+}
+
+// configureChatEvents resolves the chat delivery strategy (real-time Workspace
+// Events stream vs. per-space polling) before any chat loop is opened, so the
+// loops attach to whichever transport ends up active. The probe and project
+// lookup happen here, off the request path.
+func (s *Server) configureChatEvents() {
+	configurer, ok := s.client.(api.ChatEventConfigurer)
+	if !ok {
+		return
+	}
+	configurer.ConfigureChatEvents(api.ChatEventOptions{
+		Disabled:     !s.opts.ChatEvents,
+		Project:      s.opts.ChatEventsProject,
+		Subscription: s.opts.ChatEventsSubscription,
+	})
+	mode := configurer.PrepareChatEvents()
+	fmt.Fprintf(os.Stderr, "gws daemon: chat delivery mode: %s\n", mode)
 }
 
 // seedReadMarkers initializes LastReadBySpace from the latest message in each
@@ -513,11 +538,17 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 		person, err := s.client.PeopleGet(ctx, p.UserID)
 		if err == nil && person.UserID != "" {
 			s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+				userID := normalizeUserKey(person.UserID)
 				if person.DisplayName != "" {
-					snapshot.UserLabels[person.UserID] = person.DisplayName
+					snapshot.UserLabels[userID] = person.DisplayName
 				}
-				if person.UserID == "me" {
-					snapshot.SelfUserIDs[person.UserID] = true
+				if p.UserID == "me" || person.UserID == "me" {
+					if userID != "" {
+						snapshot.SelfUserIDs[userID] = true
+					}
+					if email := normalizeUserKey(person.Email); email != "" {
+						snapshot.SelfUserIDs[email] = true
+					}
 				}
 			})
 		}
@@ -628,6 +659,17 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			return nil, err
 		}
 		thread, err := s.client.SetMailUnread(ctx, p.ThreadID, p.Unread)
+		if err == nil {
+			s.applyMailThread(thread)
+			s.broadcast("mail.changed", thread)
+		}
+		return thread, err
+	case "ToggleMailLabel":
+		var p api.ToggleMailLabelParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		thread, err := s.client.ToggleMailLabel(ctx, p.ThreadID, p.LabelID)
 		if err == nil {
 			s.applyMailThread(thread)
 			s.broadcast("mail.changed", thread)
@@ -869,12 +911,10 @@ func (s *Server) spaceHasUnreadLocked(spaceName string) bool {
 		return false
 	}
 	lastRead := s.snapshot.LastReadBySpace[spaceName]
+	self := api.InferSelfUserIDs(s.snapshot.Spaces, s.snapshot.MembersBySpace, s.snapshot.SelfUserIDs)
 	for i := len(page.Items) - 1; i >= 0; i-- {
 		msg := page.Items[i]
-		// SenderID arrives as "users/<id>" but SelfUserIDs is keyed by the
-		// bare numeric id, so strip the resource prefix before the lookup.
-		bareID := api.UserIDFromName(msg.SenderID)
-		if bareID != "" && s.snapshot.SelfUserIDs[bareID] {
+		if isSelfUserID(msg.SenderID, self) {
 			continue
 		}
 		if msg.CreateTime.After(lastRead) {
@@ -1007,12 +1047,155 @@ func (s *Server) notifyTitleForSpace(spaceName string) string {
 		if space.Name != spaceName {
 			continue
 		}
-		if title := space.Title(); title != "" {
+		self := api.InferSelfUserIDs(s.snapshot.Spaces, s.snapshot.MembersBySpace, s.snapshot.SelfUserIDs)
+		if title := notificationSpaceLabel(space, s.snapshot.MembersBySpace[spaceName], s.snapshot.UserLabels, self); title != "" {
 			return "gws chat · " + title
 		}
 		break
 	}
 	return "gws chat"
+}
+
+func notificationSpaceLabel(space api.Space, members []api.SpaceMember, labels map[string]string, self map[string]bool) string {
+	if space.UsesMemberLabels() && len(members) > 0 {
+		parts := make([]string, 0, len(members))
+		for _, member := range members {
+			if member.Type != "" && member.Type != "HUMAN" {
+				continue
+			}
+			if isSelfUserID(member.UserID, self) {
+				continue
+			}
+			label := labelForMember(member, labels)
+			if label != "" {
+				parts = append(parts, label)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, ", ")
+		}
+	}
+	if space.UsesMemberLabels() {
+		if title := stripSelfFromSpaceTitle(space.DisplayName, labels, self); title != "" {
+			return title
+		}
+		if title := stripSelfFromSpaceTitle(space.FormattedName, labels, self); title != "" {
+			return title
+		}
+	}
+	return space.Title()
+}
+
+func labelForMember(member api.SpaceMember, labels map[string]string) string {
+	key := normalizeUserKey(member.UserID)
+	if key != "" {
+		if label := labels[key]; label != "" && label != key {
+			return label
+		}
+	}
+	if member.DisplayName != "" && !strings.HasPrefix(member.DisplayName, "users/") {
+		return member.DisplayName
+	}
+	return labelForUser(member.UserID, labels)
+}
+
+func labelForUser(userID string, labels map[string]string) string {
+	key := normalizeUserKey(userID)
+	if key == "" {
+		return ""
+	}
+	if label := labels[key]; label != "" {
+		return label
+	}
+	if label := labels["users/"+key]; label != "" {
+		return label
+	}
+	return key
+}
+
+func normalizeUserKey(value string) string {
+	return api.NormalizeUserID(value)
+}
+
+func isSelfUserID(value string, self map[string]bool) bool {
+	key := normalizeUserKey(value)
+	if key == "" {
+		return false
+	}
+	if key == "me" {
+		return true
+	}
+	return self[key]
+}
+
+func (s *Server) isSelfChatMessage(msg api.ChatMessage) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	self := api.InferSelfUserIDs(s.snapshot.Spaces, s.snapshot.MembersBySpace, s.snapshot.SelfUserIDs)
+	return isSelfUserID(msg.SenderID, self)
+}
+
+func stripSelfFromSpaceTitle(value string, labels map[string]string, self map[string]bool) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := splitSpaceTitleParts(value)
+	if len(parts) <= 1 {
+		if isSelfSpaceLabel(value, labels, self) {
+			return ""
+		}
+		return value
+	}
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || isSelfSpaceLabel(part, labels, self) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, ", ")
+}
+
+func splitSpaceTitleParts(value string) []string {
+	raw := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ',', ';', '|', '\n', '\r', '·', '•':
+			return true
+		default:
+			return false
+		}
+	})
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func isSelfSpaceLabel(value string, labels map[string]string, self map[string]bool) bool {
+	needle := normalizeSpaceLabel(value)
+	if needle == "" {
+		return false
+	}
+	for userID := range self {
+		if normalizeSpaceLabel(userID) == needle {
+			return true
+		}
+		if label := labels[userID]; normalizeSpaceLabel(label) == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSpaceLabel(value string) string {
+	value = strings.TrimSpace(api.UserIDFromName(value))
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.ToLower(value)
 }
 
 func (s *Server) markChatRead(spaceName string) error {
@@ -1235,7 +1418,7 @@ func (s *Server) handleChatMessage(msg api.ChatMessage, fireNotify bool) {
 		snapshot.ChatMessagesBySpace[msg.Space] = page
 	})
 	s.cacheAttachments([]api.ChatMessage{msg})
-	if fireNotify {
+	if fireNotify && !s.isSelfChatMessage(msg) {
 		title := s.notifyTitleForSpace(msg.Space)
 		body := strings.TrimSpace(msg.SenderName + ": " + msg.Text)
 		notify.Send(title, body, notify.Options{
@@ -1343,6 +1526,8 @@ func (session *Session) wants(topic string, payload any) bool {
 func (s *Server) status() api.DaemonStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	snapshotLoaded := s.snapshotLoaded
+	snapshotHasData := s.snapshot.HasData()
 	clients := make([]api.ClientInfo, 0, len(s.sessions))
 	for session := range s.sessions {
 		session.mu.Lock()
@@ -1368,6 +1553,8 @@ func (s *Server) status() api.DaemonStatus {
 		PID:             os.Getpid(),
 		SocketPath:      s.opts.SocketPath,
 		UptimeSeconds:   int64(time.Since(s.startedAt).Seconds()),
+		SnapshotLoaded:  snapshotLoaded,
+		SnapshotHasData: snapshotHasData,
 		Clients:         clients,
 	}
 }
