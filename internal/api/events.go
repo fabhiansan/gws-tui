@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -105,57 +106,116 @@ func (c *CommandClient) resolveChatHub() *chatEventHub {
 		chatEventsLogf("no Google Cloud project detected — polling each space every 5s")
 		return nil
 	}
-	if err := c.probeChatEvents(project, subscription); err != nil {
+	if err := c.probeChatEvents(); err != nil {
 		chatEventsLogf("real-time probe failed (%v) — polling each space every 5s", err)
 		chatEventsLogf("enable the Pub/Sub and Workspace Events APIs on your project for instant chat")
 		return nil
 	}
 	c.chatEventHub = newChatEventHub(c, project, subscription)
 	if subscription != "" {
-		chatEventsLogf("real-time delivery enabled via subscription %s", subscription)
+		chatEventsLogf("real-time delivery starting via subscription %s", subscription)
 	} else {
-		chatEventsLogf("real-time delivery enabled via project %s", project)
+		chatEventsLogf("real-time delivery starting via project %s", project)
 	}
 	return c.chatEventHub
 }
 
-// probeChatEvents verifies the events pipeline really works before the daemon
-// commits to it: it runs a single `+subscribe --once` pull, which provisions
-// the Pub/Sub plumbing and surfaces auth/API errors. --no-ack leaves any
-// pending message for the real stream to redeliver.
-func (c *CommandClient) probeChatEvents(project, subscription string) error {
-	if c.path == "" {
-		return errors.New("gws path is empty")
-	}
-	ctx, cancel := context.WithTimeout(c.closeCtx, 45*time.Second)
-	defer cancel()
-	args := chatEventSubscribeArgs(project, subscription, "--once", "--no-ack")
-	cmd := exec.CommandContext(ctx, c.path, args...)
-	cmd.Stdout = io.Discard
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if msg := firstLine(stderr.String()); msg != "" {
-			return fmt.Errorf("%s", msg)
-		}
-		return err
-	}
-	return nil
+// chatEventSubscription is one Workspace Events subscription as reported by
+// `gws events subscriptions list`.
+type chatEventSubscription struct {
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	ExpireTime string `json:"expireTime"`
 }
 
-func chatEventSubscribeArgs(project, subscription string, extra ...string) []string {
+// chatSubscriptionsList returns the caller's Workspace Events subscriptions for
+// new Chat messages. It is read-only — it neither creates nor deletes anything —
+// so it is safe both as a reachability probe and as a live health check.
+func (c *CommandClient) chatSubscriptionsList(ctx context.Context) ([]chatEventSubscription, error) {
+	if c.path == "" {
+		return nil, errors.New("gws path is empty")
+	}
+	filter := fmt.Sprintf(`{"filter":"event_types:\"%s\""}`, chatEventTypeCreated)
+	var resp struct {
+		Subscriptions []chatEventSubscription `json:"subscriptions"`
+	}
+	if err := c.runJSON(ctx, &resp, "events", "subscriptions", "list",
+		"--params", filter, "--format", "json"); err != nil {
+		return nil, err
+	}
+	return resp.Subscriptions, nil
+}
+
+// deleteChatEventSubscriptions removes every Workspace Events subscription for
+// new Chat messages. runStream calls this before each `+subscribe` so the
+// helper always provisions a fresh subscription bound to the fresh Pub/Sub
+// topic it is about to create. `+subscribe --cleanup` deletes the topic but not
+// the Workspace Events subscription, and that subscription has a deterministic
+// name — so a stale one left by an earlier run would be silently reused while
+// still pointing at the deleted topic, and chat events would be published where
+// nothing reads them: a phantom real-time stream.
+func (c *CommandClient) deleteChatEventSubscriptions(ctx context.Context) {
+	subs, err := c.chatSubscriptionsList(ctx)
+	if err != nil {
+		return
+	}
+	for _, sub := range subs {
+		if sub.Name == "" {
+			continue
+		}
+		params := fmt.Sprintf(`{"name":"%s"}`, sub.Name)
+		_ = c.runVoid(ctx, "events", "subscriptions", "delete", "--params", params)
+	}
+}
+
+// probeChatEvents decides whether the daemon should attempt real-time delivery.
+// It is a read-only reachability check: listing Workspace Events subscriptions
+// exercises the Workspace Events API and the stored credentials without
+// creating or destroying anything. A non-error response — an empty list
+// included — means the API is usable, so the daemon builds the hub and lets
+// runStream do the real provisioning; an error (API disabled, broken auth)
+// means real-time delivery is unavailable and the caller falls back to polling.
+//
+// The check cannot prove provisioning succeeds end to end — a missing Pub/Sub
+// publisher grant only surfaces when the Workspace Events subscription is
+// created — so the hub's maintain loop verifies the live subscription and
+// reports an honest status instead of a phantom stream.
+func (c *CommandClient) probeChatEvents() error {
+	ctx, cancel := context.WithTimeout(c.closeCtx, 20*time.Second)
+	defer cancel()
+	_, err := c.chatSubscriptionsList(ctx)
+	return err
+}
+
+// chatEventSubscribeArgs builds the `gws events +subscribe` invocation for the
+// real-time stream. --cleanup makes the helper delete the Pub/Sub topic and
+// subscription it provisions when the process exits, so a reconnect or restart
+// never leaks a fresh pair. --cleanup does not cover the Workspace Events
+// subscription; runStream clears that explicitly via deleteChatEventSubscriptions
+// before each run.
+func chatEventSubscribeArgs(project, subscription string) []string {
 	args := []string{
 		"events", "+subscribe",
 		"--target", chatEventsTargetAll,
 		"--event-types", chatEventTypeCreated,
 		"--format", "json",
+		"--cleanup",
 	}
 	if subscription != "" {
 		args = append(args, "--subscription", subscription)
 	} else {
 		args = append(args, "--project", project)
 	}
-	return append(args, extra...)
+	return args
+}
+
+// terminateGracefully makes a context-cancelled command receive SIGTERM
+// instead of an immediate SIGKILL, so the upstream gws can run its --cleanup
+// handler and delete the Pub/Sub resources it provisioned before exiting. If
+// the process ignores SIGTERM it is force-killed after the grace period.
+func terminateGracefully(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 10 * time.Second
 }
 
 // chatEventHub fans a single Workspace Events stream out to per-space
@@ -171,6 +231,11 @@ type chatEventHub struct {
 	count       int
 	procCancel  context.CancelFunc
 	seen        map[string]time.Time
+	// healthy reports whether the live Workspace Events subscription is
+	// actually delivering; healthKnown guards the first observation so the
+	// initial state is logged exactly once.
+	healthy     bool
+	healthKnown bool
 }
 
 func newChatEventHub(c *CommandClient, project, subscription string) *chatEventHub {
@@ -231,7 +296,7 @@ func (h *chatEventHub) startLocked() {
 	ctx, cancel := context.WithCancel(h.client.closeCtx)
 	h.procCancel = cancel
 	go h.streamLoop(ctx)
-	go h.renewLoop(ctx)
+	go h.maintainLoop(ctx)
 }
 
 func (h *chatEventHub) streamLoop(ctx context.Context) {
@@ -268,7 +333,12 @@ func (h *chatEventHub) streamLoop(ctx context.Context) {
 }
 
 func (h *chatEventHub) runStream(ctx context.Context) error {
+	// Clear any Workspace Events subscription left by an earlier run so
+	// +subscribe provisions a fresh one bound to the topic it is about to
+	// create — see deleteChatEventSubscriptions for why a stale one is fatal.
+	h.client.deleteChatEventSubscriptions(ctx)
 	cmd := exec.CommandContext(ctx, h.client.path, chatEventSubscribeArgs(h.project, h.subscription)...)
+	terminateGracefully(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -319,37 +389,90 @@ func (h *chatEventHub) dispatch(msg ChatMessage) {
 	}
 }
 
-// renewLoop keeps the Workspace Events subscription alive. A subscription that
-// carries full message data expires within hours, so renew well ahead of time:
-// a 30-minute tick with a 2-hour window stays comfortably ahead of expiry even
-// for the shortest-lived subscription kinds.
-func (h *chatEventHub) renewLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Minute)
+// maintainLoop keeps the daemon honest about real-time delivery and keeps the
+// Workspace Events subscription alive. Every minute it inspects the live
+// subscription: it updates the reported health (logged only on a change) and
+// renews the subscription once it is within two hours of expiry. The hub is
+// never torn down here — streamLoop reconnects on its own; this loop only
+// observes and renews, so a transient outage self-heals without a daemon
+// restart.
+func (h *chatEventHub) maintainLoop(ctx context.Context) {
+	// Give the first +subscribe room to provision before the first check, so a
+	// healthy startup is not briefly reported as "not delivering".
+	if !sleepCtx(ctx, 30*time.Second) {
+		return
+	}
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
+		h.maintainOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.renewOnce(ctx)
 		}
 	}
 }
 
-func (h *chatEventHub) renewOnce(ctx context.Context) {
-	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func (h *chatEventHub) maintainOnce(ctx context.Context) {
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(rctx, h.client.path,
-		"events", "+renew", "--all", "--within", "2h", "--format", "json")
-	out, err := cmd.CombinedOutput()
+	subs, err := h.client.chatSubscriptionsList(lctx)
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		chatEventsLogf("subscription renewal failed: %v: %s", err, firstLine(string(out)))
+		// A transient list failure is not proof the stream is down; keep the
+		// last known health rather than flapping it.
 		return
 	}
-	chatEventsLogf("subscriptions renewed")
+	var active *chatEventSubscription
+	for i := range subs {
+		if subs[i].State == "ACTIVE" {
+			active = &subs[i]
+			break
+		}
+	}
+	h.setHealthy(active != nil)
+	if active != nil && expiringSoon(active.ExpireTime) {
+		h.renew(lctx, active.Name)
+	}
+}
+
+// expiringSoon reports whether a subscription's expireTime is unset,
+// unparseable, or within two hours — all cases where it should be renewed now.
+func expiringSoon(expireTime string) bool {
+	exp, err := time.Parse(time.RFC3339, expireTime)
+	if err != nil {
+		return true
+	}
+	return time.Until(exp) < 2*time.Hour
+}
+
+// setHealthy records whether the stream is delivering and logs only on a
+// change, so the daemon log states the truth without spamming it.
+func (h *chatEventHub) setHealthy(healthy bool) {
+	h.mu.Lock()
+	changed := !h.healthKnown || h.healthy != healthy
+	h.healthy = healthy
+	h.healthKnown = true
+	h.mu.Unlock()
+	if !changed {
+		return
+	}
+	if healthy {
+		chatEventsLogf("real-time stream connected — delivering chat events")
+	} else {
+		chatEventsLogf("real-time stream not delivering yet — provisioning or reconnecting")
+	}
+}
+
+func (h *chatEventHub) renew(ctx context.Context, name string) {
+	if name == "" {
+		return
+	}
+	cmd := exec.CommandContext(ctx, h.client.path,
+		"events", "+renew", "--name", name, "--format", "json")
+	if out, err := cmd.CombinedOutput(); err != nil && ctx.Err() == nil {
+		chatEventsLogf("subscription renewal failed: %v: %s", err, upstreamErrorLine(string(out)))
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

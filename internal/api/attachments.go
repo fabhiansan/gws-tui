@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"html"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -10,7 +11,11 @@ import (
 	"strings"
 )
 
-var imageURLPattern = regexp.MustCompile(`https?://[^\s<>"']+`)
+var (
+	imageURLPattern     = regexp.MustCompile(`https?://[^\s<>"']+`)
+	htmlImageTagPattern = regexp.MustCompile(`(?is)<(?:img|source)\b[^>]*>`)
+	htmlAttrPattern     = regexp.MustCompile(`(?is)\b([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+))`)
+)
 
 func (a Attachment) DisplayName() string {
 	if a.Name != "" {
@@ -100,16 +105,47 @@ func ImageAttachmentsFromText(text string) []Attachment {
 	seen := map[string]bool{}
 	attachments := make([]Attachment, 0, len(matches))
 	for _, match := range matches {
-		raw := trimURLPunctuation(match)
-		if seen[raw] || !isHTTPURL(raw) || !isImageSource(raw) {
+		attachment, ok := imageAttachmentFromSource(match, true)
+		if !ok {
+			continue
+		}
+		raw := attachment.PreviewSource()
+		if seen[raw] {
 			continue
 		}
 		seen[raw] = true
-		attachments = append(attachments, normalizeAttachment(Attachment{
-			Name:        sourceBase(raw),
-			ContentType: contentTypeFromSource(raw),
-			URL:         raw,
-		}))
+		attachments = append(attachments, attachment)
+	}
+	return attachments
+}
+
+func ImageAttachmentsFromHTML(markup string) []Attachment {
+	tags := htmlImageTagPattern.FindAllString(markup, -1)
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	attachments := make([]Attachment, 0, len(tags))
+	add := func(raw string) {
+		attachment, ok := imageAttachmentFromSource(raw, false)
+		if !ok {
+			return
+		}
+		source := attachment.PreviewSource()
+		if seen[source] {
+			return
+		}
+		seen[source] = true
+		attachments = append(attachments, attachment)
+	}
+	for _, tag := range tags {
+		attrs := htmlAttrs(tag)
+		for _, name := range []string{"src", "data-src", "data-original", "data-lazy-src"} {
+			add(attrs[name])
+		}
+		for _, name := range []string{"srcset", "data-srcset"} {
+			add(firstSrcsetURL(attrs[name]))
+		}
 	}
 	return attachments
 }
@@ -148,6 +184,70 @@ func normalizeAttachment(attachment Attachment) Attachment {
 		attachment.ContentType = contentTypeFromSource(attachment.PreviewSource())
 	}
 	return attachment
+}
+
+func imageAttachmentFromSource(raw string, requireImageSource bool) (Attachment, bool) {
+	raw = trimURLPunctuation(html.UnescapeString(strings.TrimSpace(raw)))
+	if raw == "" {
+		return Attachment{}, false
+	}
+	if strings.HasPrefix(raw, "//") {
+		raw = "https:" + raw
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "cid:") || strings.HasPrefix(lower, "data:") {
+		return Attachment{}, false
+	}
+	if !isHTTPURL(raw) {
+		return Attachment{}, false
+	}
+	if requireImageSource && !isImageSource(raw) {
+		return Attachment{}, false
+	}
+	contentType := contentTypeFromSource(raw)
+	if contentType == "" && !requireImageSource {
+		contentType = "image/unknown"
+	}
+	name := sourceBase(raw)
+	if name == "" {
+		name = "image"
+	}
+	return normalizeAttachment(Attachment{
+		Name:        name,
+		ContentType: contentType,
+		URL:         raw,
+	}), true
+}
+
+func htmlAttrs(tag string) map[string]string {
+	attrs := map[string]string{}
+	for _, match := range htmlAttrPattern.FindAllStringSubmatch(tag, -1) {
+		if len(match) < 5 {
+			continue
+		}
+		name := strings.ToLower(match[1])
+		value := ""
+		for _, candidate := range match[2:] {
+			if candidate != "" {
+				value = candidate
+				break
+			}
+		}
+		if value != "" {
+			attrs[name] = value
+		}
+	}
+	return attrs
+}
+
+func firstSrcsetURL(srcset string) string {
+	for _, candidate := range strings.Split(srcset, ",") {
+		fields := strings.Fields(strings.TrimSpace(candidate))
+		if len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	return ""
 }
 
 func isHTTPURL(raw string) bool {

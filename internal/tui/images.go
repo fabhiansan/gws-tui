@@ -53,6 +53,7 @@ func (m *Model) imageDownloadCmdsForWorkspace() []tea.Cmd {
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
 	cmds = append(cmds, m.imageDownloadCmdsForMail(m.mailThreads)...)
+	cmds = append(cmds, m.imageDownloadCmdsForDoc(m.doc)...)
 	return cmds
 }
 
@@ -72,6 +73,10 @@ func (m *Model) imageDownloadCmdsForMail(threads []api.MailThread) []tea.Cmd {
 	return m.imageDownloadCmdsForAttachments(attachments)
 }
 
+func (m *Model) imageDownloadCmdsForDoc(doc api.DocDocument) []tea.Cmd {
+	return m.imageDownloadCmdsForAttachmentsMode(doc.Attachments, true)
+}
+
 func (m *Model) imageDownloadCmdsForCurrentDetail() []tea.Cmd {
 	switch m.feature {
 	case FeatureChat:
@@ -82,12 +87,18 @@ func (m *Model) imageDownloadCmdsForCurrentDetail() []tea.Cmd {
 			return nil
 		}
 		return m.imageDownloadCmdsForMail([]api.MailThread{thread})
+	case FeatureDocs:
+		return m.imageDownloadCmdsForDoc(m.doc)
 	default:
 		return nil
 	}
 }
 
 func (m *Model) imageDownloadCmdsForAttachments(attachments []api.Attachment) []tea.Cmd {
+	return m.imageDownloadCmdsForAttachmentsMode(attachments, false)
+}
+
+func (m *Model) imageDownloadCmdsForAttachmentsMode(attachments []api.Attachment, forceLocal bool) []tea.Cmd {
 	if !m.cfg.InlineImages || m.cfg.ImageCacheDir == "" {
 		return nil
 	}
@@ -145,7 +156,7 @@ func (m *Model) imageDownloadCmdsForAttachments(attachments []api.Attachment) []
 		m.imageLoading[source] = true
 		delete(m.imageErrors, source)
 		m.imageVersion++
-		if m.cfg.Daemon {
+		if m.cfg.Daemon && !forceLocal {
 			// Daemon owns the download; we just wait for image.cached.
 			continue
 		}
@@ -384,6 +395,10 @@ func (m *Model) precomputeFrameCmdsForMail(threads []api.MailThread) []tea.Cmd {
 	return m.precomputeFrameCmdsForAttachments(attachments)
 }
 
+func (m *Model) precomputeFrameCmdsForDoc(doc api.DocDocument) []tea.Cmd {
+	return m.precomputeFrameCmdsForAttachments(doc.Attachments)
+}
+
 // precomputeFrameCmdsForCurrentDetail picks up the attachments currently
 // visible in the detail pane and queues precompute for them. Called after
 // events that introduce new image paths (download finished, frame ready,
@@ -398,6 +413,8 @@ func (m *Model) precomputeFrameCmdsForCurrentDetail() []tea.Cmd {
 			return nil
 		}
 		return m.precomputeFrameCmdsForMail([]api.MailThread{thread})
+	case FeatureDocs:
+		return m.precomputeFrameCmdsForDoc(m.doc)
 	default:
 		return nil
 	}

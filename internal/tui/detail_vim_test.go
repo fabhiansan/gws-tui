@@ -248,6 +248,45 @@ func TestDecorateDetailMarksCursorLine(t *testing.T) {
 	}
 }
 
+// TestRenderCursorLineStaysWithinWidth guards the ghosting bug: the cursor bar
+// must be exactly detailTextWidth display columns wide regardless of content.
+// Wide glyphs (emoji, box-drawing/ambiguous chars) used to overflow it because
+// the renderer counted runes instead of columns.
+func TestRenderCursorLineStaysWithinWidth(t *testing.T) {
+	m := newDetailVimModel(t, 1)
+	width := m.detailTextWidth() // viewport is 40 wide, vim margin -2 => 38
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"ascii", "hello world"},
+		{"empty", ""},
+		{"box drawing separator", strings.Repeat("─", 32)},
+		{"emoji", "launch 🌍 the 🚀 today"},
+		{"mixed overflow", "DeepSeek V4 Flash 🌍 in Freebuff " + strings.Repeat("x", 40)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wideCond.StringWidth(stripANSI(m.renderCursorLine(tc.line, 0)))
+			if got != width {
+				t.Fatalf("cursor line width: got %d want %d (line %q)", got, width, tc.line)
+			}
+		})
+	}
+}
+
+func TestRenderCursorLineBlankOnlyHighlightsCursorCell(t *testing.T) {
+	m := newDetailVimModel(t, 1)
+	got := m.renderCursorLine("", 0)
+	if w := wideCond.StringWidth(stripANSI(got)); w != m.detailTextWidth() {
+		t.Fatalf("blank cursor line width: got %d want %d", w, m.detailTextWidth())
+	}
+	want := m.detailCursorStyle().Render(" ") + strings.Repeat(" ", m.detailTextWidth()-1)
+	if got != want {
+		t.Fatalf("blank cursor line should only highlight the cursor cell:\ngot  %q\nwant %q", got, want)
+	}
+}
+
 func TestDecorateDetailMarksVisualSelection(t *testing.T) {
 	m := newDetailVimModel(t, 2)
 	m.cfg.NoIcons = false

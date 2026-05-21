@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fabhiansan/gws-tui/internal/api"
 )
@@ -29,11 +31,83 @@ const (
 	mailComposeForward
 )
 
+// modalField is one editable row in a compose modal. Single-line fields are
+// backed by a textinput, the multiline body by a textarea — both give cursor
+// movement, mid-text editing and a real visible cursor for free.
 type modalField struct {
-	Name      string `json:"name"`
-	Label     string `json:"label"`
-	Value     string `json:"value"`
-	Multiline bool   `json:"multiline"`
+	Name      string
+	Label     string
+	Multiline bool
+	input     textinput.Model
+	area      textarea.Model
+}
+
+// newModalField builds a field around the right bubbles component. The
+// textarea is focused before SetValue so vimGotoTop can park the cursor on the
+// first line (reply bodies start with blank space above the quoted original).
+func newModalField(name, label, value string, multiline bool) modalField {
+	f := modalField{Name: name, Label: label, Multiline: multiline}
+	if multiline {
+		ta := textarea.New()
+		ta.ShowLineNumbers = false
+		ta.Prompt = ""
+		ta.CharLimit = 0
+		ta.MaxHeight = 0
+		ta.SetWidth(64)
+		ta.SetHeight(8)
+		ta.Focus()
+		ta.SetValue(value)
+		vimGotoTop(&ta)
+		f.area = ta
+	} else {
+		ti := textinput.New()
+		ti.Prompt = ""
+		ti.CharLimit = 0
+		ti.SetValue(value)
+		f.input = ti
+	}
+	return f
+}
+
+func (f *modalField) value() string {
+	if f.Multiline {
+		return f.area.Value()
+	}
+	return f.input.Value()
+}
+
+func (f *modalField) focus() {
+	if f.Multiline {
+		f.area.Focus()
+		return
+	}
+	f.input.Focus()
+}
+
+func (f *modalField) blur() {
+	if f.Multiline {
+		f.area.Blur()
+		return
+	}
+	f.input.Blur()
+}
+
+func (f *modalField) view() string {
+	if f.Multiline {
+		return f.area.View()
+	}
+	return f.input.View()
+}
+
+// update forwards a message to whichever component backs the field.
+func (f *modalField) update(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	if f.Multiline {
+		f.area, cmd = f.area.Update(msg)
+	} else {
+		f.input, cmd = f.input.Update(msg)
+	}
+	return cmd
 }
 
 type composeModal struct {
@@ -42,6 +116,7 @@ type composeModal struct {
 	title      string
 	fields     []modalField
 	focus      int
+	vimMode    vimMode
 	autosave   bool
 	savedAt    time.Time
 	replyTo    string
@@ -51,8 +126,8 @@ type composeModal struct {
 
 func (m *composeModal) snapshot() map[string]any {
 	fields := map[string]string{}
-	for _, field := range m.fields {
-		fields[field.Name] = field.Value
+	for i := range m.fields {
+		fields[m.fields[i].Name] = m.fields[i].value()
 	}
 	return map[string]any{
 		"id":          m.id,
@@ -66,21 +141,22 @@ func (m *composeModal) snapshot() map[string]any {
 }
 
 func (m *composeModal) field(name string) string {
-	for _, field := range m.fields {
-		if field.Name == name {
-			return field.Value
+	for i := range m.fields {
+		if m.fields[i].Name == name {
+			return m.fields[i].value()
 		}
 	}
 	return ""
 }
 
-func (m *composeModal) setField(name, value string) {
+// fieldIndex returns the position of a named field, or -1 when absent.
+func (m *composeModal) fieldIndex(name string) int {
 	for i := range m.fields {
 		if m.fields[i].Name == name {
-			m.fields[i].Value = value
-			return
+			return i
 		}
 	}
+	return -1
 }
 
 func (m *Model) openMailCompose(thread *api.MailThread, mode mailComposeMode) {
@@ -89,7 +165,7 @@ func (m *Model) openMailCompose(thread *api.MailThread, mode mailComposeMode) {
 	cc := ""
 	body := ""
 	replyTo := ""
-	title := "Compose · ^s send · ^d draft · Tab next · ^q cancel"
+	title := "Compose mail"
 	if thread != nil && thread.ID != "" {
 		replyTo = thread.ID
 		to = thread.SenderEmail
@@ -102,13 +178,13 @@ func (m *Model) openMailCompose(thread *api.MailThread, mode mailComposeMode) {
 			}
 			body = quotedReplyBody(thread)
 			if mode == mailComposeReplyAll {
-				title = "Reply all · ^s send · ^d draft · Tab next · ^q cancel"
+				title = "Reply all"
 				cc = replyAllCc(thread, m.selfEmail)
 			} else {
-				title = "Reply · ^s send · ^d draft · Tab next · ^q cancel"
+				title = "Reply"
 			}
 		case mailComposeForward:
-			title = "Forward · ^s send · ^d draft · Tab next · ^q cancel"
+			title = "Forward"
 			subject = "Fwd: " + thread.Subject
 			body = "\n\n---------- Forwarded message ---------\n" + thread.Body
 		}
@@ -120,12 +196,18 @@ func (m *Model) openMailCompose(thread *api.MailThread, mode mailComposeMode) {
 		autosave: true,
 		replyTo:  replyTo,
 		fields: []modalField{
-			{Name: "to", Label: "To", Value: to},
-			{Name: "cc", Label: "Cc", Value: cc},
-			{Name: "subject", Label: "Subject", Value: subject},
-			{Name: "body", Label: "Body", Value: body, Multiline: true},
+			newModalField("to", "To", to, false),
+			newModalField("cc", "Cc", cc, false),
+			newModalField("subject", "Subject", subject, false),
+			newModalField("body", "Body", body, true),
 		},
 	}
+	// Reply/forward land the user straight in the body; a brand-new mail
+	// starts in the empty To field.
+	if mode != mailComposeNew {
+		m.modal.focus = m.modal.fieldIndex("body")
+	}
+	m.initModal()
 }
 
 // quotedReplyBody builds a mail-client style reply body: a blank space at the
@@ -192,12 +274,13 @@ func (m *Model) openMailLabelModal() {
 	m.modal = &composeModal{
 		id:      fmt.Sprintf("label-%d", time.Now().UnixNano()),
 		kind:    modalLabel,
-		title:   "Toggle label · ^s apply · ^q cancel",
+		title:   "Toggle label",
 		replyTo: thread.ID,
 		fields: []modalField{
-			{Name: "label", Label: "Label", Value: ""},
+			newModalField("label", "Label", "", false),
 		},
 	}
+	m.initModal()
 }
 
 // resolveMailLabelID maps a user-typed label name (or raw label id) to a
@@ -228,11 +311,11 @@ func (m *Model) openEventCompose(event *api.CalendarEvent) {
 	summary, location, attendees, description := "", "Google Meet", "", ""
 	eventID := ""
 	calendarID := m.selectedCalendar().ID
-	title := "New event · ^s save · Tab next · ^q cancel"
+	title := "New event"
 	if event != nil && event.ID != "" {
 		eventID = event.ID
 		calendarID = event.CalendarID
-		title = "Edit event · ^s save · Tab next · ^q cancel"
+		title = "Edit event"
 		summary = event.Summary
 		start = event.Start
 		end = event.End
@@ -248,40 +331,111 @@ func (m *Model) openEventCompose(event *api.CalendarEvent) {
 		eventID:    eventID,
 		calendarID: calendarID,
 		fields: []modalField{
-			{Name: "summary", Label: "Summary", Value: summary},
-			{Name: "start", Label: "Start", Value: start.Format("2006-01-02 15:04")},
-			{Name: "end", Label: "End", Value: end.Format("2006-01-02 15:04")},
-			{Name: "location", Label: "Where", Value: location},
-			{Name: "attendees", Label: "Attendees", Value: attendees},
-			{Name: "description", Label: "Description", Value: description, Multiline: true},
+			newModalField("summary", "Summary", summary, false),
+			newModalField("start", "Start", start.Format("2006-01-02 15:04"), false),
+			newModalField("end", "End", end.Format("2006-01-02 15:04"), false),
+			newModalField("location", "Where", location, false),
+			newModalField("attendees", "Attendees", attendees, false),
+			newModalField("description", "Description", description, true),
 		},
 	}
+	m.initModal()
 }
 
 func (m *Model) openSearchModal() {
 	m.modal = &composeModal{
 		id:    fmt.Sprintf("search-%d", time.Now().UnixNano()),
 		kind:  modalSearch,
-		title: "Search · ^s apply · ^q cancel",
+		title: "Search",
 		fields: []modalField{
-			{Name: "query", Label: "Query", Value: m.search},
+			newModalField("query", "Query", m.search, false),
 		},
 	}
+	m.initModal()
+}
+
+// initModal sizes the freshly built modal's fields to the terminal and focuses
+// the chosen field; every other field is blurred so only one cursor shows.
+func (m *Model) initModal() {
+	if m.modal == nil || len(m.modal.fields) == 0 {
+		return
+	}
+	if m.modal.focus < 0 || m.modal.focus >= len(m.modal.fields) {
+		m.modal.focus = 0
+	}
+	m.resizeModalFields()
+	for i := range m.modal.fields {
+		if i == m.modal.focus {
+			m.modal.fields[i].focus()
+		} else {
+			m.modal.fields[i].blur()
+		}
+	}
+}
+
+// resizeModalFields fits the modal's editors to the current terminal size. It
+// mirrors the geometry renderModal uses so the cursor and text never overflow
+// the box.
+func (m *Model) resizeModalFields() {
+	if m.modal == nil {
+		return
+	}
+	w, h := m.width, m.height
+	if w <= 0 {
+		w = 100
+	}
+	if h <= 0 {
+		h = 32
+	}
+	modalWidth := min(max(40, w-14), 88)
+	singles := 0
+	for i := range m.modal.fields {
+		if !m.modal.fields[i].Multiline {
+			singles++
+		}
+	}
+	bodyHeight := max(5, min(22, h-10-singles))
+	for i := range m.modal.fields {
+		f := &m.modal.fields[i]
+		if f.Multiline {
+			f.area.SetWidth(max(20, modalWidth-8))
+			f.area.SetHeight(bodyHeight)
+		} else {
+			f.input.Width = max(10, modalWidth-18)
+		}
+	}
+}
+
+// modalSetFocus moves field focus to an absolute index, keeping exactly one
+// component focused so only one cursor blinks.
+func (m *Model) modalSetFocus(idx int) {
+	if m.modal == nil || idx < 0 || idx >= len(m.modal.fields) || idx == m.modal.focus {
+		return
+	}
+	m.modal.fields[m.modal.focus].blur()
+	m.modal.focus = idx
+	m.modal.fields[idx].focus()
+}
+
+// modalFocusField cycles field focus by delta, wrapping around.
+func (m *Model) modalFocusField(delta int) {
+	if m.modal == nil || len(m.modal.fields) == 0 {
+		return
+	}
+	n := len(m.modal.fields)
+	m.modalSetFocus(((m.modal.focus+delta)%n + n) % n)
 }
 
 func (m Model) updateModal(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.modal == nil {
 		return m, nil
 	}
-	switch msg.String() {
-	case "esc", "ctrl+q":
+	key := msg.String()
+
+	// Controls that work in every mode and on every field.
+	switch key {
+	case "ctrl+q":
 		m.modal = nil
-		return m, nil
-	case "tab":
-		m.modal.focus = (m.modal.focus + 1) % len(m.modal.fields)
-		return m, nil
-	case "shift+tab":
-		m.modal.focus = (m.modal.focus - 1 + len(m.modal.fields)) % len(m.modal.fields)
 		return m, nil
 	case "ctrl+s":
 		return m.submitModal()
@@ -290,28 +444,123 @@ func (m Model) updateModal(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m.submitMailDraftModal()
 		}
 		return m, nil
+	case "tab":
+		m.modalFocusField(1)
+		return m, nil
+	case "shift+tab":
+		m.modalFocusField(-1)
+		return m, nil
+	}
+
+	field := &m.modal.fields[m.modal.focus]
+
+	// Vim NORMAL mode: keys are motions/edits, never raw text. Esc never
+	// closes the modal here — only ^q does — so a reflex Esc while editing
+	// can't discard the draft.
+	if m.cfg.VimMode && m.modal.vimMode == vimModeNormal {
+		if field.Multiline {
+			m.vimTextareaKey(msg, &field.area, &m.modal.vimMode)
+		} else {
+			m.modalVimSingleLine(msg, field)
+		}
+		return m, nil
+	}
+
+	// INSERT mode (vim on) or plain editing (vim off).
+	switch key {
+	case "esc":
+		if m.cfg.VimMode {
+			m.modal.vimMode = vimModeNormal
+		} else {
+			m.modal = nil
+		}
+		return m, nil
 	case "enter":
-		if m.modal.fields[m.modal.focus].Multiline {
-			m.modal.fields[m.modal.focus].Value += "\n"
-			return m, nil
+		if field.Multiline {
+			return m, field.update(msg)
 		}
 		if len(m.modal.fields) == 1 {
 			return m.submitModal()
 		}
-		m.modal.focus = (m.modal.focus + 1) % len(m.modal.fields)
+		m.modalFocusField(1)
 		return m, nil
-	case "backspace", "ctrl+h":
-		value := []rune(m.modal.fields[m.modal.focus].Value)
-		if len(value) > 0 {
-			m.modal.fields[m.modal.focus].Value = string(value[:len(value)-1])
-		}
-		return m, nil
-	default:
-		if len(msg.Runes) > 0 {
-			m.modal.fields[m.modal.focus].Value += string(msg.Runes)
-		}
 	}
-	return m, nil
+	return m, field.update(msg)
+}
+
+// modalVimSingleLine applies vim NORMAL-mode keys to a single-line field.
+// Line-oriented motions degrade sensibly: j/k hop between fields, dd clears
+// the field, gg/G jump to the ends.
+func (m *Model) modalVimSingleLine(msg tea.KeyMsg, field *modalField) {
+	key := msg.String()
+	if m.vimPending != "" {
+		pending := m.vimPending
+		m.vimPending = ""
+		switch pending + key {
+		case "dd":
+			field.input.SetValue("")
+		case "cc":
+			field.input.SetValue("")
+			m.modal.vimMode = vimModeInsert
+		case "yy":
+			m.vimRegister = field.value()
+			m.vimRegisterLine = false
+			m.toast = "yanked"
+		case "gg":
+			field.update(tea.KeyMsg{Type: tea.KeyHome})
+		}
+		return
+	}
+	switch key {
+	case "h", "left":
+		field.update(tea.KeyMsg{Type: tea.KeyLeft})
+	case "l", "right":
+		field.update(tea.KeyMsg{Type: tea.KeyRight})
+	case "w", "e":
+		field.update(tea.KeyMsg{Type: tea.KeyRight, Alt: true})
+	case "b":
+		field.update(tea.KeyMsg{Type: tea.KeyLeft, Alt: true})
+	case "0", "home":
+		field.update(tea.KeyMsg{Type: tea.KeyHome})
+	case "$", "end", "G":
+		field.update(tea.KeyMsg{Type: tea.KeyEnd})
+	case "g":
+		m.vimPending = "g"
+	case "j", "down":
+		m.modalFocusField(1)
+	case "k", "up":
+		m.modalFocusField(-1)
+	case "i":
+		m.modal.vimMode = vimModeInsert
+	case "I":
+		field.update(tea.KeyMsg{Type: tea.KeyHome})
+		m.modal.vimMode = vimModeInsert
+	case "a":
+		field.update(tea.KeyMsg{Type: tea.KeyRight})
+		m.modal.vimMode = vimModeInsert
+	case "A":
+		field.update(tea.KeyMsg{Type: tea.KeyEnd})
+		m.modal.vimMode = vimModeInsert
+	case "x":
+		field.update(tea.KeyMsg{Type: tea.KeyDelete})
+	case "X":
+		field.update(tea.KeyMsg{Type: tea.KeyBackspace})
+	case "d":
+		m.vimPending = "d"
+	case "c":
+		m.vimPending = "c"
+	case "y":
+		m.vimPending = "y"
+	case "p", "P":
+		for _, r := range m.vimRegister {
+			if r == '\n' {
+				continue
+			}
+			field.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	default:
+		// swallow stray keys so normal mode never types raw text.
+	}
 }
 
 func (m Model) submitModal() (Model, tea.Cmd) {
@@ -346,6 +595,12 @@ func (m Model) submitModal() (Model, tea.Cmd) {
 			}
 		case FeatureDocs:
 			m.loading = true
+			m.focusedPane = paneList
+			m.selected[FeatureDocs] = 0
+			m.docFiles = nil
+			m.docNext = ""
+			m.doc = api.DocDocument{}
+			m.docLoadingID = ""
 			return m, func() tea.Msg {
 				files, filesErr := m.client.Docs(m.ctx, api.DriveQuery{Search: query})
 				doc := api.DocDocument{}

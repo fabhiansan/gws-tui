@@ -17,6 +17,32 @@ func TestImageAttachmentsFromText(t *testing.T) {
 	}
 }
 
+func TestImageAttachmentsFromHTML(t *testing.T) {
+	markup := `<html><body>
+		<img alt="hero" src="https://cdn.example.com/render?id=123&amp;width=800">
+		<img src="cid:logo">
+		<img data-src="//cdn.example.com/lazy.webp">
+		<source srcset="https://cdn.example.com/banner.jpg 1x, https://cdn.example.com/banner@2x.jpg 2x">
+	</body></html>`
+
+	attachments := ImageAttachmentsFromHTML(markup)
+	if len(attachments) != 3 {
+		t.Fatalf("expected 3 html image attachments, got %#v", attachments)
+	}
+	if attachments[0].URL != "https://cdn.example.com/render?id=123&width=800" {
+		t.Fatalf("first html image URL was not decoded: %#v", attachments[0])
+	}
+	if attachments[0].ContentType != "image/unknown" || !attachments[0].IsImage() {
+		t.Fatalf("expected extensionless HTML image to be previewable: %#v", attachments[0])
+	}
+	if attachments[1].URL != "https://cdn.example.com/lazy.webp" || attachments[1].ContentType != "image/webp" {
+		t.Fatalf("unexpected protocol-relative lazy image: %#v", attachments[1])
+	}
+	if attachments[2].URL != "https://cdn.example.com/banner.jpg" || attachments[2].ContentType != "image/jpeg" {
+		t.Fatalf("unexpected srcset image: %#v", attachments[2])
+	}
+}
+
 func TestNormalizeAttachmentsKeepsImageWithoutPreviewSource(t *testing.T) {
 	attachments := NormalizeAttachments([]Attachment{{
 		ID:          "gmail-attachment",

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"html"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -201,6 +203,9 @@ func (m Model) mainView(width, height int) string {
 	if m.feature == FeatureMail {
 		return m.mailView(width, height)
 	}
+	if m.feature == FeatureDocs {
+		return m.singlePaneView(width, height)
+	}
 	leftHBorder := m.theme.Pane.GetHorizontalBorderSize()
 	leftVBorder := m.theme.Pane.GetVerticalBorderSize()
 	detailHBorder := m.theme.Active.GetHorizontalBorderSize()
@@ -226,6 +231,33 @@ func (m Model) mainView(width, height int) string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	status := m.renderStatus(width)
 	return m.theme.Root.Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, row, status))
+}
+
+// singlePaneView is used for browse-first features where the list and the
+// detail view share the same screen instead of sitting side by side.
+func (m Model) singlePaneView(width, height int) string {
+	hBorder := m.theme.Active.GetHorizontalBorderSize()
+	vBorder := m.theme.Active.GetVerticalBorderSize()
+	statusH := 1
+	contentW := max(20, width-hBorder)
+	contentH := max(5, height-statusH-vBorder)
+
+	var pane string
+	if m.singlePaneDetailVisible() {
+		style := m.theme.Pane
+		if m.focusedPane == paneDetail {
+			style = m.theme.Active
+		}
+		pane = paneWithTitle(style, m.title(" [2]-"+m.detailTitle()+" "), m.detail.View(), contentW, contentH)
+	} else {
+		pane = m.renderList(contentW, contentH)
+	}
+	status := m.renderStatus(width)
+	return m.theme.Root.Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, pane, status))
+}
+
+func (m Model) singlePaneDetailVisible() bool {
+	return m.feature == FeatureDocs && m.focusedPane == paneDetail
 }
 
 // mailView lays out the Mail feature like Gmail: a labels sidebar on the
@@ -265,11 +297,18 @@ func (m Model) mailView(width, height int) string {
 	return m.theme.Root.Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, row, status))
 }
 
+// mailListVisible reports whether Mail's right column shows the inbox list
+// rather than the reading pane. Browsing — with either the list or the folder
+// sidebar focused — shows the list; opening a thread swaps in the reading pane.
+func (m Model) mailListVisible() bool {
+	return m.focusedPane == paneList || m.focusedPane == paneMailSidebar
+}
+
 // mailMainPane renders the slot shared by the inbox list and the reading
 // pane: browsing shows the wide message list, and opening a message swaps in
 // the reading pane until the user goes back to the list.
 func (m Model) mailMainPane(width, height int) string {
-	if m.focusedPane == paneList {
+	if m.mailListVisible() {
 		return m.renderList(width, height)
 	}
 	detailStyle := m.theme.Pane
@@ -286,7 +325,23 @@ func mailSidebarWidth(width int) int {
 	return max(14, min(26, width/5))
 }
 
-var mailSystemFolders = []string{"Inbox", "Starred", "Important", "Sent", "Drafts", "Spam", "Trash", "All Mail"}
+// defaultMailFolder is the folder the Mail feature opens on.
+const defaultMailFolder = "Inbox"
+
+// mailSystemFolderDefs are the fixed Gmail folders pinned at the top of the
+// sidebar, in display order. Each carries the resolved query parameters so
+// selecting one fetches exactly that folder regardless of how Gmail happens
+// to name the underlying label.
+var mailSystemFolderDefs = []api.MailLabel{
+	{Name: "Inbox", LabelIDs: []string{"INBOX"}},
+	{Name: "Starred", LabelIDs: []string{"STARRED"}},
+	{Name: "Important", LabelIDs: []string{"IMPORTANT"}},
+	{Name: "Sent", LabelIDs: []string{"SENT"}},
+	{Name: "Drafts", LabelIDs: []string{"DRAFT"}},
+	{Name: "Spam", LabelIDs: []string{"SPAM"}, IncludeSpamTrash: true},
+	{Name: "Trash", LabelIDs: []string{"TRASH"}, IncludeSpamTrash: true},
+	{Name: "All Mail", Query: "-in:spam -in:trash"},
+}
 
 var mailSystemLabelIDs = map[string]bool{
 	"INBOX": true, "STARRED": true, "IMPORTANT": true, "SENT": true,
@@ -295,59 +350,97 @@ var mailSystemLabelIDs = map[string]bool{
 	"SNOOZED": true, "SCHEDULED": true, "OUTBOX": true,
 }
 
-// mailSidebarLabels splits the Gmail labels into the fixed system folders
-// pinned at the top of the sidebar and the user-created labels listed under a
-// "Labels" header. Gmail's system labels and CATEGORY_* buckets are filtered
-// out of the custom list so they are not shown twice.
-func (m Model) mailSidebarLabels() (system, custom []string) {
-	for _, label := range m.mailLabels {
-		name := strings.TrimSpace(label.Name)
-		if name == "" {
-			continue
-		}
-		upper := strings.ToUpper(name)
-		isSystem := mailSystemLabelIDs[upper] || strings.HasPrefix(upper, "CATEGORY_")
-		for _, folder := range mailSystemFolders {
-			if strings.EqualFold(folder, name) {
-				isSystem = true
-			}
-		}
-		for _, id := range label.LabelIDs {
-			u := strings.ToUpper(strings.TrimSpace(id))
-			if mailSystemLabelIDs[u] || strings.HasPrefix(u, "CATEGORY_") {
-				isSystem = true
-			}
-		}
-		if !isSystem {
-			custom = append(custom, name)
+// mailIsSystemLabel reports whether a Gmail label belongs to the fixed system
+// folders or a CATEGORY_* bucket, so it is not also listed as a user label.
+func mailIsSystemLabel(name string, ids []string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if mailSystemLabelIDs[upper] || strings.HasPrefix(upper, "CATEGORY_") {
+		return true
+	}
+	for _, def := range mailSystemFolderDefs {
+		if strings.EqualFold(def.Name, name) {
+			return true
 		}
 	}
-	return mailSystemFolders, custom
+	for _, id := range ids {
+		u := strings.ToUpper(strings.TrimSpace(id))
+		if mailSystemLabelIDs[u] || strings.HasPrefix(u, "CATEGORY_") {
+			return true
+		}
+	}
+	return false
 }
 
-// renderMailSidebar draws the Gmail-style folder rail: the standard system
-// folders first, then a "Labels" group with the user's own labels. The rail
-// is informational — Inbox is highlighted as the active folder.
-func (m Model) renderMailSidebar(width, height int) string {
-	innerW := max(6, width-m.theme.Pane.GetHorizontalPadding())
-	system, custom := m.mailSidebarLabels()
-
-	var lines []string
-	for _, name := range system {
-		if strings.EqualFold(name, "Inbox") {
-			lines = append(lines, m.accent(m.icon("▸", ">")+" "+truncate(name, innerW-2)))
+// mailCustomFolders returns the user-created Gmail labels — every fetched
+// label that is not a system folder or a CATEGORY_* bucket.
+func (m Model) mailCustomFolders() []api.MailLabel {
+	var custom []api.MailLabel
+	for _, label := range m.mailLabels {
+		name := strings.TrimSpace(label.Name)
+		if name == "" || mailIsSystemLabel(name, label.LabelIDs) {
 			continue
 		}
-		lines = append(lines, "  "+truncate(name, innerW-2))
+		custom = append(custom, label)
 	}
-	if len(custom) > 0 {
-		lines = append(lines, "", m.subtle("Labels"))
-		for _, name := range custom {
-			lines = append(lines, "  "+m.subtle(truncate(name, innerW-2)))
+	return custom
+}
+
+// mailFolderList is the ordered set of selectable Mail folders: the fixed
+// Gmail system folders followed by the user's own labels.
+func (m Model) mailFolderList() []api.MailLabel {
+	custom := m.mailCustomFolders()
+	folders := make([]api.MailLabel, 0, len(mailSystemFolderDefs)+len(custom))
+	folders = append(folders, mailSystemFolderDefs...)
+	return append(folders, custom...)
+}
+
+// renderMailSidebar draws the Gmail-style folder rail: the system folders
+// first, then a "Labels" group with the user's own labels. The active folder
+// is marked with an accent arrow; while the rail is focused a cursor
+// highlight tracks j/k navigation and Enter loads the folder under it.
+func (m Model) renderMailSidebar(width, height int) string {
+	innerW := max(6, width-m.theme.Pane.GetHorizontalPadding())
+	folders := m.mailFolderList()
+	systemCount := len(mailSystemFolderDefs)
+	focused := m.focusedPane == paneMailSidebar
+
+	cursor := -1
+	if focused {
+		cursor = clamp(m.mailFolderCursor, len(folders))
+	}
+
+	var lines []string
+	cursorLine := -1
+	for i, folder := range folders {
+		if i == systemCount {
+			lines = append(lines, "", m.subtle("Labels"))
 		}
+		text := truncate(folder.Name, innerW-2)
+		marker := "  "
+		switch {
+		case strings.EqualFold(folder.Name, m.mailFolder):
+			marker = m.accent(m.icon("▸", ">")) + " "
+			text = m.accent(text)
+		case i >= systemCount:
+			text = m.subtle(text)
+		}
+		if i == cursor {
+			cursorLine = len(lines)
+		}
+		lines = append(lines, marker+text)
+	}
+	if cursorLine >= 0 && cursorLine < len(lines) {
+		lines[cursorLine] = m.theme.Selected.Width(innerW).Render(truncate(lines[cursorLine], innerW))
+	}
+	if offset := computeListOffset(len(lines), height, cursorLine, cursorLine); offset > 0 && offset < len(lines) {
+		lines = lines[offset:]
 	}
 	body := fitLines(lines, innerW, height)
-	return paneWithTitle(m.theme.Pane, m.title(" Mail "), body, width, height)
+	style := m.theme.Pane
+	if focused {
+		style = m.theme.Active
+	}
+	return paneWithTitle(style, m.title(" Mail "), body, width, height)
 }
 
 func (m Model) authView(width, height int) string {
@@ -391,26 +484,33 @@ func (m Model) renderList(width, height int) string {
 			title = fmt.Sprintf(" [1]-Spaces (%d) ", len(spaces))
 		}
 		for i, space := range spaces {
-			marker := "  "
-			// Unread wins over Live: a subscribed space that has new
-			// messages should glow accent, not just look "watched".
+			// The badge column is only emitted when there is a badge, so
+			// spaces with nothing to flag sit flush left and a badge on an
+			// unread/live space visibly juts out. Unread wins over Live: a
+			// space with new messages glows accent, not just "watched".
+			marker := ""
 			switch {
 			case space.Unread:
 				marker = m.accent(m.icon("●", "*")) + " "
 			case space.Live:
 				marker = m.live(m.icon("●", "*")) + " "
 			}
-			name := truncate(m.spaceLabel(space), width-8)
+			avail := max(1, width-m.theme.Pane.GetHorizontalPadding()-1-lipgloss.Width(marker))
+			name := truncate(m.spaceLabel(space), avail)
 			if i == m.selected[FeatureChat] {
 				selStart = len(lines)
-				lines = append(lines, "  "+marker+name)
+				lines = append(lines, " "+marker+name)
 				selEnd = len(lines) - 1
 			} else {
-				lines = append(lines, "  "+marker+name)
+				lines = append(lines, " "+marker+name)
 			}
 		}
 	case FeatureMail:
-		title = fmt.Sprintf(" [1]-Inbox (%d) ", len(m.mailThreads))
+		if strings.TrimSpace(m.search) != "" {
+			title = fmt.Sprintf(" [1]-Search /%s (%d) ", m.search, len(m.mailThreads))
+		} else {
+			title = fmt.Sprintf(" [1]-%s (%d) ", fallback(m.mailFolder, defaultMailFolder), len(m.mailThreads))
+		}
 		rowW := max(20, width-m.theme.Pane.GetHorizontalPadding())
 		for i, thread := range m.mailThreads {
 			selected := i == m.selected[FeatureMail]
@@ -428,10 +528,10 @@ func (m Model) renderList(width, height int) string {
 		for i, event := range sortedEvents(m.events) {
 			day := event.Start.Format("Mon 02 Jan")
 			if day != lastDay {
-				lines = append(lines, m.subtle("  "+day))
+				lines = append(lines, m.subtle(" "+day))
 				lastDay = day
 			}
-			prefix := "  "
+			prefix := " "
 			if i == m.selected[FeatureCalendar] {
 				selStart = len(lines)
 			}
@@ -443,7 +543,7 @@ func (m Model) renderList(width, height int) string {
 	case FeatureMeet:
 		title = fmt.Sprintf(" [1]-Meet spaces (%d) ", len(m.meetSpaces))
 		for i, space := range m.meetSpaces {
-			prefix := "  "
+			prefix := " "
 			if i == m.selected[FeatureMeet] {
 				selStart = len(lines)
 			}
@@ -464,7 +564,7 @@ func (m Model) renderList(width, height int) string {
 		list := m.selectedTaskList()
 		title = fmt.Sprintf(" [1]-Tasks: %s (%d) ", truncate(fallback(list.Title, "Tasks"), 18), len(m.tasks))
 		for i, task := range m.tasks {
-			prefix := "  "
+			prefix := " "
 			if i == m.selected[FeatureTasks] {
 				selStart = len(lines)
 			}
@@ -487,7 +587,7 @@ func (m Model) renderList(width, height int) string {
 	case FeatureDrive:
 		title = fmt.Sprintf(" [1]-Drive (%d) ", len(m.driveFiles))
 		for i, file := range m.driveFiles {
-			prefix := "  "
+			prefix := " "
 			if i == m.selected[FeatureDrive] {
 				selStart = len(lines)
 			}
@@ -502,9 +602,13 @@ func (m Model) renderList(width, height int) string {
 			}
 		}
 	case FeatureDocs:
-		title = fmt.Sprintf(" [1]-Docs (%d) ", len(m.docFiles))
+		if strings.TrimSpace(m.search) != "" {
+			title = fmt.Sprintf(" [1]-Search /%s (%d) ", m.search, len(m.docFiles))
+		} else {
+			title = fmt.Sprintf(" [1]-Docs (%d) ", len(m.docFiles))
+		}
 		for i, file := range m.docFiles {
-			prefix := "  "
+			prefix := " "
 			if i == m.selected[FeatureDocs] {
 				selStart = len(lines)
 			}
@@ -519,7 +623,15 @@ func (m Model) renderList(width, height int) string {
 		}
 	}
 	if len(lines) == 0 {
-		lines = []string{"", "  No items yet."}
+		if m.feature == FeatureDocs && m.loading {
+			label := "Loading docs..."
+			if strings.TrimSpace(m.search) != "" {
+				label = "Searching docs /" + m.search + "..."
+			}
+			lines = []string{"", " " + label}
+		} else {
+			lines = []string{"", " No items yet."}
+		}
 	}
 	innerW := max(1, width-m.theme.Pane.GetHorizontalPadding())
 	viewportH := max(1, height)
@@ -854,38 +966,74 @@ func (m Model) renderStatus(width int) string {
 	return finalize(left, right)
 }
 
+// renderModal draws the compose modal. Each field renders its own editor
+// View() so the real text cursor is visible, and a footer carries the vim
+// mode badge plus the keys that act on the modal.
 func (m Model) renderModal(width int) string {
 	if m.modal == nil {
 		return ""
 	}
-	var lines []string
-	for i, field := range m.modal.fields {
-		cursor := "  "
-		if i == m.modal.focus {
-			cursor = m.accent(m.icon("▎", "|") + " ")
+	modalWidth := min(width, 88)
+	lines, _ := m.modalContentLines()
+	content := strings.Join(lines, "\n")
+	// paneWithTitle re-applies the modal style; +2 covers the modal's vertical
+	// padding so the content never gets clipped.
+	return paneWithTitle(m.theme.Modal, m.title(" "+m.modal.title+" "), content, modalWidth, len(lines)+2)
+}
+
+// modalContentLines builds the modal body line by line and, alongside it, a
+// parallel slice mapping each line to the field index it belongs to (-1 for
+// chrome). The mapping lets the mouse layer hit-test which field a click hit.
+func (m Model) modalContentLines() (lines []string, fieldOf []int) {
+	for i := range m.modal.fields {
+		field := &m.modal.fields[i]
+		focused := i == m.modal.focus
+		marker := "  "
+		if focused {
+			marker = m.accent(m.icon("▎", "|")) + " "
 		}
-		value := field.Value
-		if value == "" {
-			value = m.subtle("(empty)")
+		label := fmt.Sprintf("%-9s", field.Label)
+		if focused {
+			label = m.accent(label)
 		}
-		label := fmt.Sprintf("%-11s", field.Label+":")
 		if field.Multiline {
-			lines = append(lines, cursor+label)
-			for _, bodyLine := range strings.Split(value, "\n") {
-				lines = append(lines, "  "+truncate(bodyLine, width-6))
+			lines = append(lines, marker+label)
+			fieldOf = append(fieldOf, i)
+			for _, bodyLine := range strings.Split(field.view(), "\n") {
+				lines = append(lines, "  "+bodyLine)
+				fieldOf = append(fieldOf, i)
 			}
 		} else {
-			lines = append(lines, cursor+label+" "+truncate(value, width-18))
+			lines = append(lines, marker+label+" "+field.view())
+			fieldOf = append(fieldOf, i)
 		}
 	}
+	lines = append(lines, "")
+	fieldOf = append(fieldOf, -1)
 	if !m.modal.savedAt.IsZero() {
-		lines = append(lines, "", m.subtle("autosaved "+m.modal.savedAt.Format("15:04:05")))
+		lines = append(lines, m.subtle("autosaved "+m.modal.savedAt.Format("15:04:05")))
+		fieldOf = append(fieldOf, -1)
 	}
-	modalWidth := min(width, 88)
-	content := strings.Join(lines, "\n")
-	box := m.theme.Modal.Width(modalWidth).Render(content)
-	height := lipgloss.Height(box)
-	return paneWithTitle(m.theme.Modal, m.title(" "+m.modal.title+" "), content, modalWidth, height)
+	lines = append(lines, m.modalHintLine())
+	fieldOf = append(fieldOf, -1)
+	return lines, fieldOf
+}
+
+// modalHintLine is the modal footer: a vim mode badge plus the keys that act
+// on the modal, spelled out so they stay discoverable.
+func (m Model) modalHintLine() string {
+	keys := "^s send · ^q cancel · Tab field"
+	if m.modal.kind == modalMail {
+		keys = "^s send · ^d draft · ^q cancel · Tab field"
+	}
+	if !m.cfg.VimMode {
+		return m.subtle("esc cancel · " + keys)
+	}
+	badge := m.accent("-- " + m.modal.vimMode.String() + " --")
+	if m.modal.vimMode == vimModeNormal {
+		return badge + "  " + m.subtle("i insert · hjkl move · dd yy p edit · "+keys)
+	}
+	return badge + "  " + m.subtle("esc normal mode · "+keys)
 }
 
 func (m Model) renderHelp(width, height int) string {
@@ -908,7 +1056,7 @@ func (m Model) renderHelp(width, height int) string {
 			{"x", "dismiss error / toast"},
 		}},
 		{"Pane focus", []binding{
-			{"1 · H · Ctrl+H", "focus list pane"},
+			{"1 · H · Ctrl+H", "focus list · Mail: folder rail"},
 			{"2 · L · Ctrl+L", "focus detail pane"},
 			{"3 · i", "focus action (input)"},
 			{"Esc", "back to list"},
@@ -930,6 +1078,7 @@ func (m Model) renderHelp(width, height int) string {
 			{"gg / G", "top / bottom"},
 			{"v / V", "visual char / line mode"},
 			{"y / yy", "yank selection / line"},
+			{"Enter / o", "open URL / attachment"},
 			{"Esc", "exit visual · back to list"},
 		}},
 		{"Action pane", []binding{
@@ -947,6 +1096,9 @@ func (m Model) renderHelp(width, height int) string {
 			{"gg / G", "top / bottom of input"},
 			{"x / X", "delete char forward / back"},
 			{"dd / cc", "delete line / change line"},
+			{"dw de db", "delete word forward / to end / back"},
+			{"cw ce / yw ye", "change / yank word"},
+			{"d$ D / d0", "delete to line end / start"},
 			{"yy / p / P", "yank / paste after / before"},
 			{"Enter", "send message"},
 		}},
@@ -962,6 +1114,8 @@ func (m Model) renderHelp(width, height int) string {
 			{"R", "refresh all workspace data"},
 		}},
 		{"Mail", []binding{
+			{"H", "focus folder sidebar"},
+			{"j / k · Enter", "move · open folder (sidebar)"},
 			{"s", "toggle star"},
 			{"c", "compose"},
 			{"R", "reply"},
@@ -986,6 +1140,12 @@ func (m Model) renderHelp(width, height int) string {
 			{"J", "join (open link)"},
 			{"C", "copy link"},
 			{"E", "end conference"},
+		}},
+		{"Tasks", []binding{
+			{"Space", "complete / uncomplete"},
+			{"d", "delete task"},
+			{"] · [", "next / prev task list"},
+			{"m", "load more"},
 		}},
 	}
 
@@ -1330,7 +1490,7 @@ func (m *Model) mailDetail() string {
 		"────────────────────────────────",
 		"",
 	}
-	for _, line := range strings.Split(thread.Body, "\n") {
+	for _, line := range mailBodyDisplayLines(thread.Body) {
 		if strings.HasPrefix(line, ">") {
 			lines = append(lines, m.subtle(line))
 		} else {
@@ -1361,6 +1521,76 @@ func (m *Model) mailDetail() string {
 	return displayText(strings.Join(lines, "\n"))
 }
 
+func mailBodyDisplayLines(body string) []string {
+	body = mailBodyDisplayText(body)
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	return strings.Split(body, "\n")
+}
+
+func mailBodyDisplayText(body string) string {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+	if mailLooksHTML(body) {
+		body = mailHTMLBreakRe.ReplaceAllString(body, "\n")
+		body = mailHTMLBlockRe.ReplaceAllString(body, "\n")
+		body = mailHTMLLinkRe.ReplaceAllString(body, "$1")
+		body = mailHTMLTagRe.ReplaceAllString(body, "")
+	}
+	body = html.UnescapeString(body)
+	body = displayText(body)
+
+	var lines []string
+	blankRun := 0
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, " \t")
+		if mailArtifactOnlyLine(line) {
+			line = ""
+		}
+		if strings.TrimSpace(line) == "" {
+			blankRun++
+			if blankRun > 1 {
+				continue
+			}
+			lines = append(lines, "")
+			continue
+		}
+		blankRun = 0
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func mailLooksHTML(body string) bool {
+	return mailHTMLBreakRe.MatchString(body) ||
+		mailHTMLBlockRe.MatchString(body) ||
+		mailHTMLLinkRe.MatchString(body) ||
+		mailHTMLInlineRe.MatchString(body)
+}
+
+func mailArtifactOnlyLine(line string) bool {
+	line = displayText(html.UnescapeString(line))
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return true
+	}
+	for _, r := range line {
+		if !unicode.IsSpace(r) && r != '\u00a0' {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	mailHTMLBreakRe  = regexp.MustCompile(`(?i)<br\s*/?>`)
+	mailHTMLBlockRe  = regexp.MustCompile(`(?i)</?(p|div|section|article|header|footer|blockquote|tr|table|ul|ol|li|h[1-6])\b[^>]*>`)
+	mailHTMLInlineRe = regexp.MustCompile(`(?i)</?(span|font|b|strong|i|em|u|img|style|meta|html|body|head)\b[^>]*>`)
+	mailHTMLLinkRe   = regexp.MustCompile(`(?is)<a\s+[^>]*>(.*?)</a>`)
+	mailHTMLTagRe    = regexp.MustCompile(`(?s)<[^>]+>`)
+)
+
 func (m Model) calendarDetail() string {
 	event := m.selectedEvent()
 	if event.ID == "" {
@@ -1385,7 +1615,7 @@ func (m Model) calendarDetail() string {
 func (m Model) meetDetail() string {
 	space := m.selectedMeet()
 	if space.Name == "" {
-		return centerText("No Meet spaces yet. Press n then Enter to create one.", m.detail.Width)
+		return centerText("No Meet spaces yet. Press n to create one.", m.detail.Width)
 	}
 	conference := "none"
 	if space.IsActive() {
@@ -1394,13 +1624,19 @@ func (m Model) meetDetail() string {
 			conference = fmt.Sprintf("active (%d people)", space.ActiveParticipants)
 		}
 	}
+	joinURL := space.JoinURL()
 	lines := []string{
-		"Link:       " + fallback(space.MeetingURI, "-"),
+		"Link:       " + fallback(joinURL, "-"),
 		"Code:       " + fallback(space.MeetingCode, "-"),
 		"Resource:   " + space.Name,
-		"Access:     " + fallback(space.AccessType(), "-"),
-		"Conference: " + conference,
 	}
+	if spaceName := space.SpaceResourceName(); spaceName != "" && spaceName != space.Name {
+		lines = append(lines, "Space:      "+spaceName)
+	}
+	lines = append(lines,
+		"Access:     "+fallback(space.AccessType(), "-"),
+		"Conference: "+conference,
+	)
 	if !space.Created.IsZero() {
 		lines = append(lines, "Created:    "+space.Created.Format("02 Jan 2006"))
 	}
@@ -1459,7 +1695,7 @@ func (m Model) taskDetail() string {
 		"",
 		fallback(task.Notes, "(no notes)"),
 		"",
-		m.subtle("[/] switch task list · m load more"),
+		m.subtle("[Space] complete/uncomplete · d delete · [/] switch task list · m more"),
 	}
 	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
@@ -1482,7 +1718,7 @@ func (m Model) driveDetail() string {
 	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
 }
 
-func (m Model) docsDetail() string {
+func (m *Model) docsDetail() string {
 	file := m.selectedDocFile()
 	if file.ID == "" {
 		return centerText("No Google Docs files found.", m.detail.Width)
@@ -1491,20 +1727,186 @@ func (m Model) docsDetail() string {
 		return centerText("Loading document...", m.detail.Width)
 	}
 	title := fallback(m.doc.Title, file.Name)
-	body := fallback(m.doc.Body, "(empty document)")
+	width := m.detailTextWidth()
 	lines := []string{
 		"Title:    " + title,
 		"Modified: " + formatOptionalTime(file.ModifiedTime, "Mon, 02 Jan 2006 15:04"),
 		"Link:     " + fallback(file.WebViewLink, "-"),
 		"Resource: " + file.ID,
 		"",
-		"─── Document ───",
+		m.subtle("Document"),
 		"",
-		body,
-		"",
-		m.subtle("y yank text · / search · m load more"),
 	}
-	return displayText(strings.Join(wrapDetailLines(lines, m.detailTextWidth()), "\n"))
+	lines = wrapDetailLines(lines, width)
+	if len(m.doc.Blocks) > 0 {
+		lines = append(lines, m.renderDocBlocks(m.doc.Blocks, width, countDisplayLines(lines))...)
+	} else {
+		body := fallback(m.doc.Body, "(empty document)")
+		lines = append(lines, wrapDetailLines(strings.Split(body, "\n"), width)...)
+	}
+	lines = append(lines, "", m.subtle("y yank text · / search · m load more"))
+	return displayText(strings.Join(lines, "\n"))
+}
+
+func (m *Model) renderDocBlocks(blocks []api.DocBlock, width, startLine int) []string {
+	var lines []string
+	for _, block := range blocks {
+		switch block.Kind {
+		case api.DocBlockTitle, api.DocBlockSubtitle, api.DocBlockHeading, api.DocBlockParagraph, api.DocBlockListItem:
+			lines = append(lines, m.renderDocTextBlock(block, width)...)
+		case api.DocBlockTable:
+			lines = append(lines, m.renderDocTable(block, width)...)
+		case api.DocBlockImage:
+			attLines, ranges := m.renderDocImage(block)
+			base := startLine + countDisplayLines(lines)
+			for _, r := range ranges {
+				for i := 0; i < r.rows; i++ {
+					m.mapDetailAttachmentLine(base+r.start+i, r.attachment)
+				}
+			}
+			lines = append(lines, attLines...)
+		default:
+			if text := strings.TrimSpace(block.Text); text != "" {
+				lines = append(lines, wrapDetailLines([]string{text}, width)...)
+			}
+		}
+		if len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) != "" {
+			lines = append(lines, "")
+		}
+	}
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func (m Model) renderDocTextBlock(block api.DocBlock, width int) []string {
+	text := m.renderDocInlines(block.Inlines)
+	if strings.TrimSpace(ansi.Strip(text)) == "" {
+		text = displayText(block.Text)
+	}
+	switch block.Kind {
+	case api.DocBlockTitle:
+		style := lipgloss.NewStyle().Bold(true)
+		if !m.cfg.NoColor {
+			style = style.Foreground(lipgloss.Color(m.theme.Accent))
+		}
+		text = style.Render(text)
+	case api.DocBlockSubtitle:
+		text = m.subtle(text)
+	case api.DocBlockHeading:
+		style := lipgloss.NewStyle().Bold(true)
+		if !m.cfg.NoColor {
+			style = style.Foreground(lipgloss.Color(m.theme.Accent))
+		}
+		prefix := ""
+		if block.Level > 1 {
+			prefix = strings.Repeat("#", min(block.Level, 6)) + " "
+		}
+		text = style.Render(prefix + text)
+	case api.DocBlockListItem:
+		indent := strings.Repeat("  ", max(0, block.ListLevel))
+		marker := m.icon("•", "-")
+		return wrapDetailLines([]string{indent + marker + " " + text}, width)
+	}
+	return wrapDetailLines([]string{text}, width)
+}
+
+func (m Model) renderDocInlines(inlines []api.DocInline) string {
+	var b strings.Builder
+	for _, inline := range inlines {
+		text := displayText(inline.Text)
+		if text == "" && inline.LinkURL == "" {
+			continue
+		}
+		style := lipgloss.NewStyle().
+			Bold(inline.Bold).
+			Italic(inline.Italic).
+			Underline(inline.Underline || inline.LinkURL != "").
+			Strikethrough(inline.Strikethrough)
+		if inline.LinkURL != "" && !m.cfg.NoColor {
+			style = style.Foreground(lipgloss.Color(m.theme.Accent))
+		}
+		if text != "" {
+			b.WriteString(style.Render(text))
+		}
+		if inline.LinkURL != "" && !strings.Contains(text, inline.LinkURL) {
+			if text != "" {
+				b.WriteByte(' ')
+			}
+			b.WriteString(m.subtle("(" + inline.LinkURL + ")"))
+		}
+	}
+	return b.String()
+}
+
+func (m Model) renderDocTable(block api.DocBlock, width int) []string {
+	if len(block.Rows) == 0 {
+		return nil
+	}
+	cols := 0
+	for _, row := range block.Rows {
+		if len(row) > cols {
+			cols = len(row)
+		}
+	}
+	if cols == 0 {
+		return nil
+	}
+	gap := 3
+	maxCell := max(8, (width-(cols-1)*gap)/cols)
+	colWidths := make([]int, cols)
+	for _, row := range block.Rows {
+		for i := 0; i < cols; i++ {
+			cell := ""
+			if i < len(row) {
+				cell = displayText(row[i])
+			}
+			colWidths[i] = max(colWidths[i], min(maxCell, lipgloss.Width(cell)))
+		}
+	}
+	for i := range colWidths {
+		if colWidths[i] == 0 {
+			colWidths[i] = min(maxCell, 4)
+		}
+	}
+
+	var lines []string
+	for rowIdx, row := range block.Rows {
+		cells := make([]string, cols)
+		for i := 0; i < cols; i++ {
+			cell := ""
+			if i < len(row) {
+				cell = ansi.Truncate(displayText(row[i]), colWidths[i], "…")
+			}
+			cells[i] = padDisplay(cell, colWidths[i])
+		}
+		lines = append(lines, strings.Join(cells, " | "))
+		if rowIdx == 0 && len(block.Rows) > 1 {
+			parts := make([]string, cols)
+			for i, w := range colWidths {
+				parts[i] = strings.Repeat("-", max(3, w))
+			}
+			lines = append(lines, m.subtle(strings.Join(parts, "-+-")))
+		}
+	}
+	return wrapDetailLines(lines, width)
+}
+
+func (m *Model) renderDocImage(block api.DocBlock) ([]string, []attachmentLineRange) {
+	if block.Attachment == nil {
+		label := fallback(block.Text, "image")
+		return []string{m.subtle("[image] " + label)}, nil
+	}
+	attLines, ranges := m.renderAttachmentsTracked([]api.Attachment{*block.Attachment})
+	return attLines, ranges
+}
+
+func padDisplay(value string, width int) string {
+	if pad := width - lipgloss.Width(value); pad > 0 {
+		return value + strings.Repeat(" ", pad)
+	}
+	return value
 }
 
 func (m Model) paneHints() string {
@@ -1553,7 +1955,7 @@ func (m Model) actionTitle() string {
 	case FeatureMeet:
 		base = "create space · Enter create"
 	case FeatureTasks:
-		base = "tasks · [/] switch list · m more"
+		base = "tasks · Space complete · d delete · [/] switch list · m more"
 	case FeatureDrive:
 		base = "drive · / search · m more"
 	case FeatureDocs:
@@ -1582,9 +1984,9 @@ func (m Model) actionPlaceholder() string {
 	case FeatureCalendar:
 		return "Type quick-add text here with i, or press c for full event."
 	case FeatureMeet:
-		return "Press n then Enter to create a new Meet space."
+		return "Press n to create a new Meet space."
 	case FeatureTasks:
-		return "Use [ and ] to switch task lists, m to load more tasks."
+		return "Use Space to complete tasks, d to delete, [ and ] to switch lists."
 	case FeatureDrive:
 		return "Use / to search Drive, m to load more files."
 	case FeatureDocs:

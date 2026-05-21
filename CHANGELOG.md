@@ -6,6 +6,13 @@ This project follows semantic versioning once public releases begin.
 
 ## Unreleased
 
+- Make the detail pane URL-aware: focus detail, move the text cursor onto a
+  URL (or any line with a single URL), and press `Enter`/`o` to open it in the
+  default browser.
+- Make the Mail folder sidebar interactive: focus it with `H`, navigate with
+  `j`/`k`, and press `Enter` (or click) to load Inbox, Starred, Important,
+  Sent, Drafts, Spam, Trash, All Mail, or any custom Gmail label. The active
+  folder persists across restarts.
 - Prepare the repository for public GitHub release.
 - Document privacy, security, contribution, release, and Reddit launch
   workflows.

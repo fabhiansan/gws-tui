@@ -380,6 +380,21 @@ func TestRemoteClientRoundTripsWorkspaceMethods(t *testing.T) {
 			},
 		},
 		{
+			name:   "SetTaskCompleted",
+			method: "SetTaskCompleted",
+			result: TaskItem{ID: "task-1", TaskListID: "tasks-default", Title: "Review", Status: "completed"},
+			call: func(c *RemoteClient) error {
+				got, err := c.SetTaskCompleted(ctx, "tasks-default", "task-1", true)
+				if got.ID != "task-1" || got.Status != "completed" {
+					return fmt.Errorf("task=%#v", got)
+				}
+				return err
+			},
+		},
+		{name: "DeleteTask", method: "DeleteTask", call: func(c *RemoteClient) error {
+			return c.DeleteTask(ctx, "tasks-default", "task-1")
+		}},
+		{
 			name:   "DriveFiles",
 			method: "DriveFiles",
 			result: Page[DriveFile]{Items: []DriveFile{{ID: "drive-1", Name: "Release checklist.pdf"}}},

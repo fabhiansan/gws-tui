@@ -111,13 +111,9 @@ func TestCommandClientChatMembersIncludesDisplayName(t *testing.T) {
 
 func emitFakeChatEventStream() {
 	target := ""
-	once := false
 	for i, arg := range os.Args {
 		if arg == "--target" && i+1 < len(os.Args) {
 			target = os.Args[i+1]
-		}
-		if arg == "--once" {
-			once = true
 		}
 	}
 	// The hub subscribes to every space at once with the spaces/- target.
@@ -138,11 +134,6 @@ func emitFakeChatEventStream() {
 	if !hasProject && !hasSubscription {
 		fmt.Fprintln(os.Stderr, "events +subscribe missing --project/--subscription")
 		os.Exit(2)
-	}
-	if once {
-		// Viability probe (`--once`): exit cleanly so the hub commits to
-		// real-time delivery without streaming anything.
-		os.Exit(0)
 	}
 	event := map[string]any{
 		"type":    "google.workspace.chat.message.v1.created",
@@ -311,6 +302,42 @@ func TestCommandClientMailLabelsUsesGmailLabelsList(t *testing.T) {
 	}
 	if labels[len(labels)-1].Name != "All Mail" || labels[len(labels)-1].Query == "" {
 		t.Fatalf("expected synthesized All Mail query label, got %#v", labels[len(labels)-1])
+	}
+}
+
+func TestMailThreadFromRawMessageExtractsHTMLImageAttachments(t *testing.T) {
+	plainPart := rawGmailPart{MimeType: "text/plain"}
+	plainPart.Body.Data = base64.RawURLEncoding.EncodeToString([]byte("Plain text offer"))
+	htmlPart := rawGmailPart{MimeType: "text/html"}
+	htmlPart.Body.Data = base64.RawURLEncoding.EncodeToString([]byte(`<html><body><p>HTML offer</p><img src="https://images.example.com/render?id=42&amp;w=600"></body></html>`))
+
+	thread := mailThreadFromRawMessage(rawGmailMessage{
+		ID:           "msg-html",
+		ThreadID:     "thread-html",
+		LabelIDs:     []string{"INBOX"},
+		InternalDate: "1779199200000",
+		Payload: rawGmailPart{
+			MimeType: "multipart/alternative",
+			Headers: []rawGmailHeader{
+				{Name: "From", Value: "Shutterstock <emktng.shutterstock.com>"},
+				{Name: "Subject", Value: "Konten terbaru"},
+			},
+			Parts: []rawGmailPart{plainPart, htmlPart},
+		},
+	}, "")
+
+	if thread.Body != "Plain text offer" {
+		t.Fatalf("expected plain body to remain preferred, got %q", thread.Body)
+	}
+	if len(thread.Attachments) != 1 {
+		t.Fatalf("expected one HTML image attachment, got %#v", thread.Attachments)
+	}
+	attachment := thread.Attachments[0]
+	if attachment.URL != "https://images.example.com/render?id=42&w=600" {
+		t.Fatalf("unexpected HTML image URL: %#v", attachment)
+	}
+	if attachment.ContentType != "image/unknown" || !attachment.IsImage() {
+		t.Fatalf("expected extensionless HTML image to be previewable: %#v", attachment)
 	}
 }
 
@@ -488,6 +515,16 @@ func TestCommandClientTasksLoadsTaskListsAndTasks(t *testing.T) {
 	if tasks.Items[0].TaskListID != "tasks-default" {
 		t.Fatalf("expected task list id stamped on task: %#v", tasks.Items[0])
 	}
+	updated, err := client.SetTaskCompleted(context.Background(), "tasks-default", "task-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != "task-1" || updated.Status != "completed" || updated.Completed.IsZero() {
+		t.Fatalf("unexpected completed task: %#v", updated)
+	}
+	if err := client.DeleteTask(context.Background(), "tasks-default", "task-1"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCommandClientMeetSpacesLoadsConferenceRecordDetails(t *testing.T) {
@@ -502,6 +539,9 @@ func TestCommandClientMeetSpacesLoadsConferenceRecordDetails(t *testing.T) {
 		t.Fatalf("unexpected meet records: %#v", meet)
 	}
 	record := meet.Items[0]
+	if record.SpaceName != "spaces/meet-1" || record.JoinURL() != "https://meet.google.com/abc-defg-hij" {
+		t.Fatalf("meet record space/link not enriched: %#v", record)
+	}
 	if len(record.Participants) != 1 || record.Participants[0].DisplayName != "Alice" {
 		t.Fatalf("participants not loaded: %#v", record.Participants)
 	}
@@ -535,8 +575,18 @@ func TestCommandClientDriveAndDocs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.Title != "Launch notes" || doc.Body != "Hello docs\nSecond line" {
+	wantBody := "Launch notes\n- Review risks\nSpec (https://example.com/spec)\n[image: Architecture]\nRequirement | Approved"
+	if doc.Title != "Launch notes" || doc.Body != wantBody {
 		t.Fatalf("unexpected doc: %#v", doc)
+	}
+	if len(doc.Blocks) != 5 {
+		t.Fatalf("expected structured doc blocks, got %#v", doc.Blocks)
+	}
+	if doc.Blocks[0].Kind != DocBlockTitle || doc.Blocks[1].Kind != DocBlockListItem || doc.Blocks[3].Kind != DocBlockImage {
+		t.Fatalf("unexpected block kinds: %#v", doc.Blocks)
+	}
+	if len(doc.Attachments) != 1 || doc.Attachments[0].PreviewSource() != "https://example.com/architecture.png" {
+		t.Fatalf("unexpected doc image attachments: %#v", doc.Attachments)
 	}
 }
 
@@ -544,6 +594,11 @@ func fakeCommand() {
 	// `events +subscribe` does not take --params; handle it before requiring one.
 	if len(os.Args) >= 3 && os.Args[1] == "events" && os.Args[2] == "+subscribe" {
 		emitFakeChatEventStream()
+		return
+	}
+	// `events +renew` takes --name, not --params; handle it before requiring one.
+	if len(os.Args) >= 3 && os.Args[1] == "events" && os.Args[2] == "+renew" {
+		fmt.Print(`{}`)
 		return
 	}
 
@@ -566,6 +621,18 @@ func fakeCommand() {
 	}
 
 	switch {
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "events" &&
+		os.Args[2] == "subscriptions" &&
+		os.Args[3] == "list":
+		// Read-only reachability probe / health check: report no existing
+		// Workspace Events subscriptions.
+		fmt.Print(`{}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "events" &&
+		os.Args[2] == "subscriptions" &&
+		os.Args[3] == "delete":
+		fmt.Print(`{"done":true}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "chat" &&
 		os.Args[2] == "spaces" &&
@@ -1097,6 +1164,15 @@ func fakeCommand() {
 			os.Exit(2)
 		}
 		fmt.Print(`{"conferenceRecords":[{"name":"conferenceRecords/rec-1","space":"spaces/meet-1","startTime":"2026-05-20T09:00:00+07:00","endTime":"2026-05-20T10:00:00+07:00"}]}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "meet" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "get":
+		if params["name"] != "spaces/meet-1" {
+			fmt.Fprintf(os.Stderr, "unexpected meet space get params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"name":"spaces/meet-1","meetingUri":"https://meet.google.com/abc-defg-hij","meetingCode":"abc-defg-hij","config":{"accessType":"TRUSTED"}}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "meet" &&
 		os.Args[2] == "conferenceRecords" &&
@@ -1146,6 +1222,44 @@ func fakeCommand() {
 		}
 		fmt.Print(`{"items":[{"id":"task-1","title":"Review launch checklist","notes":"Ship docs","status":"needsAction","due":"2026-05-21T00:00:00.000Z","updated":"2026-05-20T08:30:00+07:00"}]}`)
 	case len(os.Args) >= 5 &&
+		os.Args[1] == "tasks" &&
+		os.Args[2] == "tasks" &&
+		os.Args[3] == "patch":
+		if params["tasklist"] != "tasks-default" || params["task"] != "task-1" {
+			fmt.Fprintf(os.Stderr, "unexpected task patch params: %v\n", params)
+			os.Exit(2)
+		}
+		jsonIndex := -1
+		for i, arg := range os.Args {
+			if arg == "--json" && i+1 < len(os.Args) {
+				jsonIndex = i + 1
+				break
+			}
+		}
+		if jsonIndex == -1 {
+			fmt.Fprintln(os.Stderr, "missing task patch body")
+			os.Exit(2)
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(os.Args[jsonIndex]), &body); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid task patch body: %v\n", err)
+			os.Exit(2)
+		}
+		if body["status"] != "completed" {
+			fmt.Fprintf(os.Stderr, "unexpected task patch body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"id":"task-1","title":"Review launch checklist","notes":"Ship docs","status":"completed","completed":"2026-05-20T09:00:00.000Z","updated":"2026-05-20T09:00:00+07:00"}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "tasks" &&
+		os.Args[2] == "tasks" &&
+		os.Args[3] == "delete":
+		if params["tasklist"] != "tasks-default" || params["task"] != "task-1" {
+			fmt.Fprintf(os.Stderr, "unexpected task delete params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"done":true}`)
+	case len(os.Args) >= 5 &&
 		os.Args[1] == "drive" &&
 		os.Args[2] == "files" &&
 		os.Args[3] == "get":
@@ -1190,7 +1304,7 @@ func fakeCommand() {
 			fmt.Fprintf(os.Stderr, "unexpected doc params: %v\n", params)
 			os.Exit(2)
 		}
-		fmt.Print(`{"documentId":"doc-1","title":"Launch notes","body":{"content":[{"paragraph":{"elements":[{"textRun":{"content":"Hello docs\n"}}]}},{"paragraph":{"elements":[{"textRun":{"content":"Second line\n"}}]}}]}}`)
+		fmt.Print(`{"documentId":"doc-1","title":"Launch notes","body":{"content":[{"paragraph":{"paragraphStyle":{"namedStyleType":"TITLE"},"elements":[{"textRun":{"content":"Launch notes\n","textStyle":{"bold":true}}}]}},{"paragraph":{"bullet":{"listId":"list-1","nestingLevel":0},"elements":[{"textRun":{"content":"Review risks\n"}}]}},{"paragraph":{"elements":[{"textRun":{"content":"Spec\n","textStyle":{"link":{"url":"https://example.com/spec"}}}}]}},{"paragraph":{"elements":[{"inlineObjectElement":{"inlineObjectId":"img-1"}}]}},{"table":{"tableRows":[{"tableCells":[{"content":[{"paragraph":{"elements":[{"textRun":{"content":"Requirement\n"}}]}}]},{"content":[{"paragraph":{"elements":[{"textRun":{"content":"Approved\n"}}]}}]}]}]}}]},"inlineObjects":{"img-1":{"objectId":"img-1","inlineObjectProperties":{"embeddedObject":{"title":"Architecture","imageProperties":{"contentUri":"https://example.com/architecture.png"}}}}}}`)
 	default:
 		fmt.Fprintf(os.Stderr, "unexpected command: %s\n", strings.Join(os.Args[1:], " "))
 		os.Exit(2)

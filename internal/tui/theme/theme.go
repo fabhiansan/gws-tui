@@ -182,8 +182,8 @@ func New(name string, noColor bool) Theme {
 
 	if noColor {
 		t.Root = lipgloss.NewStyle()
-		t.Pane = lipgloss.NewStyle().Border(rounded).Padding(0, 2)
-		t.Active = lipgloss.NewStyle().Border(thick).Padding(0, 2).Bold(true)
+		t.Pane = lipgloss.NewStyle().Border(rounded).Padding(0, 2, 0, 1)
+		t.Active = lipgloss.NewStyle().Border(thick).Padding(0, 2, 0, 1).Bold(true)
 		t.Selected = lipgloss.NewStyle().Reverse(true)
 		t.Title = lipgloss.NewStyle().Bold(true)
 		t.Subtitle = lipgloss.NewStyle().Bold(true).Faint(true)
@@ -222,13 +222,13 @@ func New(name string, noColor bool) Theme {
 	t.Pane = lipgloss.NewStyle().
 		Border(rounded).
 		BorderForeground(border).
-		Padding(0, 2)
+		Padding(0, 2, 0, 1)
 
 	t.Active = lipgloss.NewStyle().
 		Border(thick).
 		BorderForeground(borderActive).
 		Foreground(fg).
-		Padding(0, 2).
+		Padding(0, 2, 0, 1).
 		Bold(true)
 
 	t.Selected = lipgloss.NewStyle().

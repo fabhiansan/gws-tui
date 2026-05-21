@@ -154,6 +154,95 @@ type rawDriveFile struct {
 	Parents      []string `json:"parents"`
 }
 
+type rawDocDocument struct {
+	DocumentID    string                        `json:"documentId"`
+	Title         string                        `json:"title"`
+	Body          rawDocBody                    `json:"body"`
+	InlineObjects map[string]rawDocInlineObject `json:"inlineObjects"`
+}
+
+type rawDocBody struct {
+	Content []rawDocStructuralElement `json:"content"`
+}
+
+type rawDocStructuralElement struct {
+	Paragraph *rawDocParagraph `json:"paragraph"`
+	Table     *rawDocTable     `json:"table"`
+}
+
+type rawDocParagraph struct {
+	Elements       []rawDocParagraphElement `json:"elements"`
+	ParagraphStyle rawDocParagraphStyle     `json:"paragraphStyle"`
+	Bullet         *rawDocBullet            `json:"bullet"`
+}
+
+type rawDocParagraphStyle struct {
+	NamedStyleType string `json:"namedStyleType"`
+}
+
+type rawDocBullet struct {
+	ListID       string `json:"listId"`
+	NestingLevel int    `json:"nestingLevel"`
+}
+
+type rawDocParagraphElement struct {
+	TextRun             *rawDocTextRun             `json:"textRun"`
+	InlineObjectElement *rawDocInlineObjectElement `json:"inlineObjectElement"`
+}
+
+type rawDocTextRun struct {
+	Content   string          `json:"content"`
+	TextStyle rawDocTextStyle `json:"textStyle"`
+}
+
+type rawDocTextStyle struct {
+	Bold          bool       `json:"bold"`
+	Italic        bool       `json:"italic"`
+	Underline     bool       `json:"underline"`
+	Strikethrough bool       `json:"strikethrough"`
+	Link          rawDocLink `json:"link"`
+}
+
+type rawDocLink struct {
+	URL string `json:"url"`
+}
+
+type rawDocInlineObjectElement struct {
+	InlineObjectID string `json:"inlineObjectId"`
+}
+
+type rawDocTable struct {
+	TableRows []rawDocTableRow `json:"tableRows"`
+}
+
+type rawDocTableRow struct {
+	TableCells []rawDocTableCell `json:"tableCells"`
+}
+
+type rawDocTableCell struct {
+	Content []rawDocStructuralElement `json:"content"`
+}
+
+type rawDocInlineObject struct {
+	ObjectID               string                       `json:"objectId"`
+	InlineObjectProperties rawDocInlineObjectProperties `json:"inlineObjectProperties"`
+}
+
+type rawDocInlineObjectProperties struct {
+	EmbeddedObject rawDocEmbeddedObject `json:"embeddedObject"`
+}
+
+type rawDocEmbeddedObject struct {
+	Title           string                `json:"title"`
+	Description     string                `json:"description"`
+	ImageProperties rawDocImageProperties `json:"imageProperties"`
+}
+
+type rawDocImageProperties struct {
+	ContentURI string `json:"contentUri"`
+	SourceURI  string `json:"sourceUri"`
+}
+
 type rawMeetConferenceRecord struct {
 	Name       string `json:"name"`
 	Space      string `json:"space"`
@@ -1060,38 +1149,41 @@ func parseGmailDate(internal, header string) time.Time {
 }
 
 func gmailBody(part rawGmailPart) string {
-	mime := strings.ToLower(part.MimeType)
-	if strings.HasPrefix(mime, "text/plain") {
-		if decoded := decodeGmailData(part.Body.Data); decoded != "" {
-			return decoded
-		}
-	}
-	var plain, html string
-	for _, child := range part.Parts {
-		body := gmailBody(child)
-		if body == "" {
-			continue
-		}
-		childMime := strings.ToLower(child.MimeType)
-		switch {
-		case plain == "" && strings.HasPrefix(childMime, "text/plain"):
-			plain = body
-		case html == "" && strings.HasPrefix(childMime, "text/html"):
-			html = body
-		case plain == "" && html == "":
-			plain = body
-		}
-	}
+	plain, html := gmailBodyParts(part)
 	if plain != "" {
 		return plain
 	}
-	if html != "" {
-		return html
+	return html
+}
+
+func gmailBodyParts(part rawGmailPart) (plain, html string) {
+	mime := strings.ToLower(part.MimeType)
+	if strings.HasPrefix(mime, "text/plain") {
+		if decoded := decodeGmailData(part.Body.Data); decoded != "" {
+			return decoded, ""
+		}
+	}
+	if strings.HasPrefix(mime, "text/html") {
+		if decoded := decodeGmailData(part.Body.Data); decoded != "" {
+			return "", decoded
+		}
+	}
+	for _, child := range part.Parts {
+		childPlain, childHTML := gmailBodyParts(child)
+		if childPlain == "" && childHTML == "" {
+			continue
+		}
+		if plain == "" && childPlain != "" {
+			plain = childPlain
+		}
+		if html == "" && childHTML != "" {
+			html = childHTML
+		}
 	}
 	if strings.HasPrefix(mime, "text/") {
-		return decodeGmailData(part.Body.Data)
+		return decodeGmailData(part.Body.Data), ""
 	}
-	return ""
+	return plain, html
 }
 
 func decodeGmailData(data string) string {
@@ -1195,13 +1287,23 @@ func (c *CommandClient) MailLabels(ctx context.Context) ([]MailLabel, error) {
 }
 
 func (c *CommandClient) MailThreads(ctx context.Context, q MailQuery) (Page[MailThread], error) {
-	params := map[string]any{"userId": "me", "maxResults": 20}
+	params := map[string]any{"userId": "me", "maxResults": 50}
 	if q.PageToken != "" {
 		params["pageToken"] = q.PageToken
 	}
-	if q.Search != "" {
+	if q.IncludeSpamTrash {
+		params["includeSpamTrash"] = true
+	}
+	switch {
+	case q.Search != "":
 		params["q"] = q.Search
-	} else if q.Label != "" && q.Label != "All Mail" {
+	case len(q.LabelIDs) > 0:
+		params["labelIds"] = q.LabelIDs
+	case q.LabelQuery != "":
+		params["q"] = q.LabelQuery
+	case q.Label != "" && q.Label != "All Mail":
+		// Fallback for callers that only set a display name (e.g. the
+		// daemon's initial fetch): map it to a Gmail system label ID.
 		params["labelIds"] = []string{strings.ToUpper(strings.ReplaceAll(q.Label, " ", "_"))}
 	}
 	payload, _ := json.Marshal(params)
@@ -1284,7 +1386,10 @@ func (c *CommandClient) fetchMailThread(ctx context.Context, threadID string) (M
 func mailThreadFromRawMessage(raw rawGmailMessage, threadID string) MailThread {
 	headers := flattenGmailHeaders(raw.Payload.Headers)
 	senderName, senderEmail := parseFromHeader(headers["from"])
-	body := gmailBody(raw.Payload)
+	body, htmlBody := gmailBodyParts(raw.Payload)
+	if body == "" {
+		body = htmlBody
+	}
 	snippet := raw.Snippet
 	if snippet == "" {
 		snippet = firstLine(body)
@@ -1299,7 +1404,7 @@ func mailThreadFromRawMessage(raw rawGmailMessage, threadID string) MailThread {
 		Snippet:     snippet,
 		Date:        parseGmailDate(raw.InternalDate, headers["date"]),
 		Body:        body,
-		Attachments: MergeAttachments(gmailAttachments(raw.ID, raw.Payload), ImageAttachmentsFromText(body)),
+		Attachments: MergeAttachments(gmailAttachments(raw.ID, raw.Payload), ImageAttachmentsFromText(body), ImageAttachmentsFromHTML(htmlBody)),
 		Unread:      containsLabel(raw.LabelIDs, "UNREAD"),
 		Starred:     containsLabel(raw.LabelIDs, "STARRED"),
 		Labels:      raw.LabelIDs,
@@ -1830,13 +1935,30 @@ func (c *CommandClient) MeetSpaces(ctx context.Context) (Page[MeetSpace], error)
 	items := make([]MeetSpace, 0, len(source))
 	for _, record := range source {
 		space := MeetSpace{
-			Name:       record.Name,
-			MeetingURI: record.Space,
-			Created:    parseRFC3339(record.StartTime),
-			StartTime:  parseRFC3339(record.StartTime),
-			EndTime:    parseRFC3339(record.EndTime),
-			Type:       "conferenceRecord",
-			Active:     record.EndTime == "",
+			Name:      record.Name,
+			SpaceName: record.Space,
+			Created:   parseRFC3339(record.StartTime),
+			StartTime: parseRFC3339(record.StartTime),
+			EndTime:   parseRFC3339(record.EndTime),
+			Type:      "conferenceRecord",
+			Active:    record.EndTime == "",
+		}
+		if details, err := c.meetSpace(ctx, record.Space); err == nil {
+			if details.MeetingURI != "" {
+				space.MeetingURI = details.MeetingURI
+			}
+			if details.MeetingCode != "" {
+				space.MeetingCode = details.MeetingCode
+			}
+			if details.Config != nil {
+				space.Config = details.Config
+			}
+			if details.SpaceResourceName() != "" {
+				space.SpaceName = details.SpaceResourceName()
+			}
+			if details.ActiveConference != nil && details.ActiveConference.ConferenceRecord == record.Name {
+				space.ActiveConference = details.ActiveConference
+			}
 		}
 		space.Participants, _ = c.meetParticipants(ctx, record.Name)
 		space.Recordings, _ = c.meetArtifacts(ctx, record.Name, "recordings")
@@ -1851,7 +1973,29 @@ func (c *CommandClient) MeetSpaces(ctx context.Context) (Page[MeetSpace], error)
 func (c *CommandClient) CreateMeetSpace(ctx context.Context, _ string) (MeetSpace, error) {
 	var raw MeetSpace
 	err := c.runJSON(ctx, &raw, "meet", "spaces", "create", "--json", "{}", "--format", "json")
+	if raw.SpaceName == "" {
+		raw.SpaceName = raw.SpaceResourceName()
+	}
 	return raw, err
+}
+
+func (c *CommandClient) meetSpace(ctx context.Context, name string) (MeetSpace, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MeetSpace{}, errors.New("meet space name is required")
+	}
+	params, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return MeetSpace{}, err
+	}
+	var raw MeetSpace
+	if err := c.runJSON(ctx, &raw, "meet", "spaces", "get", "--params", string(params), "--format", "json"); err != nil {
+		return MeetSpace{}, err
+	}
+	if raw.SpaceName == "" {
+		raw.SpaceName = raw.SpaceResourceName()
+	}
+	return raw, nil
 }
 
 func (c *CommandClient) EndMeetSpace(ctx context.Context, name string) error {
@@ -1985,20 +2129,55 @@ func (c *CommandClient) Tasks(ctx context.Context, q TaskQuery) (Page[TaskItem],
 	}
 	items := make([]TaskItem, 0, len(source))
 	for _, item := range source {
-		items = append(items, TaskItem{
-			ID:         item.ID,
-			TaskListID: q.TaskListID,
-			Title:      fallback(item.Title, "(untitled task)"),
-			Notes:      item.Notes,
-			Status:     item.Status,
-			Due:        parseRFC3339(item.Due),
-			Completed:  parseRFC3339(item.Completed),
-			Updated:    parseRFC3339(item.Updated),
-			Parent:     item.Parent,
-			Position:   item.Position,
-		})
+		items = append(items, taskItemFromRaw(q.TaskListID, item))
 	}
 	return Page[TaskItem]{Items: items, NextPageToken: raw.NextPageToken}, nil
+}
+
+func (c *CommandClient) SetTaskCompleted(ctx context.Context, taskListID, taskID string, completed bool) (TaskItem, error) {
+	if strings.TrimSpace(taskListID) == "" {
+		return TaskItem{}, errors.New("task list id is required")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return TaskItem{}, errors.New("task id is required")
+	}
+	status := "needsAction"
+	if completed {
+		status = "completed"
+	}
+	params, _ := json.Marshal(map[string]any{"tasklist": taskListID, "task": taskID})
+	body, _ := json.Marshal(map[string]any{"status": status})
+	var raw rawTaskItem
+	if err := c.runJSON(ctx, &raw, "tasks", "tasks", "patch", "--params", string(params), "--json", string(body), "--format", "json"); err != nil {
+		return TaskItem{}, err
+	}
+	return taskItemFromRaw(taskListID, raw), nil
+}
+
+func (c *CommandClient) DeleteTask(ctx context.Context, taskListID, taskID string) error {
+	if strings.TrimSpace(taskListID) == "" {
+		return errors.New("task list id is required")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return errors.New("task id is required")
+	}
+	params, _ := json.Marshal(map[string]any{"tasklist": taskListID, "task": taskID})
+	return c.runVoid(ctx, "tasks", "tasks", "delete", "--params", string(params), "--format", "json")
+}
+
+func taskItemFromRaw(taskListID string, item rawTaskItem) TaskItem {
+	return TaskItem{
+		ID:         item.ID,
+		TaskListID: taskListID,
+		Title:      fallback(item.Title, "(untitled task)"),
+		Notes:      item.Notes,
+		Status:     item.Status,
+		Due:        parseRFC3339(item.Due),
+		Completed:  parseRFC3339(item.Completed),
+		Updated:    parseRFC3339(item.Updated),
+		Parent:     item.Parent,
+		Position:   item.Position,
+	}
 }
 
 func (c *CommandClient) DriveFiles(ctx context.Context, q DriveQuery) (Page[DriveFile], error) {
@@ -2063,45 +2242,288 @@ func (c *CommandClient) Doc(ctx context.Context, documentID string) (DocDocument
 		return DocDocument{}, errors.New("document id is required")
 	}
 	params, _ := json.Marshal(map[string]string{"documentId": documentID})
-	var raw struct {
-		DocumentID string `json:"documentId"`
-		Title      string `json:"title"`
-		Body       struct {
-			Content []struct {
-				Paragraph *struct {
-					Elements []struct {
-						TextRun *struct {
-							Content string `json:"content"`
-						} `json:"textRun"`
-					} `json:"elements"`
-				} `json:"paragraph"`
-			} `json:"content"`
-		} `json:"body"`
-	}
+	var raw rawDocDocument
 	if err := c.runJSON(ctx, &raw, "docs", "documents", "get", "--params", string(params), "--format", "json"); err != nil {
 		return DocDocument{}, err
 	}
-	var body strings.Builder
-	for _, block := range raw.Body.Content {
-		if block.Paragraph == nil {
-			continue
-		}
-		for _, element := range block.Paragraph.Elements {
-			if element.TextRun != nil {
-				body.WriteString(element.TextRun.Content)
-			}
-		}
-	}
+	blocks, attachments := docBlocks(raw.Body.Content, raw.InlineObjects)
 	return DocDocument{
-		ID:    fallback(raw.DocumentID, documentID),
-		Title: fallback(raw.Title, "(untitled document)"),
-		Body:  strings.TrimSpace(body.String()),
+		ID:          fallback(raw.DocumentID, documentID),
+		Title:       fallback(raw.Title, "(untitled document)"),
+		Body:        docPlainText(blocks),
+		Blocks:      blocks,
+		Attachments: attachments,
 	}, nil
 }
 
+func docBodyText(content []rawDocStructuralElement) string {
+	blocks, _ := docBlocks(content, nil)
+	return docPlainText(blocks)
+}
+
+type docBlockParser struct {
+	inlineObjects map[string]rawDocInlineObject
+	seenImages    map[string]bool
+}
+
+func docBlocks(content []rawDocStructuralElement, inlineObjects map[string]rawDocInlineObject) ([]DocBlock, []Attachment) {
+	parser := docBlockParser{
+		inlineObjects: inlineObjects,
+		seenImages:    map[string]bool{},
+	}
+	return parser.blocks(content)
+}
+
+func (p *docBlockParser) blocks(content []rawDocStructuralElement) ([]DocBlock, []Attachment) {
+	var blocks []DocBlock
+	var attachments []Attachment
+	for _, block := range content {
+		if block.Paragraph != nil {
+			paragraphBlocks, paragraphAttachments := p.paragraphBlocks(block.Paragraph)
+			blocks = append(blocks, paragraphBlocks...)
+			attachments = append(attachments, paragraphAttachments...)
+		}
+		if block.Table != nil {
+			tableBlock, tableAttachments, ok := p.tableBlock(block.Table)
+			if ok {
+				blocks = append(blocks, tableBlock)
+			}
+			attachments = append(attachments, tableAttachments...)
+		}
+	}
+	return blocks, attachments
+}
+
+func (p *docBlockParser) paragraphBlocks(paragraph *rawDocParagraph) ([]DocBlock, []Attachment) {
+	if paragraph == nil {
+		return nil, nil
+	}
+	kind, level := docParagraphKind(paragraph)
+	listLevel := 0
+	if paragraph.Bullet != nil {
+		listLevel = max(0, paragraph.Bullet.NestingLevel)
+	}
+	var blocks []DocBlock
+	var attachments []Attachment
+	var inlines []DocInline
+
+	flushText := func() {
+		text := docInlinePlainText(inlines, true)
+		if strings.TrimSpace(text) == "" {
+			inlines = nil
+			return
+		}
+		blocks = append(blocks, DocBlock{
+			Kind:      kind,
+			Text:      text,
+			Inlines:   append([]DocInline(nil), inlines...),
+			Level:     level,
+			ListLevel: listLevel,
+		})
+		inlines = nil
+	}
+
+	for _, element := range paragraph.Elements {
+		if element.TextRun != nil {
+			inline := docInlineFromTextRun(element.TextRun)
+			if inline.Text != "" {
+				inlines = append(inlines, inline)
+			}
+			continue
+		}
+		if element.InlineObjectElement != nil {
+			flushText()
+			imageBlock, attachment, ok := p.imageBlock(element.InlineObjectElement.InlineObjectID)
+			if ok {
+				blocks = append(blocks, imageBlock)
+				if attachment != nil {
+					attachments = append(attachments, *attachment)
+				}
+			}
+		}
+	}
+	flushText()
+	return blocks, attachments
+}
+
+func docParagraphKind(paragraph *rawDocParagraph) (DocBlockKind, int) {
+	if paragraph != nil && paragraph.Bullet != nil {
+		return DocBlockListItem, max(0, paragraph.Bullet.NestingLevel)
+	}
+	named := ""
+	if paragraph != nil {
+		named = strings.ToUpper(strings.TrimSpace(paragraph.ParagraphStyle.NamedStyleType))
+	}
+	switch named {
+	case "TITLE":
+		return DocBlockTitle, 1
+	case "SUBTITLE":
+		return DocBlockSubtitle, 2
+	}
+	if strings.HasPrefix(named, "HEADING_") {
+		level, err := strconv.Atoi(strings.TrimPrefix(named, "HEADING_"))
+		if err != nil || level < 1 {
+			level = 1
+		}
+		return DocBlockHeading, level
+	}
+	return DocBlockParagraph, 0
+}
+
+func docInlineFromTextRun(run *rawDocTextRun) DocInline {
+	if run == nil {
+		return DocInline{}
+	}
+	return DocInline{
+		Text:          docCleanRunText(run.Content),
+		Bold:          run.TextStyle.Bold,
+		Italic:        run.TextStyle.Italic,
+		Underline:     run.TextStyle.Underline,
+		Strikethrough: run.TextStyle.Strikethrough,
+		LinkURL:       strings.TrimSpace(run.TextStyle.Link.URL),
+	}
+}
+
+func docCleanRunText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.ReplaceAll(text, "\ue907", "")
+	return strings.TrimRight(text, "\n")
+}
+
+func (p *docBlockParser) imageBlock(inlineObjectID string) (DocBlock, *Attachment, bool) {
+	inlineObjectID = strings.TrimSpace(inlineObjectID)
+	if inlineObjectID == "" {
+		return DocBlock{}, nil, false
+	}
+	object, ok := p.inlineObjects[inlineObjectID]
+	if !ok {
+		return DocBlock{Kind: DocBlockImage, Text: "image " + inlineObjectID}, nil, true
+	}
+	embedded := object.InlineObjectProperties.EmbeddedObject
+	label := fallback(strings.TrimSpace(embedded.Title), strings.TrimSpace(embedded.Description))
+	if label == "" {
+		label = "image " + inlineObjectID
+	}
+	source := strings.TrimSpace(embedded.ImageProperties.ContentURI)
+	if source == "" {
+		source = strings.TrimSpace(embedded.ImageProperties.SourceURI)
+	}
+	block := DocBlock{Kind: DocBlockImage, Text: label}
+	if source == "" {
+		return block, nil, true
+	}
+	attachment := Attachment{
+		ID:          "doc-image-" + inlineObjectID,
+		Name:        label,
+		ContentType: "image/png",
+		URL:         source,
+	}
+	block.Attachment = &attachment
+	key := attachment.PreviewSource()
+	if key == "" || p.seenImages[key] {
+		return block, nil, true
+	}
+	p.seenImages[key] = true
+	return block, &attachment, true
+}
+
+func (p *docBlockParser) tableBlock(table *rawDocTable) (DocBlock, []Attachment, bool) {
+	if table == nil {
+		return DocBlock{}, nil, false
+	}
+	var rows [][]string
+	var attachments []Attachment
+	for _, row := range table.TableRows {
+		cells := make([]string, 0, len(row.TableCells))
+		for _, cell := range row.TableCells {
+			cellBlocks, cellAttachments := p.blocks(cell.Content)
+			cells = append(cells, strings.Join(strings.Fields(docPlainText(cellBlocks)), " "))
+			attachments = append(attachments, cellAttachments...)
+		}
+		if len(cells) == 0 {
+			continue
+		}
+		rows = append(rows, cells)
+	}
+	if len(rows) == 0 {
+		return DocBlock{}, attachments, false
+	}
+	return DocBlock{Kind: DocBlockTable, Rows: rows, Text: docTablePlainText(rows)}, attachments, true
+}
+
+func docInlinePlainText(inlines []DocInline, includeLinks bool) string {
+	var b strings.Builder
+	for _, inline := range inlines {
+		text := inline.Text
+		if includeLinks && inline.LinkURL != "" && !strings.Contains(text, inline.LinkURL) {
+			if strings.TrimSpace(text) == "" {
+				text = inline.LinkURL
+			} else {
+				text += " (" + inline.LinkURL + ")"
+			}
+		}
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+func docPlainText(blocks []DocBlock) string {
+	var lines []string
+	for _, block := range blocks {
+		switch block.Kind {
+		case DocBlockImage:
+			if strings.TrimSpace(block.Text) != "" {
+				lines = append(lines, "[image: "+strings.TrimSpace(block.Text)+"]")
+			}
+		case DocBlockTable:
+			if table := docTablePlainText(block.Rows); table != "" {
+				lines = append(lines, table)
+			}
+		default:
+			text := strings.TrimSpace(block.Text)
+			if text == "" {
+				text = strings.TrimSpace(docInlinePlainText(block.Inlines, true))
+			}
+			if text != "" {
+				if block.Kind == DocBlockListItem {
+					text = strings.Repeat("  ", max(0, block.ListLevel)) + "- " + text
+				}
+				lines = append(lines, text)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func docTablePlainText(rows [][]string) string {
+	var lines []string
+	for _, row := range rows {
+		line := strings.TrimSpace(strings.Join(row, " | "))
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Close stops the shared chat event stream and removes the Workspace Events
+// subscription it provisioned. Cancelling closeCtx makes the +subscribe helper
+// receive SIGTERM, so its --cleanup handler deletes the Pub/Sub topic and
+// subscription; the Workspace Events subscription is not covered by --cleanup,
+// so it is deleted here explicitly. The teardown runs on a fresh context
+// because closeCtx is cancelled first.
 func (c *CommandClient) Close() error {
+	c.chatEventMu.Lock()
+	hub := c.chatEventHub
+	c.chatEventMu.Unlock()
 	if c.closeCancel != nil {
 		c.closeCancel()
+	}
+	if hub != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		c.deleteChatEventSubscriptions(ctx)
+		cancel()
 	}
 	return nil
 }
@@ -2194,6 +2616,27 @@ func firstLine(value string) string {
 	}
 	line, _, _ := strings.Cut(value, "\n")
 	return strings.TrimSpace(line)
+}
+
+// upstreamErrorLine extracts the most useful diagnostic line from an upstream
+// gws command's stderr (or combined output). The CLI prints progress chatter
+// ("Using keyring backend: ...", "Creating Pub/Sub topic: ...") on the same
+// stream as real failures, so the first line is usually noise. Genuine
+// failures are prefixed with "error" (e.g. "error[auth]: ..."), so prefer
+// such a line; otherwise fall back to the last non-empty line.
+func upstreamErrorLine(output string) string {
+	var last string
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "error") {
+			return line
+		}
+		last = line
+	}
+	return last
 }
 
 func fallback(value, fallback string) string {

@@ -31,6 +31,10 @@ func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
 	m.mailLabels = cache.MailLabels
 	m.mailThreads = cache.MailThreads.Items
 	m.mailNext = cache.MailThreads.NextPageToken
+	m.mailFolder = cache.MailFolder
+	if m.mailFolder == "" {
+		m.mailFolder = defaultMailFolder
+	}
 	m.calendars = cache.CalendarLists
 	m.calendarIndex = indexOfCalendar(cache.CalendarLists, cache.CalendarID)
 	m.events = cache.Events.Items
@@ -131,6 +135,7 @@ func (m *Model) persistWorkspaceCache() {
 		Items:         m.mailThreads,
 		NextPageToken: m.mailNext,
 	}
+	m.cache.MailFolder = m.mailFolder
 	m.cache.Events = api.Page[api.CalendarEvent]{
 		Items:         m.events,
 		NextPageToken: m.calendarNext,

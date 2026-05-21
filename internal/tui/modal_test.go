@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fabhiansan/gws-tui/internal/api"
 )
 
@@ -62,5 +63,81 @@ func TestQuotedReplyBodyPutsReplyOnTop(t *testing.T) {
 	quoteIdx := strings.Index(body, "> first line")
 	if attribIdx == -1 || quoteIdx == -1 || attribIdx > quoteIdx {
 		t.Fatalf("attribution line must sit above the quoted original: %q", body)
+	}
+}
+
+// applyModalKey feeds one key through updateModal and folds the result back, so
+// a test can drive the modal the way the event loop does.
+func applyModalKey(m *Model, msg tea.KeyMsg) {
+	next, _ := m.updateModal(msg)
+	*m = next
+}
+
+func runes(s string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+func TestModalOpensInInsertMode(t *testing.T) {
+	m := &Model{cfg: Config{VimMode: true}, width: 100, height: 32}
+	m.openMailCompose(nil, mailComposeNew)
+	if m.modal == nil {
+		t.Fatal("compose modal should be open")
+	}
+	if m.modal.vimMode != vimModeInsert {
+		t.Fatalf("modal should open in INSERT so typing works immediately, got %v", m.modal.vimMode)
+	}
+}
+
+func TestModalEscDoesNotCloseInVimMode(t *testing.T) {
+	m := &Model{cfg: Config{VimMode: true}, width: 100, height: 32}
+	m.openMailCompose(nil, mailComposeNew)
+
+	applyModalKey(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.modal == nil {
+		t.Fatal("esc must not close the modal in vim mode — it should only leave INSERT")
+	}
+	if m.modal.vimMode != vimModeNormal {
+		t.Fatalf("esc should switch INSERT -> NORMAL, got %v", m.modal.vimMode)
+	}
+
+	// ^q is the explicit cancel.
+	applyModalKey(m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	if m.modal != nil {
+		t.Fatal("ctrl+q should close the modal")
+	}
+}
+
+func TestModalTypingLandsInFocusedField(t *testing.T) {
+	m := &Model{cfg: Config{VimMode: true}, width: 100, height: 32}
+	m.openMailCompose(nil, mailComposeNew)
+
+	applyModalKey(m, runes("hi@example.com"))
+	if got := m.modal.field("to"); got != "hi@example.com" {
+		t.Fatalf("typed text should land in the focused To field, got %q", got)
+	}
+}
+
+func TestModalVimNormalEditsField(t *testing.T) {
+	m := &Model{cfg: Config{VimMode: true}, width: 100, height: 32}
+	m.openMailCompose(nil, mailComposeNew)
+
+	applyModalKey(m, runes("junk"))
+	applyModalKey(m, tea.KeyMsg{Type: tea.KeyEsc}) // INSERT -> NORMAL
+	applyModalKey(m, runes("d"))
+	applyModalKey(m, runes("d")) // dd clears the single-line field
+	if got := m.modal.field("to"); got != "" {
+		t.Fatalf("dd in NORMAL should clear the field, got %q", got)
+	}
+}
+
+func TestModalReplyFocusesBody(t *testing.T) {
+	m := &Model{cfg: Config{VimMode: true}, width: 100, height: 32}
+	thread := &api.MailThread{ID: "t1", Sender: "Alice", SenderEmail: "alice@example.com"}
+	m.openMailCompose(thread, mailComposeReply)
+	if m.modal == nil {
+		t.Fatal("reply modal should be open")
+	}
+	if got := m.modal.fields[m.modal.focus].Name; got != "body" {
+		t.Fatalf("reply should focus the body field, focused %q", got)
 	}
 }

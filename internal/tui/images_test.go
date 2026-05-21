@@ -253,6 +253,58 @@ func TestImageCacheHitInvalidatesDetailRender(t *testing.T) {
 	}
 }
 
+func TestFeatureSwitchToChatPrecomputesCachedImageFrame(t *testing.T) {
+	t.Setenv("TERM", "xterm-kitty")
+	dir := t.TempDir()
+	source := "spaces/AAA/messages/BBB/attachments/CCC"
+	attachment := api.Attachment{
+		ResourceName: source,
+		Name:         "photo.png",
+		ContentType:  "image/png",
+	}
+	cachePath := attachment.CachePath(dir)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPNG(t, cachePath, 8, 8)
+
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      filepath.Join(t.TempDir(), "state.json"),
+			DraftDir:       t.TempDir(),
+			InlineImages:   true,
+			ImageCacheDir:  dir,
+		},
+	})
+	model.feature = FeatureMail
+	model.spaces = []api.Space{{Name: "spaces/AAA", DisplayName: "#aaa"}}
+	model.selected[FeatureChat] = 0
+	model.chatMessages = []api.ChatMessage{{
+		ID:          "msg-1",
+		Space:       "spaces/AAA",
+		Text:        "with image",
+		Attachments: []api.Attachment{attachment},
+	}}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(Model)
+
+	if model.feature != FeatureChat {
+		t.Fatalf("expected shift+tab to switch to chat, got %s", model.feature)
+	}
+	if got := model.imageFiles[source]; got != cachePath {
+		t.Fatalf("cached image path not registered: got %q want %q", got, cachePath)
+	}
+	if len(model.imageFramePend) != 1 {
+		t.Fatalf("expected cached image frame precompute to be queued, pending=%#v", model.imageFramePend)
+	}
+	if cmd == nil {
+		t.Fatal("expected precompute command")
+	}
+}
+
 func TestDownscaleForCellsShrinksLargeImages(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 4000, 3000))
 	scaled := downscaleForCells(src, 48, inlineImageRows)

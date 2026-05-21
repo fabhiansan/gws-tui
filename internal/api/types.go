@@ -282,10 +282,17 @@ type MailLabel struct {
 	IncludeSpamTrash bool     `json:"include_spam_trash,omitempty"`
 }
 
+// MailQuery describes one Gmail thread-list fetch. Label is the folder's
+// display name (kept for UI/state); LabelIDs, LabelQuery, and IncludeSpamTrash
+// are the resolved request parameters so custom labels and folders like Spam
+// or All Mail fetch correctly instead of relying on a name-to-ID guess.
 type MailQuery struct {
-	Label     string
-	Search    string
-	PageToken string
+	Label            string
+	LabelIDs         []string `json:"labelIds,omitempty"`
+	LabelQuery       string   `json:"labelQuery,omitempty"`
+	IncludeSpamTrash bool     `json:"includeSpamTrash,omitempty"`
+	Search           string
+	PageToken        string
 }
 
 type MailThread struct {
@@ -364,6 +371,7 @@ type EventDraft struct {
 
 type MeetSpace struct {
 	Name               string                `json:"name"`
+	SpaceName          string                `json:"spaceName,omitempty"`
 	MeetingURI         string                `json:"meetingUri"`
 	MeetingCode        string                `json:"meetingCode,omitempty"`
 	Created            time.Time             `json:"created,omitempty"`
@@ -446,9 +454,42 @@ type DriveQuery struct {
 }
 
 type DocDocument struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	ID          string       `json:"id"`
+	Title       string       `json:"title"`
+	Body        string       `json:"body"`
+	Blocks      []DocBlock   `json:"blocks,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+type DocBlockKind string
+
+const (
+	DocBlockParagraph DocBlockKind = "paragraph"
+	DocBlockTitle     DocBlockKind = "title"
+	DocBlockSubtitle  DocBlockKind = "subtitle"
+	DocBlockHeading   DocBlockKind = "heading"
+	DocBlockListItem  DocBlockKind = "list_item"
+	DocBlockTable     DocBlockKind = "table"
+	DocBlockImage     DocBlockKind = "image"
+)
+
+type DocBlock struct {
+	Kind       DocBlockKind `json:"kind"`
+	Text       string       `json:"text,omitempty"`
+	Inlines    []DocInline  `json:"inlines,omitempty"`
+	Level      int          `json:"level,omitempty"`
+	ListLevel  int          `json:"listLevel,omitempty"`
+	Rows       [][]string   `json:"rows,omitempty"`
+	Attachment *Attachment  `json:"attachment,omitempty"`
+}
+
+type DocInline struct {
+	Text          string `json:"text"`
+	Bold          bool   `json:"bold,omitempty"`
+	Italic        bool   `json:"italic,omitempty"`
+	Underline     bool   `json:"underline,omitempty"`
+	Strikethrough bool   `json:"strikethrough,omitempty"`
+	LinkURL       string `json:"linkUrl,omitempty"`
 }
 
 func (s MeetSpace) AccessType() string {
@@ -456,6 +497,24 @@ func (s MeetSpace) AccessType() string {
 		return s.Config.AccessType
 	}
 	return s.Type
+}
+
+func (s MeetSpace) JoinURL() string {
+	uri := strings.TrimSpace(s.MeetingURI)
+	if strings.HasPrefix(strings.ToLower(uri), "https://meet.google.com/") {
+		return uri
+	}
+	return ""
+}
+
+func (s MeetSpace) SpaceResourceName() string {
+	for _, value := range []string{s.SpaceName, s.Name, s.MeetingURI} {
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(value, "spaces/") {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s MeetSpace) IsActive() bool {
@@ -522,6 +581,8 @@ type WorkspaceClient interface {
 
 	TaskLists(context.Context) (Page[TaskList], error)
 	Tasks(context.Context, TaskQuery) (Page[TaskItem], error)
+	SetTaskCompleted(ctx context.Context, taskListID, taskID string, completed bool) (TaskItem, error)
+	DeleteTask(ctx context.Context, taskListID, taskID string) error
 
 	DriveFiles(context.Context, DriveQuery) (Page[DriveFile], error)
 	Docs(context.Context, DriveQuery) (Page[DriveFile], error)

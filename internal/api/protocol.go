@@ -168,6 +168,17 @@ type TasksParams struct {
 	Query TaskQuery `json:"query"`
 }
 
+type TaskIDParams struct {
+	TaskListID string `json:"task_list_id"`
+	TaskID     string `json:"task_id"`
+}
+
+type SetTaskCompletedParams struct {
+	TaskListID string `json:"task_list_id"`
+	TaskID     string `json:"task_id"`
+	Completed  bool   `json:"completed"`
+}
+
 type DriveFilesParams struct {
 	Query DriveQuery `json:"query"`
 }

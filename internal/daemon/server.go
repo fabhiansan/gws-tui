@@ -49,16 +49,17 @@ type Server struct {
 
 	startedAt time.Time
 
-	mu             sync.Mutex
-	nextSessionID  uint64
-	sessions       map[*Session]bool
-	chatCancels    map[string]context.CancelFunc
-	managedChats   map[string]bool
-	pinnedSpaces   map[string]bool
-	autoSpaces     map[string]bool
-	snapshot       api.WorkspaceSnapshot
-	snapshotLoaded bool
-	cacheLock      *api.SnapshotLock
+	mu               sync.Mutex
+	nextSessionID    uint64
+	sessions         map[*Session]bool
+	chatCancels      map[string]context.CancelFunc
+	managedChats     map[string]bool
+	pinnedSpaces     map[string]bool
+	autoSpaces       map[string]bool
+	chatDeliveryMode string
+	snapshot         api.WorkspaceSnapshot
+	snapshotLoaded   bool
+	cacheLock        *api.SnapshotLock
 }
 
 type Session struct {
@@ -170,7 +171,13 @@ func (s *Server) Close() {
 }
 
 func (s *Server) bootstrap() {
-	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	// A cold snapshot load fans out across every Chat space, mailbox, and
+	// calendar; on a large workspace, or when the Google APIs are slow, a tight
+	// budget aborts bootstrap and leaves the daemon with no chat setup at all
+	// (configureChatEvents below never runs). bootstrap runs in its own
+	// goroutine, so a generous budget costs nothing but a slightly later first
+	// paint on a cold start.
+	ctx, cancel := context.WithTimeout(s.ctx, 90*time.Second)
 	defer cancel()
 	s.mu.Lock()
 	loaded := s.snapshotLoaded && s.snapshot.HasData()
@@ -213,6 +220,9 @@ func (s *Server) configureChatEvents() {
 		Subscription: s.opts.ChatEventsSubscription,
 	})
 	mode := configurer.PrepareChatEvents()
+	s.mu.Lock()
+	s.chatDeliveryMode = mode
+	s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "gws daemon: chat delivery mode: %s\n", mode)
 }
 
@@ -250,16 +260,17 @@ func (s *Server) restorePinnedSubscriptions() {
 	}
 }
 
-// autoSubscribeTopSpaces opens chat loops for the most recently active spaces
-// so notifications and unread tracking keep working while no TUI is attached.
-// "Most recently active" = highest CreateTime across that space's prefetched
-// message page; spaces with no prefetched messages rank last.
+// autoSubscribeTopSpaces opens chat loops so notifications and unread tracking
+// keep working while no TUI is attached. In real-time mode the underlying
+// Workspace Events stream already covers every space, so the daemon can watch
+// all spaces. In polling mode it keeps the existing top-N limit.
 func (s *Server) autoSubscribeTopSpaces() {
 	if !s.opts.AutoSubscribeChats || s.opts.AutoSubscribeMax <= 0 {
 		return
 	}
 	s.mu.Lock()
 	snapshot := s.snapshot.Clone()
+	deliveryMode := s.chatDeliveryMode
 	s.mu.Unlock()
 	if len(snapshot.Spaces) == 0 {
 		return
@@ -287,6 +298,9 @@ func (s *Server) autoSubscribeTopSpaces() {
 		return scored[i].lastSeen.After(scored[j].lastSeen)
 	})
 	limit := s.opts.AutoSubscribeMax
+	if deliveryMode == "realtime" {
+		limit = len(scored)
+	}
 	if limit > len(scored) {
 		limit = len(scored)
 	}
@@ -805,6 +819,28 @@ func (s *Server) dispatch(session *Session, method string, params json.RawMessag
 			})
 		}
 		return page, err
+	case "SetTaskCompleted":
+		var p api.SetTaskCompletedParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		task, err := s.client.SetTaskCompleted(ctx, p.TaskListID, p.TaskID, p.Completed)
+		if err == nil {
+			s.applyTask(task)
+			s.broadcast("tasks.changed", task)
+		}
+		return task, err
+	case "DeleteTask":
+		var p api.TaskIDParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		err := s.client.DeleteTask(ctx, p.TaskListID, p.TaskID)
+		if err == nil {
+			s.removeTask(p.TaskListID, p.TaskID)
+			s.broadcast("tasks.changed", map[string]string{"task_list_id": p.TaskListID, "task_id": p.TaskID, "action": "deleted"})
+		}
+		return nil, err
 	case "DriveFiles":
 		var p api.DriveFilesParams
 		if err := decode(params, &p); err != nil {
@@ -1416,6 +1452,7 @@ func (s *Server) handleChatMessage(msg api.ChatMessage, fireNotify bool) {
 		page := snapshot.ChatMessagesBySpace[msg.Space]
 		page.Items = upsertChatMessage(page.Items, msg)
 		snapshot.ChatMessagesBySpace[msg.Space] = page
+		snapshot.Spaces = promoteChatSpaceToTop(snapshot.Spaces, msg.Space)
 	})
 	s.cacheAttachments([]api.ChatMessage{msg})
 	if fireNotify && !s.isSelfChatMessage(msg) {
@@ -1646,6 +1683,50 @@ func (s *Server) applyMeetSpace(space api.MeetSpace) {
 	})
 }
 
+func (s *Server) applyTask(task api.TaskItem) {
+	if task.ID == "" {
+		return
+	}
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		if task.TaskListID != "" {
+			if snapshot.TaskListID == "" {
+				snapshot.TaskListID = task.TaskListID
+			}
+			if snapshot.TaskListID != task.TaskListID {
+				return
+			}
+		}
+		for i := range snapshot.Tasks.Items {
+			if snapshot.Tasks.Items[i].ID == task.ID {
+				snapshot.Tasks.Items[i] = task
+				return
+			}
+		}
+		if snapshot.TaskListID == task.TaskListID {
+			snapshot.Tasks.Items = append(snapshot.Tasks.Items, task)
+		}
+	})
+}
+
+func (s *Server) removeTask(taskListID, taskID string) {
+	if taskID == "" {
+		return
+	}
+	s.updateSnapshot(func(snapshot *api.WorkspaceSnapshot) {
+		if taskListID != "" && snapshot.TaskListID != "" && snapshot.TaskListID != taskListID {
+			return
+		}
+		out := snapshot.Tasks.Items[:0]
+		for _, task := range snapshot.Tasks.Items {
+			if task.ID == taskID {
+				continue
+			}
+			out = append(out, task)
+		}
+		snapshot.Tasks.Items = out
+	})
+}
+
 func (s *Server) cacheAttachments(messages []api.ChatMessage) {
 	if s.opts.ImageCacheDir == "" {
 		return
@@ -1811,6 +1892,26 @@ func upsertChatMessage(items []api.ChatMessage, msg api.ChatMessage) []api.ChatM
 		return items[i].CreateTime.Before(items[j].CreateTime)
 	})
 	return items
+}
+
+func promoteChatSpaceToTop(spaces []api.Space, spaceName string) []api.Space {
+	if spaceName == "" || len(spaces) < 2 {
+		return spaces
+	}
+	for index, space := range spaces {
+		if space.Name != spaceName {
+			continue
+		}
+		if index == 0 {
+			return spaces
+		}
+		out := make([]api.Space, 0, len(spaces))
+		out = append(out, space)
+		out = append(out, spaces[:index]...)
+		out = append(out, spaces[index+1:]...)
+		return out
+	}
+	return spaces
 }
 
 func chatSpaceFromTopic(topic string) (string, bool) {

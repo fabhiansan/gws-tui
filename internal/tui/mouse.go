@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type paneRect struct {
@@ -14,10 +15,11 @@ func (r paneRect) contains(x, y int) bool {
 	return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h
 }
 
-// paneRects returns the outer bounding boxes (including border) of the three
-// main panes, using the same geometry the render path uses. Keeping this in
-// one place means hit-testing always matches what the user sees.
-func (m Model) paneRects() (list, detail, action paneRect) {
+// paneRects returns the outer bounding boxes (including border) of the panes,
+// using the same geometry the render path uses. Keeping this in one place
+// means hit-testing always matches what the user sees. The sidebar rect is
+// only populated for the Mail feature; it stays zero elsewhere.
+func (m Model) paneRects() (list, detail, action, sidebar paneRect) {
 	w, h := m.width, m.height
 	if w <= 0 {
 		w = 100
@@ -49,11 +51,22 @@ func (m Model) paneRects() (list, detail, action paneRect) {
 			mainContentH = max(5, h-statusH-detailVBorder-actionContentH-actionVBorder)
 			action = paneRect{x: sidebarTotalW, y: mainContentH + detailVBorder, w: mainTotalW, h: actionContentH + actionVBorder}
 		}
+		sidebar = paneRect{x: 0, y: 0, w: sidebarTotalW, h: max(1, h-statusH)}
 		mainRect := paneRect{x: sidebarTotalW, y: 0, w: mainTotalW, h: mainContentH + detailVBorder}
-		if m.focusedPane == paneList {
+		if m.mailListVisible() {
 			list = mainRect
 		} else {
 			detail = mainRect
+		}
+		return
+	}
+
+	if m.feature == FeatureDocs {
+		mainRect := paneRect{x: 0, y: 0, w: w, h: max(1, h-statusH)}
+		if m.singlePaneDetailVisible() {
+			detail = mainRect
+		} else {
+			list = mainRect
 		}
 		return
 	}
@@ -77,7 +90,7 @@ func (m Model) paneRects() (list, detail, action paneRect) {
 }
 
 func (m Model) paneAt(x, y int) (pane, paneRect, bool) {
-	list, detail, action := m.paneRects()
+	list, detail, action, sidebar := m.paneRects()
 	if list.contains(x, y) {
 		return paneList, list, true
 	}
@@ -87,12 +100,18 @@ func (m Model) paneAt(x, y int) (pane, paneRect, bool) {
 	if action.contains(x, y) {
 		return paneAction, action, true
 	}
+	if sidebar.contains(x, y) {
+		return paneMailSidebar, sidebar, true
+	}
 	return 0, paneRect{}, false
 }
 
 func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
-	if m.helpVisible || m.modal != nil {
+	if m.helpVisible {
 		return m, nil
+	}
+	if m.modal != nil {
+		return m.updateModalMouse(msg)
 	}
 
 	target, rect, ok := m.paneAt(msg.X, msg.Y)
@@ -133,6 +152,9 @@ func (m Model) mouseScroll(target pane, delta int) (Model, tea.Cmd) {
 		} else {
 			m.detail.LineUp(-delta)
 		}
+		return m, nil
+	case paneMailSidebar:
+		m.moveMailFolderCursor(delta)
 		return m, nil
 	case paneAction:
 		// Forward wheel to the textarea so cursor moves naturally.
@@ -178,6 +200,16 @@ func (m Model) mouseClick(target pane, rect paneRect, x, y int) (Model, tea.Cmd)
 		if m.cfg.VimMode {
 			m.vimComposer = vimModeNormal
 		}
+	}
+
+	if target == paneMailSidebar {
+		if idx, ok := m.mailFolderRowAt(rect, y); ok {
+			if folders := m.mailFolderList(); idx >= 0 && idx < len(folders) {
+				m.mailFolderCursor = idx
+				return m.selectMailFolder()
+			}
+		}
+		return m, nil
 	}
 
 	if target == paneList {
@@ -233,6 +265,94 @@ func (m Model) listRowAt(rect paneRect, y int) (int, bool) {
 			visualRow++
 		}
 		return 0, false
+	}
+	return 0, false
+}
+
+// mailFolderRowAt maps an absolute Y coordinate inside the Mail folder rail to
+// a folder index, accounting for the pane border, title row, and the blank +
+// "Labels" header that separate the system folders from the user labels.
+func (m Model) mailFolderRowAt(rect paneRect, y int) (int, bool) {
+	vBorder := m.theme.Pane.GetVerticalBorderSize()
+	innerStart := rect.y + vBorder/2 + 1 // +1 for the title row
+	row := y - innerStart
+	if row < 0 {
+		return 0, false
+	}
+	systemCount := len(mailSystemFolderDefs)
+	if row < systemCount {
+		return row, true
+	}
+	// Rows systemCount and systemCount+1 are the blank line and "Labels"
+	// header; user labels begin two rows below the last system folder.
+	custom := row - systemCount - 2
+	if custom < 0 {
+		return 0, false
+	}
+	if idx := systemCount + custom; idx < len(m.mailFolderList()) {
+		return idx, true
+	}
+	return 0, false
+}
+
+// updateModalMouse handles mouse input while a compose modal is open: the
+// wheel scrolls the focused body textarea, and a left click focuses the field
+// under the pointer (entering INSERT mode so the user can type right away).
+func (m Model) updateModalMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	if m.modal == nil || len(m.modal.fields) == 0 {
+		return m, nil
+	}
+	field := &m.modal.fields[m.modal.focus]
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if field.Multiline {
+			for range mouseScrollLines(msg) {
+				field.update(tea.KeyMsg{Type: tea.KeyUp})
+			}
+		}
+		return m, nil
+	case tea.MouseButtonWheelDown:
+		if field.Multiline {
+			for range mouseScrollLines(msg) {
+				field.update(tea.KeyMsg{Type: tea.KeyDown})
+			}
+		}
+		return m, nil
+	}
+	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		if idx, ok := m.modalFieldAt(msg.X, msg.Y); ok {
+			m.modalSetFocus(idx)
+			if m.cfg.VimMode {
+				m.modal.vimMode = vimModeInsert
+			}
+		}
+	}
+	return m, nil
+}
+
+// modalFieldAt maps an absolute screen coordinate to the modal field drawn
+// there. It re-renders the modal to measure its real placement so the result
+// always matches what the user sees, then offsets past the top border and the
+// modal's top padding to reach the content rows.
+func (m Model) modalFieldAt(x, y int) (int, bool) {
+	if m.modal == nil {
+		return 0, false
+	}
+	rendered := m.renderModal(max(40, m.width-14))
+	boxW := lipgloss.Width(rendered)
+	boxH := lipgloss.Height(rendered)
+	boxX := (m.width - boxW) / 2
+	boxY := (m.height - boxH) / 2
+	if x < boxX || x >= boxX+boxW || y < boxY || y >= boxY+boxH {
+		return 0, false
+	}
+	row := y - boxY - 2 // skip the top border row and the top padding row
+	_, fieldOf := m.modalContentLines()
+	if row < 0 || row >= len(fieldOf) {
+		return 0, false
+	}
+	if idx := fieldOf[row]; idx >= 0 {
+		return idx, true
 	}
 	return 0, false
 }

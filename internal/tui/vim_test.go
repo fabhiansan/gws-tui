@@ -61,8 +61,8 @@ func TestVimDeleteLine(t *testing.T) {
 	m := newVimTestModel(t)
 	m.input.SetValue("alpha\nbeta\ngamma")
 	// SetValue leaves cursor at end of buffer; rewind to top, then go down once.
-	m.vimGotoTop()
-	m.sendToInput(tea.KeyMsg{Type: tea.KeyDown})
+	vimGotoTop(&m.input)
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyDown})
 	if m.input.Line() != 1 {
 		t.Fatalf("setup: expected cursor on line 1, got %d", m.input.Line())
 	}
@@ -80,7 +80,7 @@ func TestVimDeleteLine(t *testing.T) {
 func TestVimYankAndPasteLine(t *testing.T) {
 	m := newVimTestModel(t)
 	m.input.SetValue("alpha\nbeta")
-	m.vimGotoTop()
+	vimGotoTop(&m.input)
 	if m.input.Line() != 0 {
 		t.Fatalf("setup: expected line 0, got %d", m.input.Line())
 	}
@@ -102,7 +102,7 @@ func TestVimYankAndPasteLine(t *testing.T) {
 func TestVimGotoTopBottom(t *testing.T) {
 	m := newVimTestModel(t)
 	m.input.SetValue("one\ntwo\nthree")
-	m.sendToInput(tea.KeyMsg{Type: tea.KeyEnd})
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyEnd})
 	// G — bottom
 	sendKey(t, m, "G")
 	if m.input.Line() != 2 {
@@ -119,10 +119,99 @@ func TestVimGotoTopBottom(t *testing.T) {
 func TestVimDeleteChar(t *testing.T) {
 	m := newVimTestModel(t)
 	m.input.SetValue("hello")
-	m.vimGotoTop()
+	vimGotoTop(&m.input)
 	sendKey(t, m, "x")
 	if got := m.input.Value(); got != "ello" {
 		t.Fatalf("x should delete forward char, got %q", got)
+	}
+}
+
+func TestVimDeleteWord(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("foo bar baz")
+	vimGotoTop(&m.input)
+	sendKey(t, m, "d")
+	sendKey(t, m, "w")
+	if got := m.input.Value(); got != "bar baz" {
+		t.Fatalf("dw should delete word + trailing space, got %q", got)
+	}
+	if m.vimRegister != "foo " || m.vimRegisterLine {
+		t.Fatalf("dw register: got %q linewise=%v", m.vimRegister, m.vimRegisterLine)
+	}
+}
+
+func TestVimDeleteToWordEnd(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("foo bar")
+	vimGotoTop(&m.input)
+	sendKey(t, m, "d")
+	sendKey(t, m, "e")
+	if got := m.input.Value(); got != " bar" {
+		t.Fatalf("de should delete to word end, got %q", got)
+	}
+}
+
+func TestVimDeleteWordBack(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("foo bar")
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyEnd})
+	sendKey(t, m, "d")
+	sendKey(t, m, "b")
+	if got := m.input.Value(); got != "foo " {
+		t.Fatalf("db should delete previous word, got %q", got)
+	}
+}
+
+func TestVimDeleteToLineEnd(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("hello world")
+	vimGotoTop(&m.input)
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyRight})
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyRight})
+	sendKey(t, m, "d")
+	sendKey(t, m, "$")
+	if got := m.input.Value(); got != "he" {
+		t.Fatalf("d$ should delete to end of line, got %q", got)
+	}
+}
+
+func TestVimDeleteToLineEndShortcut(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("hello world")
+	vimGotoTop(&m.input)
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyRight})
+	sendToInput(&m.input, tea.KeyMsg{Type: tea.KeyRight})
+	sendKey(t, m, "D")
+	if got := m.input.Value(); got != "he" {
+		t.Fatalf("D should delete to end of line, got %q", got)
+	}
+}
+
+func TestVimChangeWord(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("foo bar")
+	vimGotoTop(&m.input)
+	sendKey(t, m, "c")
+	sendKey(t, m, "w")
+	if got := m.input.Value(); got != " bar" {
+		t.Fatalf("cw should change word like ce (keep trailing space), got %q", got)
+	}
+	if m.vimComposer != vimModeInsert {
+		t.Fatalf("cw should enter INSERT mode, got %v", m.vimComposer)
+	}
+}
+
+func TestVimYankWord(t *testing.T) {
+	m := newVimTestModel(t)
+	m.input.SetValue("foo bar")
+	vimGotoTop(&m.input)
+	sendKey(t, m, "y")
+	sendKey(t, m, "w")
+	if m.vimRegister != "foo " || m.vimRegisterLine {
+		t.Fatalf("yw register: got %q linewise=%v", m.vimRegister, m.vimRegisterLine)
+	}
+	if got := m.input.Value(); got != "foo bar" {
+		t.Fatalf("yw must not modify the buffer, got %q", got)
 	}
 }
 

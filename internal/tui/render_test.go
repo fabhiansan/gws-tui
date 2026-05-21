@@ -243,6 +243,168 @@ func TestRenderStatusFitsNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestDocsDefaultRenderUsesSingleListPane(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "docs",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.feature = FeatureDocs
+	model.cacheLoaded = true
+	model.loading = false
+	model.width = 100
+	model.height = 30
+	model.resize()
+	model.docFiles = []api.DriveFile{{ID: "doc-1", Name: "Launch notes"}}
+	model.doc = api.DocDocument{ID: "doc-1", Title: "Launch notes", Body: "Launch plan"}
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "[1]-Docs") {
+		t.Fatalf("Docs list pane missing:\n%s", view)
+	}
+	if strings.Contains(view, "[2]-") || strings.Contains(view, "Launch plan") {
+		t.Fatalf("Docs default view should not render detail pane:\n%s", view)
+	}
+
+	model.focusedPane = paneDetail
+	model.updateDetailContent()
+	view = ansi.Strip(model.View())
+	if !strings.Contains(view, "[2]-Launch notes") || !strings.Contains(view, "Launch plan") {
+		t.Fatalf("Docs detail pane did not replace list:\n%s", view)
+	}
+}
+
+func TestDocsDetailRendersStructuredBlocks(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "docs",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.feature = FeatureDocs
+	model.focusedPane = paneDetail
+	model.cacheLoaded = true
+	model.loading = false
+	model.width = 100
+	model.height = 30
+	model.resize()
+	model.docFiles = []api.DriveFile{{ID: "doc-1", Name: "Launch notes"}}
+	image := api.Attachment{Name: "Architecture", ContentType: "image/png", URL: "https://example.com/architecture.png"}
+	model.doc = api.DocDocument{
+		ID:    "doc-1",
+		Title: "Launch notes",
+		Body:  "Launch notes\n- Review risks\nRequirement | Approved\n[image: Architecture]",
+		Blocks: []api.DocBlock{
+			{Kind: api.DocBlockTitle, Text: "Launch notes", Inlines: []api.DocInline{{Text: "Launch notes", Bold: true}}},
+			{Kind: api.DocBlockListItem, Text: "Review risks", Inlines: []api.DocInline{{Text: "Review risks"}}},
+			{Kind: api.DocBlockTable, Rows: [][]string{{"Requirement", "Status"}, {"Review", "Approved"}}},
+			{Kind: api.DocBlockImage, Text: "Architecture", Attachment: &image},
+		},
+		Attachments: []api.Attachment{image},
+	}
+
+	model.updateDetailContent()
+	view := ansi.Strip(model.View())
+	for _, want := range []string{"Launch notes", "- Review risks", "Requirement", "Status", "[image] Architecture"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Docs rich detail missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestRenderMailSidebarShowsFoldersAndActiveMarker(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.feature = FeatureMail
+	model.width = 100
+	model.height = 30
+	model.resize()
+	model.mailFolder = "Starred"
+	model.mailLabels = []api.MailLabel{{Name: "Receipts", LabelIDs: []string{"Label_9"}}}
+
+	sidebar := ansi.Strip(model.renderMailSidebar(20, 24))
+	for _, folder := range []string{"Inbox", "Starred", "Important", "Sent", "Drafts", "Spam", "Trash", "All Mail"} {
+		if !strings.Contains(sidebar, folder) {
+			t.Errorf("sidebar missing system folder %q:\n%s", folder, sidebar)
+		}
+	}
+	if !strings.Contains(sidebar, "Receipts") {
+		t.Errorf("sidebar missing custom label:\n%s", sidebar)
+	}
+	if !strings.Contains(sidebar, "Labels") {
+		t.Errorf("sidebar missing Labels header:\n%s", sidebar)
+	}
+	// The active folder carries the '>' marker (ASCII icon mode).
+	if !strings.Contains(sidebar, "> Starred") {
+		t.Errorf("active folder Starred not marked:\n%s", sidebar)
+	}
+}
+
+func TestMailDetailSanitizesHTMLEntityArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.feature = FeatureMail
+	model.width = 100
+	model.height = 30
+	model.resize()
+	model.mailThreads = []api.MailThread{{
+		ID:          "thread-html",
+		Sender:      "Shutterstock",
+		SenderEmail: "emktng.shutterstock.com",
+		Subject:     "Konten terbaru",
+		Date:        time.Date(2026, 5, 21, 10, 14, 0, 0, time.UTC),
+		Labels:      []string{"CATEGORY_PROMOTIONS", "UNREAD", "INBOX"},
+		Body:        "Shutterstock<br>&zwnj; &zwnj; &zwnj;<div><b>Offer</b> ready</div>",
+	}}
+
+	got := ansi.Strip(model.mailDetail())
+	for _, leaked := range []string{"&zwnj;", "<br", "<div", "<b>"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("mail detail leaked %q:\n%s", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "Shutterstock") || !strings.Contains(got, "Offer ready") {
+		t.Fatalf("mail detail dropped visible body text:\n%s", got)
+	}
+}
+
+func TestMailBodyDisplayTextPreservesPlainAngleText(t *testing.T) {
+	got := mailBodyDisplayText("2 < 3 and keep <important> marker &amp; text")
+	want := "2 < 3 and keep <important> marker & text"
+	if got != want {
+		t.Fatalf("mail body plain text changed:\ngot  %q\nwant %q", got, want)
+	}
+}
+
 func TestWrapDetailLinesAccountsForAmbiguousWidth(t *testing.T) {
 	// The mail action hint is separated by · (U+00B7), an East Asian
 	// "ambiguous" glyph some terminals draw two cells wide. ansi.Wrap

@@ -9,7 +9,8 @@ import (
 )
 
 type testWorkspaceClient struct {
-	now time.Time
+	now       time.Time
+	endedMeet string
 }
 
 func newTestWorkspaceClient() *testWorkspaceClient {
@@ -258,7 +259,8 @@ func (c *testWorkspaceClient) CreateMeetSpace(_ context.Context, title string) (
 	return api.MeetSpace{Name: "spaces/meet-created", MeetingURI: "https://meet.google.com/" + title, Created: c.now}, nil
 }
 
-func (c *testWorkspaceClient) EndMeetSpace(context.Context, string) error {
+func (c *testWorkspaceClient) EndMeetSpace(_ context.Context, name string) error {
+	c.endedMeet = name
 	return nil
 }
 
@@ -279,6 +281,28 @@ func (c *testWorkspaceClient) Tasks(_ context.Context, query api.TaskQuery) (api
 		Due:        c.now.Add(24 * time.Hour),
 		Updated:    c.now.Add(-10 * time.Minute),
 	}}}, nil
+}
+
+func (c *testWorkspaceClient) SetTaskCompleted(_ context.Context, taskListID, taskID string, completed bool) (api.TaskItem, error) {
+	status := "needsAction"
+	completedAt := time.Time{}
+	if completed {
+		status = "completed"
+		completedAt = c.now
+	}
+	return api.TaskItem{
+		ID:         taskID,
+		TaskListID: taskListID,
+		Title:      "Review launch checklist",
+		Notes:      "Confirm release docs and install script.",
+		Status:     status,
+		Completed:  completedAt,
+		Updated:    c.now,
+	}, nil
+}
+
+func (c *testWorkspaceClient) DeleteTask(context.Context, string, string) error {
+	return nil
 }
 
 func (c *testWorkspaceClient) DriveFiles(context.Context, api.DriveQuery) (api.Page[api.DriveFile], error) {

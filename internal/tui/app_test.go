@@ -79,6 +79,73 @@ func TestNarrowRenderStaysWithinBounds(t *testing.T) {
 	}
 }
 
+func TestMeetResourceNameIsNotTreatedAsJoinURL(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "meet",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	model.feature = FeatureMeet
+	model.meetSpaces = []api.MeetSpace{{
+		Name:       "conferenceRecords/rec-1",
+		MeetingURI: "spaces/meet-1",
+		Type:       "conferenceRecord",
+	}}
+
+	updated, cmd := model.openMeetLink()
+	if cmd != nil {
+		t.Fatal("resource name should not produce a browser-open command")
+	}
+	if updated.toast != "no Meet URL available" {
+		t.Fatalf("toast=%q", updated.toast)
+	}
+	if strings.Contains(updated.meetDetail(), "Link:       spaces/meet-1") {
+		t.Fatalf("detail rendered API resource as join link:\n%s", updated.meetDetail())
+	}
+	if !strings.Contains(updated.meetDetail(), "Space:      spaces/meet-1") {
+		t.Fatalf("detail did not preserve space resource:\n%s", updated.meetDetail())
+	}
+}
+
+func TestEndMeetUsesSpaceResourceForConferenceRecord(t *testing.T) {
+	client := newTestWorkspaceClient()
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "meet",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	model.feature = FeatureMeet
+	model.meetSpaces = []api.MeetSpace{{
+		Name:      "conferenceRecords/rec-1",
+		SpaceName: "spaces/meet-1",
+		Active:    true,
+		Type:      "conferenceRecord",
+	}}
+
+	_, cmd := model.endSelectedMeet()
+	if cmd == nil {
+		t.Fatal("expected end command for active meet record")
+	}
+	msg := cmd().(meetActionMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if client.endedMeet != "spaces/meet-1" {
+		t.Fatalf("ended meet resource=%q", client.endedMeet)
+	}
+	if msg.space.Active {
+		t.Fatalf("ended space should be marked inactive: %#v", msg.space)
+	}
+}
+
 func TestLoadAllCommandEmitsProgressStages(t *testing.T) {
 	model := New(Options{
 		Client: newTestWorkspaceClient(),
@@ -750,15 +817,18 @@ func TestDaemonChatMessageEventHydratesOtherSpaceCache(t *testing.T) {
 	})
 	model = updated.(Model)
 
-	if !model.spaces[1].Unread {
+	if model.spaces[0].Name != "spaces/design" || !model.spaces[0].Unread {
 		t.Fatalf("chat.message event should mark other space unread: %#v", model.spaces)
+	}
+	if selected := model.selectedSpace().Name; selected != "spaces/engineering" {
+		t.Fatalf("incoming message should not change selected space, got %q", selected)
 	}
 	cached := model.cache.ChatMessagesBySpace["spaces/design"]
 	if len(cached.Items) != 2 || cached.Items[1].ID != "design-new" {
 		t.Fatalf("incoming daemon message was not cached for unopened space: %#v", cached.Items)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'j'}}))
+	updated, _ = model.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'k'}}))
 	model = updated.(Model)
 	if client.calls != 0 {
 		t.Fatalf("cached daemon message should avoid ChatMessages fetch, got %d calls", client.calls)
@@ -796,7 +866,10 @@ func TestIncomingSelfChatMessageDoesNotToastOrMarkUnread(t *testing.T) {
 	updated, _ := model.Update(realtimeMsg{message: selfMessage})
 	model = updated.(Model)
 
-	if model.spaces[1].Unread {
+	if model.spaces[0].Name != "spaces/design" {
+		t.Fatalf("self message should promote the updated space, got %#v", model.spaces)
+	}
+	if model.spaces[0].Unread {
 		t.Fatalf("self message should not mark other space unread: %#v", model.spaces)
 	}
 	if model.toast != "" {
@@ -1002,15 +1075,125 @@ func TestRefreshKeyOnlyReloadsMailFeature(t *testing.T) {
 	if client.mailLabelsCalls != 1 || client.mailThreadsCalls != 1 {
 		t.Fatalf("expected mail labels and threads refresh, labels=%d threads=%d", client.mailLabelsCalls, client.mailThreadsCalls)
 	}
-	if client.lastMailQuery.Label != "All Mail" || client.lastMailQuery.Search != "deck" {
+	if client.lastMailQuery.Search != "deck" {
 		t.Fatalf("expected current mail search to refresh, got query=%#v", client.lastMailQuery)
 	}
 	if client.authStatusCalls != 0 || client.chatSpacesCalls != 0 || client.chatMessagesCalls != 0 || client.calendarEventsCalls != 0 || client.meetSpacesCalls != 0 || client.taskListsCalls != 0 || client.tasksCalls != 0 || client.driveFilesCalls != 0 || client.docsCalls != 0 || client.docCalls != 0 {
 		t.Fatalf("mail refresh should not refetch other panes: auth=%d spaces=%d chat=%d calendar=%d meet=%d taskLists=%d tasks=%d drive=%d docs=%d doc=%d",
 			client.authStatusCalls, client.chatSpacesCalls, client.chatMessagesCalls, client.calendarEventsCalls, client.meetSpacesCalls, client.taskListsCalls, client.tasksCalls, client.driveFilesCalls, client.docsCalls, client.docCalls)
 	}
-	if model.toast != "mail refreshed" {
-		t.Fatalf("expected mail refreshed toast, got %q", model.toast)
+	if model.toast != "search: deck" {
+		t.Fatalf("expected mail search toast, got %q", model.toast)
+	}
+}
+
+func TestMailSidebarSelectsFolder(t *testing.T) {
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureMail
+	model.focusedPane = paneList
+
+	// H steps left from the inbox list into the folder rail.
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	model = updated
+	if model.focusedPane != paneMailSidebar {
+		t.Fatalf("expected folder sidebar focus, got %v", model.focusedPane)
+	}
+
+	// j twice moves the cursor Inbox -> Starred -> Important.
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected a folder load command")
+	}
+	if model.mailFolder != "Important" {
+		t.Fatalf("expected Important folder selected, got %q", model.mailFolder)
+	}
+	if model.focusedPane != paneList {
+		t.Fatalf("expected focus to return to the list, got %v", model.focusedPane)
+	}
+
+	msg := cmd()
+	refreshMsg, ok := msg.(featureRefreshedMsg)
+	if !ok {
+		t.Fatalf("expected featureRefreshedMsg, got %T", msg)
+	}
+	if got := client.lastMailQuery.LabelIDs; len(got) != 1 || got[0] != "IMPORTANT" {
+		t.Fatalf("expected IMPORTANT label query, got %#v", client.lastMailQuery)
+	}
+
+	updatedModel, _ := model.Update(refreshMsg)
+	model = updatedModel.(Model)
+	if model.toast != "Important" {
+		t.Fatalf("expected Important toast, got %q", model.toast)
+	}
+}
+
+func TestMailNumberKeyOneFocusesFolderRail(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "mail",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureMail
+	model.focusedPane = paneList
+
+	// In Mail, 1 jumps from the inbox list onto the folder rail.
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	model = updated
+	if model.focusedPane != paneMailSidebar {
+		t.Fatalf("expected folder rail focus after 1, got %v", model.focusedPane)
+	}
+
+	// Outside Mail there is no rail, so 1 still focuses the list pane.
+	model.feature = FeatureChat
+	model.focusedPane = paneDetail
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	model = updated
+	if model.focusedPane != paneList {
+		t.Fatalf("expected list focus after 1 outside Mail, got %v", model.focusedPane)
+	}
+}
+
+func TestMailQueryForFolderResolvesSystemFolders(t *testing.T) {
+	var model Model
+	cases := []struct {
+		folder          string
+		wantLabelIDs    []string
+		wantLabelQuery  string
+		wantIncludeSpam bool
+	}{
+		{"Drafts", []string{"DRAFT"}, "", false},
+		{"Spam", []string{"SPAM"}, "", true},
+		{"Trash", []string{"TRASH"}, "", true},
+		{"All Mail", nil, "-in:spam -in:trash", false},
+	}
+	for _, tc := range cases {
+		q := mailQueryForFolder(model.mailFolderByName(tc.folder), "", "")
+		if strings.Join(q.LabelIDs, ",") != strings.Join(tc.wantLabelIDs, ",") {
+			t.Errorf("%s: label IDs = %#v, want %#v", tc.folder, q.LabelIDs, tc.wantLabelIDs)
+		}
+		if q.LabelQuery != tc.wantLabelQuery {
+			t.Errorf("%s: label query = %q, want %q", tc.folder, q.LabelQuery, tc.wantLabelQuery)
+		}
+		if q.IncludeSpamTrash != tc.wantIncludeSpam {
+			t.Errorf("%s: includeSpamTrash = %t, want %t", tc.folder, q.IncludeSpamTrash, tc.wantIncludeSpam)
+		}
 	}
 }
 
@@ -1097,6 +1280,50 @@ func TestTasksFeatureSwitchesTaskLists(t *testing.T) {
 	}
 }
 
+func TestTasksFeatureTogglesAndDeletesSelectedTask(t *testing.T) {
+	client := &recordingTasksClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "tasks",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureTasks
+	model.taskLists = []api.TaskList{{ID: "tasks-default", Title: "My Tasks"}}
+	model.tasks = []api.TaskItem{{ID: "task-1", TaskListID: "tasks-default", Title: "Review", Status: "needsAction"}}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected task toggle command")
+	}
+	msg := cmd()
+	updatedModel, _ := model.Update(msg)
+	model = updatedModel.(Model)
+
+	if client.completedTaskID != "task-1" || !client.completed {
+		t.Fatalf("expected selected task completed, task=%q completed=%v", client.completedTaskID, client.completed)
+	}
+	if model.tasks[0].Status != "completed" || model.toast != "task completed" {
+		t.Fatalf("task was not completed in model: tasks=%#v toast=%q", model.tasks, model.toast)
+	}
+
+	updated, cmd = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected task delete command")
+	}
+	msg = cmd()
+	updatedModel, _ = model.Update(msg)
+	model = updatedModel.(Model)
+
+	if client.deletedTaskID != "task-1" || len(model.tasks) != 0 || model.toast != "task deleted" {
+		t.Fatalf("task was not deleted: deleted=%q tasks=%#v toast=%q", client.deletedTaskID, model.tasks, model.toast)
+	}
+}
+
 func TestDocsSelectionLoadsDocumentBody(t *testing.T) {
 	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
 	model := New(Options{
@@ -1132,6 +1359,106 @@ func TestDocsSelectionLoadsDocumentBody(t *testing.T) {
 	}
 	if model.doc.ID != "doc-2" || model.doc.Body == "" {
 		t.Fatalf("expected selected document body loaded: %#v", model.doc)
+	}
+}
+
+func TestDocsEnterOpensDetailAndFetchesBody(t *testing.T) {
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "docs",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+	})
+	model.feature = FeatureDocs
+	model.focusedPane = paneList
+	model.docFiles = []api.DriveFile{{ID: "doc-1", Name: "Launch notes"}}
+	model.doc = api.DocDocument{}
+
+	updated, cmd := model.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated
+	if model.focusedPane != paneDetail {
+		t.Fatalf("expected Docs Enter to open detail, got focus %v", model.focusedPane)
+	}
+	if model.docLoadingID != "doc-1" {
+		t.Fatalf("expected doc-1 loading marker, got %q", model.docLoadingID)
+	}
+	if cmd == nil {
+		t.Fatal("expected document load command")
+	}
+
+	updatedModel, _ := model.Update(cmd())
+	model = updatedModel.(Model)
+	if client.docCalls != 1 || client.lastDocID != "doc-1" {
+		t.Fatalf("expected doc-1 fetch, calls=%d id=%q", client.docCalls, client.lastDocID)
+	}
+	if model.doc.ID != "doc-1" || !strings.Contains(model.doc.Body, "Launch plan") {
+		t.Fatalf("expected loaded document body, got %#v", model.doc)
+	}
+}
+
+func TestDocsSearchShowsLoadingThenResults(t *testing.T) {
+	client := &countingWorkspaceClient{WorkspaceClient: newTestWorkspaceClient()}
+	model := New(Options{
+		Client: client,
+		Config: Config{
+			InitialFeature: "docs",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.feature = FeatureDocs
+	model.cacheLoaded = true
+	model.loading = false
+	model.width = 100
+	model.height = 30
+	model.resize()
+	model.docFiles = []api.DriveFile{{ID: "stale", Name: "Stale document"}}
+	model.doc = api.DocDocument{ID: "stale", Title: "Stale", Body: "Old body"}
+	model.selected[FeatureDocs] = 3
+	model.openSearchModal()
+	model.modal.fields[0].input.SetValue("pusgeos")
+
+	updated, cmd := model.submitModal()
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected docs search command")
+	}
+	if !model.loading {
+		t.Fatal("docs search should enter loading state")
+	}
+	if model.focusedPane != paneList {
+		t.Fatalf("search results should return to list focus, got %v", model.focusedPane)
+	}
+	if len(model.docFiles) != 0 || model.doc.ID != "" || model.selected[FeatureDocs] != 0 {
+		t.Fatalf("stale docs should be cleared while loading: files=%#v doc=%#v selected=%d", model.docFiles, model.doc, model.selected[FeatureDocs])
+	}
+	if view := model.View(); !strings.Contains(view, "Searching docs /pusgeos") {
+		t.Fatalf("loading view did not show docs search state:\n%s", view)
+	}
+
+	msg := cmd()
+	refreshMsg, ok := msg.(featureRefreshedMsg)
+	if !ok {
+		t.Fatalf("expected featureRefreshedMsg, got %T", msg)
+	}
+	updatedModel, _ := model.Update(refreshMsg)
+	model = updatedModel.(Model)
+	if client.lastDocsQuery.Search != "pusgeos" {
+		t.Fatalf("expected Docs search query, got %#v", client.lastDocsQuery)
+	}
+	if len(model.docFiles) != 1 || model.docFiles[0].ID != "doc-1" {
+		t.Fatalf("expected docs search results, got %#v", model.docFiles)
+	}
+	if model.doc.ID != "doc-1" || model.doc.Body == "" {
+		t.Fatalf("expected first search result body loaded, got %#v", model.doc)
+	}
+	if model.toast != "search: pusgeos" {
+		t.Fatalf("expected search toast, got %q", model.toast)
 	}
 }
 
@@ -1423,6 +1750,30 @@ type recordingChatActionsClient struct {
 	setupMembers     []string
 	reactionMessage  string
 	deletedReaction  string
+}
+
+type recordingTasksClient struct {
+	api.WorkspaceClient
+	completedTaskID string
+	completed       bool
+	deletedTaskID   string
+}
+
+func (c *recordingTasksClient) SetTaskCompleted(_ context.Context, taskListID, taskID string, completed bool) (api.TaskItem, error) {
+	c.completedTaskID = taskID
+	c.completed = completed
+	status := "needsAction"
+	completedAt := time.Time{}
+	if completed {
+		status = "completed"
+		completedAt = time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC)
+	}
+	return api.TaskItem{ID: taskID, TaskListID: taskListID, Title: "Review", Status: status, Completed: completedAt}, nil
+}
+
+func (c *recordingTasksClient) DeleteTask(_ context.Context, _, taskID string) error {
+	c.deletedTaskID = taskID
+	return nil
 }
 
 func (c *recordingChatActionsClient) EditChatMessage(_ context.Context, messageName, text string) (api.ChatMessage, error) {

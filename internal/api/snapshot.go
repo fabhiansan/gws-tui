@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const WorkspaceSnapshotVersion = 5
+const WorkspaceSnapshotVersion = 7
 
 var ErrSnapshotLockBusy = errors.New("workspace snapshot lock is held by another process")
 
@@ -21,6 +21,7 @@ type WorkspaceSnapshot struct {
 	ChatMessagesBySpace map[string]Page[ChatMessage] `json:"chat_messages_by_space,omitempty"`
 	MailLabels          []MailLabel                  `json:"mail_labels,omitempty"`
 	MailThreads         Page[MailThread]             `json:"mail_threads,omitempty"`
+	MailFolder          string                       `json:"mail_folder,omitempty"`
 	MailDrafts          Page[MailDraftItem]          `json:"mail_drafts,omitempty"`
 	CalendarLists       []CalendarListItem           `json:"calendar_lists,omitempty"`
 	CalendarID          string                       `json:"calendar_id,omitempty"`

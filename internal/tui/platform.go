@@ -9,7 +9,9 @@ import (
 	"strings"
 )
 
-func openURL(url string) error {
+var openURL = defaultOpenURL
+
+func defaultOpenURL(url string) error {
 	if url == "" {
 		return errors.New("empty URL")
 	}

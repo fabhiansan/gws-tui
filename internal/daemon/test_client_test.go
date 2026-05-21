@@ -224,6 +224,28 @@ func (c *testWorkspaceClient) Tasks(_ context.Context, query api.TaskQuery) (api
 	}}}, nil
 }
 
+func (c *testWorkspaceClient) SetTaskCompleted(_ context.Context, taskListID, taskID string, completed bool) (api.TaskItem, error) {
+	status := "needsAction"
+	completedAt := time.Time{}
+	if completed {
+		status = "completed"
+		completedAt = c.now
+	}
+	return api.TaskItem{
+		ID:         taskID,
+		TaskListID: taskListID,
+		Title:      "Review launch checklist",
+		Notes:      "Confirm release docs and install script.",
+		Status:     status,
+		Completed:  completedAt,
+		Updated:    c.now,
+	}, nil
+}
+
+func (c *testWorkspaceClient) DeleteTask(context.Context, string, string) error {
+	return nil
+}
+
 func (c *testWorkspaceClient) DriveFiles(context.Context, api.DriveQuery) (api.Page[api.DriveFile], error) {
 	return api.Page[api.DriveFile]{Items: []api.DriveFile{{
 		ID:           "drive-1",

@@ -192,22 +192,42 @@ func (m *Model) detailSelectionColumnsFor(lines []string, line int, start, end d
 	return 0, last, true
 }
 
+// renderCursorLine draws the NORMAL-mode cursor line: a full-width bar in the
+// Selected style with the cursor cell highlighted. The bar is measured in
+// display columns, not runes — a wide glyph (emoji, CJK, box-drawing/ambiguous
+// chars) eats two columns of the budget. Counting runes here would let the bar
+// overflow detailTextWidth, which makes lipgloss wrap the line inside the
+// viewport and desyncs the whole frame, leaving stale "ghost" cells behind.
 func (m Model) renderCursorLine(line string, cursorCol int) string {
 	runes := []rune(line)
 	width := m.detailTextWidth()
+	if strings.TrimSpace(line) == "" {
+		return m.detailCursorStyle().Render(" ") + strings.Repeat(" ", max(0, width-1))
+	}
 	bg := m.theme.Selected
 	cursor := m.detailCursorStyle()
 	var out strings.Builder
-	for col := 0; col < width; col++ {
-		cell := " "
-		if col < len(runes) {
-			cell = string(runes[col])
+	used := 0 // display columns emitted so far
+	for idx := 0; used < width; idx++ {
+		cell, cw := " ", 1
+		if idx < len(runes) {
+			r := runes[idx]
+			rw := wideCond.RuneWidth(r)
+			if rw < 1 {
+				rw = 1 // zero-width runes still take a cell so the budget advances
+			}
+			// Skip a wide glyph that would spill past the last column; the
+			// trailing space keeps the bar exactly `width` columns wide.
+			if used+rw <= width {
+				cell, cw = string(r), rw
+			}
 		}
-		if col == cursorCol {
-			out.WriteString(cursor.Render(cell))
-		} else {
-			out.WriteString(bg.Render(cell))
+		style := bg
+		if idx == cursorCol {
+			style = cursor
 		}
+		out.WriteString(style.Render(cell))
+		used += cw
 	}
 	return out.String()
 }

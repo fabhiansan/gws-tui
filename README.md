@@ -128,6 +128,14 @@ Global:
 - `Esc`: return focus to the list pane
 - `q`: quit
 
+Detail pane:
+
+- `h`/`j`/`k`/`l`, `w`/`b`/`e`, `0`/`$`: move the text cursor
+- `v`/`V`: select text by character or line
+- `y`/`yy`: yank selection or current line
+- `Enter`/`o`: open the URL under the cursor, or the only URL on the line;
+  attachment lines still open image preview/download actions
+
 Chat:
 
 - `Enter`: send
@@ -137,6 +145,8 @@ Chat:
 
 Mail:
 
+- `H`: focus the folder sidebar (Inbox, Starred, Important, …)
+- `j`/`k` then `Enter`: move the folder cursor and open that folder
 - `c`: compose
 - `R`: reply
 - `f`: forward
@@ -159,6 +169,13 @@ Meet:
 - `J`: join in browser
 - `C`: copy link
 - `E`: end active conference
+
+Tasks:
+
+- `Space`: complete/uncomplete selected task
+- `d`: delete selected task
+- `[`/`]`: previous/next task list
+- `m`: load more tasks
 
 ## Config
 

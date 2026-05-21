@@ -165,6 +165,33 @@ func TestServerDoesNotNotifyForSelfChatMessage(t *testing.T) {
 	}
 }
 
+func TestHandleChatMessagePromotesSpaceInSnapshot(t *testing.T) {
+	server := NewServer(newTestWorkspaceClient(), Options{})
+	server.snapshot = api.NewWorkspaceSnapshot()
+	server.snapshot.Spaces = []api.Space{
+		{Name: "spaces/engineering", DisplayName: "#engineering"},
+		{Name: "spaces/design", DisplayName: "#design"},
+	}
+
+	server.handleChatMessage(api.ChatMessage{
+		ID:         "design-new",
+		Name:       "spaces/design/messages/design-new",
+		Space:      "spaces/design",
+		SenderID:   "users/alice",
+		SenderName: "Alice",
+		Text:       "new from daemon",
+		CreateTime: time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC),
+	}, false)
+
+	if server.snapshot.Spaces[0].Name != "spaces/design" {
+		t.Fatalf("incoming chat message should promote space in snapshot: %#v", server.snapshot.Spaces)
+	}
+	page := server.snapshot.ChatMessagesBySpace["spaces/design"]
+	if len(page.Items) != 1 || page.Items[0].ID != "design-new" {
+		t.Fatalf("incoming chat message should still hydrate snapshot cache: %#v", page.Items)
+	}
+}
+
 func TestServerSnapshotAndDraftRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	socketDir := shortSocketDir(t)
@@ -389,6 +416,50 @@ func TestServerAutoSubscribesTopSpacesAndSurvivesClientDisconnect(t *testing.T) 
 	}
 }
 
+func TestServerRealtimeAutoSubscribesAllSpaces(t *testing.T) {
+	dir := t.TempDir()
+	socketDir := shortSocketDir(t)
+	socketPath := filepath.Join(socketDir, "daemon.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := &pushChatClient{
+		WorkspaceClient: newTestWorkspaceClient(),
+		events:          make(chan api.ChatMessage),
+		started:         make(chan struct{}),
+	}
+	backend := &realtimePushChatClient{pushChatClient: base}
+	server := NewServer(backend, Options{
+		SocketPath:         socketPath,
+		CachePath:          filepath.Join(dir, "cache.json"),
+		AutoSubscribeChats: true,
+		AutoSubscribeMax:   2,
+		ChatEvents:         true,
+	})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	waitFor(t, 2*time.Second, func() bool {
+		return backend.SubscribeCalls("spaces/alice") >= 1 &&
+			backend.SubscribeCalls("spaces/engineering") >= 1 &&
+			backend.SubscribeCalls("spaces/design") >= 1
+	}, "realtime bootstrap did not auto-subscribe all spaces")
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down")
+	}
+}
+
 func TestServerPersistsPinAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "cache.json")
@@ -580,6 +651,16 @@ func (c *pushChatClient) SubscribeCalls(spaceName string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls[spaceName]
+}
+
+type realtimePushChatClient struct {
+	*pushChatClient
+}
+
+func (c *realtimePushChatClient) ConfigureChatEvents(api.ChatEventOptions) {}
+
+func (c *realtimePushChatClient) PrepareChatEvents() string {
+	return "realtime"
 }
 
 func assertChatEvent(t *testing.T, ch <-chan api.ChatMessage, id string) {

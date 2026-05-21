@@ -292,6 +292,16 @@ func (c *RemoteClient) Tasks(ctx context.Context, query TaskQuery) (Page[TaskIte
 	return out, err
 }
 
+func (c *RemoteClient) SetTaskCompleted(ctx context.Context, taskListID, taskID string, completed bool) (TaskItem, error) {
+	var out TaskItem
+	err := c.request(ctx, "SetTaskCompleted", SetTaskCompletedParams{TaskListID: taskListID, TaskID: taskID, Completed: completed}, &out)
+	return out, err
+}
+
+func (c *RemoteClient) DeleteTask(ctx context.Context, taskListID, taskID string) error {
+	return c.request(ctx, "DeleteTask", TaskIDParams{TaskListID: taskListID, TaskID: taskID}, nil)
+}
+
 func (c *RemoteClient) DriveFiles(ctx context.Context, query DriveQuery) (Page[DriveFile], error) {
 	var out Page[DriveFile]
 	err := c.request(ctx, "DriveFiles", DriveFilesParams{Query: query}, &out)

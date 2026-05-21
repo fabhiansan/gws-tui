@@ -401,4 +401,3 @@ var (
 	cardHTMLLinkRe = regexp.MustCompile(`(?i)<a\s+[^>]*>(.*?)</a>`)
 	cardHTMLTagRe  = regexp.MustCompile(`<[^>]+>`)
 )
-

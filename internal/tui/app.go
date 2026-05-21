@@ -58,6 +58,9 @@ const (
 	paneList pane = iota
 	paneDetail
 	paneAction
+	// paneMailSidebar is the Gmail-style folder rail. It only exists in the
+	// Mail feature, where it sits left of the inbox list.
+	paneMailSidebar
 )
 
 type Options struct {
@@ -120,6 +123,11 @@ type Model struct {
 	mailLabels  []api.MailLabel
 	mailThreads []api.MailThread
 	mailNext    string
+	// mailFolder is the display name of the Gmail folder currently loaded
+	// into mailThreads; mailFolderCursor is the highlighted row while the
+	// folder sidebar is focused.
+	mailFolder       string
+	mailFolderCursor int
 
 	events        []api.CalendarEvent
 	calendarNext  string
@@ -336,6 +344,15 @@ type meetActionMsg struct {
 	label string
 }
 
+type taskActionMsg struct {
+	task       api.TaskItem
+	taskListID string
+	taskID     string
+	deleted    bool
+	err        error
+	label      string
+}
+
 type realtimeMsg struct {
 	message api.ChatMessage
 	err     error
@@ -442,6 +459,7 @@ func New(opts Options) Model {
 		input:          input,
 		detail:         detail,
 		focusedPane:    paneList,
+		mailFolder:     defaultMailFolder,
 		loading:        !cacheLoaded,
 		loadProgress:   loadProgress,
 		loadTotal:      loadTotal,
@@ -534,6 +552,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resize()
+		m.resizeModalFields()
 		cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -702,7 +721,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mailLabels = msg.labels
 			m.mailThreads = msg.threads.Items
 			m.mailNext = msg.threads.NextPageToken
-			m.toast = "mail refreshed"
+			if strings.TrimSpace(m.search) != "" {
+				m.toast = "search: " + m.search
+			} else {
+				m.toast = fallback(m.mailFolder, defaultMailFolder)
+			}
 			m.clampSelections()
 			m.persistWorkspaceCache()
 			cmds = append(cmds, m.imageDownloadCmdsForMail(m.mailThreads)...)
@@ -740,7 +763,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.docNext = msg.docFiles.NextPageToken
 			m.doc = msg.doc
 			m.docLoadingID = ""
-			m.toast = "docs refreshed"
+			if strings.TrimSpace(m.search) != "" {
+				m.toast = "search: " + m.search
+			} else {
+				m.toast = "docs refreshed"
+			}
 			m.clampSelections()
 			m.persistWorkspaceCache()
 		}
@@ -823,6 +850,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyMeetSpace(msg.space)
 				m.persistWorkspaceCache()
 			}
+		}
+	case taskActionMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.toast = msg.label
+			if msg.deleted {
+				m.removeTask(msg.taskListID, msg.taskID)
+			} else {
+				m.applyTask(msg.task)
+			}
+			m.clampSelections()
+			m.persistWorkspaceCache()
 		}
 	case pinActionMsg:
 		if msg.err != nil {
@@ -1015,6 +1055,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.autosaveTick())
 	case imageViewerOpenErrMsg:
 		m.toast = "open: " + msg.err
+	case detailURLOpenErrMsg:
+		m.toast = "open: " + msg.err
 	case tea.MouseMsg:
 		next, cmd := m.updateMouse(msg)
 		m = next
@@ -1031,6 +1073,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	// The folder rail only exists in the Mail feature; if focus is left on it
+	// while switching away, fall back to the list pane so j/k keep working.
+	if m.feature != FeatureMail && m.focusedPane == paneMailSidebar {
+		m.focusedPane = paneList
+	}
+	if m.feature == FeatureDocs {
+		if prevFeature != FeatureDocs || m.focusedPane == paneAction {
+			m.focusedPane = paneList
+		}
+	}
+
 	// Mail uses a different pane layout than the other features, and its
 	// composer pane appears only while focused — so the viewport sizes have
 	// to be recomputed whenever the feature or the focused pane changes.
@@ -1038,6 +1091,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 	}
 	cmds = append(cmds, m.imageDownloadCmdsForCurrentDetail()...)
+	cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	m.updateDetailContent()
 	return m, tea.Batch(cmds...)
 }
@@ -1082,7 +1136,11 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if m.vimComposer == vimModeNormal && m.vimPending == "" {
 				switch key {
 				case "1":
-					m.focusedPane = paneList
+					if m.feature == FeatureMail {
+						m.focusMailSidebar()
+					} else {
+						m.focusedPane = paneList
+					}
 					m.input.Blur()
 					return m, nil
 				case "2":
@@ -1129,9 +1187,22 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.helpVisible = true
 		return m, nil
 	case "H", "ctrl+h":
+		// In Mail the folder rail sits left of the list, so H steps left
+		// into it once the list is already focused.
+		if m.feature == FeatureMail && m.focusedPane == paneList {
+			m.focusMailSidebar()
+			return m, nil
+		}
 		m.focusedPane = paneList
 		return m, nil
 	case "L", "ctrl+l":
+		if m.feature == FeatureMail && m.focusedPane == paneMailSidebar {
+			m.focusedPane = paneList
+			return m, nil
+		}
+		if m.feature == FeatureDocs {
+			return m.openSelectedDoc()
+		}
 		m.focusedPane = paneDetail
 		return m, nil
 	case "esc":
@@ -1160,23 +1231,43 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "ctrl+7":
 		m.feature = FeatureDocs
 	case "1":
+		// Mail's folder rail is the leftmost pane, so 1 focuses it; every
+		// other feature has no rail, so 1 keeps focusing the list.
+		if m.feature == FeatureMail {
+			m.focusMailSidebar()
+			return m, nil
+		}
 		m.focusedPane = paneList
 		return m, nil
 	case "2":
+		if m.feature == FeatureDocs {
+			return m.openSelectedDoc()
+		}
 		m.focusedPane = paneDetail
 		return m, nil
 	case "3":
+		if m.feature == FeatureDocs {
+			return m, nil
+		}
 		m.focusedPane = paneAction
 		m.input.Focus()
 		m.vimComposer = vimModeInsert
 		return m, nil
 	case "j", "down":
+		if m.focusedPane == paneMailSidebar {
+			m.moveMailFolderCursor(1)
+			return m, nil
+		}
 		if m.focusedPane == paneDetail {
 			m.detail.LineDown(1)
 			return m, nil
 		}
 		return m.moveSelection(1)
 	case "k", "up":
+		if m.focusedPane == paneMailSidebar {
+			m.moveMailFolderCursor(-1)
+			return m, nil
+		}
 		if m.focusedPane == paneDetail {
 			m.detail.LineUp(1)
 			return m, nil
@@ -1207,16 +1298,27 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.detail.GotoTop()
 			return m, nil
 		}
+		if m.focusedPane == paneMailSidebar {
+			m.mailFolderCursor = 0
+			return m, nil
+		}
 		m.selected[m.feature] = 0
-		return m.loadSelectedChat()
+		return m.loadSelectedItem()
 	case "G":
 		if m.focusedPane == paneDetail {
 			m.detail.GotoBottom()
 			return m, nil
 		}
+		if m.focusedPane == paneMailSidebar {
+			m.mailFolderCursor = max(0, len(m.mailFolderList())-1)
+			return m, nil
+		}
 		m.selected[m.feature] = m.listLen() - 1
-		return m.loadSelectedChat()
+		return m.loadSelectedItem()
 	case "enter", "o":
+		if m.focusedPane == paneMailSidebar {
+			return m.selectMailFolder()
+		}
 		if m.focusedPane == paneDetail {
 			if att, ok := m.detailAttachmentAtCursor(); ok {
 				if att.IsImage() {
@@ -1225,6 +1327,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 				return m.downloadAttachment(att)
 			}
+			if next, cmd, ok := m.openDetailURLAtCursor(); ok {
+				return next, cmd
+			}
 		}
 		if m.feature == FeatureMail && m.focusedPane == paneList {
 			// Mail browses the inbox full-screen; opening a thread swaps in
@@ -1232,15 +1337,24 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.focusedPane = paneDetail
 			return m, nil
 		}
+		if m.feature == FeatureDocs && m.focusedPane == paneList {
+			return m.openSelectedDoc()
+		}
 		if m.feature == FeatureDrive {
 			return m.downloadSelectedDriveFile()
 		}
 		m.toast = m.openHint()
 	case "i":
+		if m.feature == FeatureDocs {
+			return m, nil
+		}
 		m.focusedPane = paneAction
 		m.input.Focus()
 		m.vimComposer = vimModeInsert
 	case "a":
+		if m.feature == FeatureDocs {
+			return m, nil
+		}
 		m.focusedPane = paneAction
 		m.input.Focus()
 		m.vimComposer = vimModeInsert
@@ -1351,6 +1465,13 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		if m.feature == FeatureCalendar {
 			return m.deleteSelectedEvent()
+		}
+		if m.feature == FeatureTasks {
+			return m.deleteSelectedTask()
+		}
+	case " ", "space":
+		if m.feature == FeatureTasks {
+			return m.toggleSelectedTaskCompleted()
 		}
 	case "t":
 		if m.feature == FeatureCalendar {
@@ -2022,16 +2143,13 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 	case FeatureMail:
 		m.loading = true
 		search := m.search
-		label := "Inbox"
-		if search != "" {
-			label = "All Mail"
-		}
+		folder := m.mailFolderByName(m.mailFolder)
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 			defer cancel()
 
 			labels, labelsErr := m.client.MailLabels(ctx)
-			threads, threadsErr := m.client.MailThreads(ctx, api.MailQuery{Label: label, Search: search})
+			threads, threadsErr := m.client.MailThreads(ctx, mailQueryForFolder(folder, search, ""))
 			return featureRefreshedMsg{
 				feature: FeatureMail,
 				labels:  labels,
@@ -2181,9 +2299,11 @@ func (m Model) loadMore() (Model, tea.Cmd) {
 			return m, nil
 		}
 		token := m.mailNext
+		search := m.search
+		folder := m.mailFolderByName(m.mailFolder)
 		m.loading = true
 		return m, func() tea.Msg {
-			page, err := m.client.MailThreads(m.ctx, api.MailQuery{Label: "Inbox", Search: m.search, PageToken: token})
+			page, err := m.client.MailThreads(m.ctx, mailQueryForFolder(folder, search, token))
 			return featureLoadedMsg{feature: FeatureMail, items: page.Items, next: page.NextPageToken, err: err}
 		}
 	case FeatureCalendar:
@@ -2265,6 +2385,7 @@ func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandalone
 	}
 	m.markSeenChatMessage(message)
 	m.rememberChatMessage(message)
+	m.promoteSpaceToTop(message.Space)
 	// selfUserIDs is keyed by the bare numeric id; message.SenderID has the
 	// "users/" resource prefix. Normalize before lookup.
 	senderBareID := api.UserIDFromName(message.SenderID)
@@ -2396,6 +2517,20 @@ func (m *Model) resize() {
 		m.detail.Height = max(3, mainContentH)
 		m.input.SetWidth(max(10, mainW-actionHPad))
 		m.input.SetHeight(max(2, actionHeight))
+		return
+	}
+
+	if m.feature == FeatureDocs {
+		mainW := max(20, w-detailHBorder)
+		mainH := max(5, h-statusH-detailVBorder)
+		detailWidth := max(10, mainW-detailHPad)
+		if m.cfg.VimMode {
+			detailWidth = max(10, detailWidth-2)
+		}
+		m.detail.Width = detailWidth
+		m.detail.Height = max(3, mainH)
+		m.input.SetWidth(max(10, mainW-actionHPad))
+		m.input.SetHeight(2)
 		return
 	}
 
@@ -2732,6 +2867,39 @@ func (m Model) selectedSpace() api.Space {
 	return visible[clamp(m.selected[FeatureChat], len(visible))]
 }
 
+func (m *Model) selectSpaceByName(spaceName string) bool {
+	if spaceName == "" {
+		m.clampSelections()
+		return false
+	}
+	for index, space := range m.visibleSpaces() {
+		if space.Name == spaceName {
+			m.selected[FeatureChat] = index
+			return true
+		}
+	}
+	m.clampSelections()
+	return false
+}
+
+func (m *Model) promoteSpaceToTop(spaceName string) {
+	if spaceName == "" || len(m.spaces) < 2 {
+		return
+	}
+	selectedName := m.selectedSpace().Name
+	for index, space := range m.spaces {
+		if space.Name != spaceName {
+			continue
+		}
+		if index > 0 {
+			copy(m.spaces[1:index+1], m.spaces[:index])
+			m.spaces[0] = space
+		}
+		m.selectSpaceByName(selectedName)
+		return
+	}
+}
+
 func chatMessageKey(msg api.ChatMessage) string {
 	if msg.Space != "" && msg.ID != "" {
 		return msg.Space + "\x00" + msg.ID
@@ -2880,6 +3048,11 @@ func (m Model) selectedDocFile() api.DriveFile {
 	return m.docFiles[clamp(m.selected[FeatureDocs], len(m.docFiles))]
 }
 
+func (m Model) openSelectedDoc() (Model, tea.Cmd) {
+	m.focusedPane = paneDetail
+	return m.loadSelectedDoc()
+}
+
 func (m Model) loadSelectedDoc() (Model, tea.Cmd) {
 	file := m.selectedDocFile()
 	if file.ID == "" {
@@ -3010,6 +3183,92 @@ func (m Model) loadSelectedTaskList() (Model, tea.Cmd) {
 	}
 }
 
+// mailFolderByName resolves a folder display name to its definition, falling
+// back to the Inbox so the inbox is always reachable.
+func (m Model) mailFolderByName(name string) api.MailLabel {
+	for _, folder := range m.mailFolderList() {
+		if strings.EqualFold(folder.Name, name) {
+			return folder
+		}
+	}
+	return mailSystemFolderDefs[0]
+}
+
+// mailFolderIndex returns the position of a folder name in the sidebar list.
+func (m Model) mailFolderIndex(name string) int {
+	for i, folder := range m.mailFolderList() {
+		if strings.EqualFold(folder.Name, name) {
+			return i
+		}
+	}
+	return 0
+}
+
+// mailQueryForFolder builds the Gmail thread query for a folder, carrying the
+// resolved label IDs / search expression so custom labels and folders like
+// Spam or All Mail fetch correctly.
+func mailQueryForFolder(folder api.MailLabel, search, pageToken string) api.MailQuery {
+	return api.MailQuery{
+		Label:            folder.Name,
+		LabelIDs:         folder.LabelIDs,
+		LabelQuery:       folder.Query,
+		IncludeSpamTrash: folder.IncludeSpamTrash,
+		Search:           search,
+		PageToken:        pageToken,
+	}
+}
+
+// focusMailSidebar moves focus onto the folder rail, placing the cursor on the
+// folder that is currently loaded.
+func (m *Model) focusMailSidebar() {
+	m.focusedPane = paneMailSidebar
+	m.mailFolderCursor = m.mailFolderIndex(m.mailFolder)
+}
+
+func (m *Model) moveMailFolderCursor(delta int) {
+	folders := m.mailFolderList()
+	if len(folders) == 0 {
+		m.mailFolderCursor = 0
+		return
+	}
+	m.mailFolderCursor = clamp(m.mailFolderCursor+delta, len(folders))
+}
+
+// selectMailFolder loads the folder under the sidebar cursor and moves focus
+// to the inbox list so the user can start browsing it immediately.
+func (m Model) selectMailFolder() (Model, tea.Cmd) {
+	folders := m.mailFolderList()
+	if len(folders) == 0 {
+		return m, nil
+	}
+	folder := folders[clamp(m.mailFolderCursor, len(folders))]
+	m.mailFolder = folder.Name
+	m.search = ""
+	m.selected[FeatureMail] = 0
+	m.focusedPane = paneList
+	return m.loadMailFolder(folder)
+}
+
+// loadMailFolder fetches the thread list for a folder, replacing the inbox.
+func (m Model) loadMailFolder(folder api.MailLabel) (Model, tea.Cmd) {
+	m.loading = true
+	m.mailThreads = nil
+	m.mailNext = ""
+	labels := m.mailLabels
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+
+		page, err := m.client.MailThreads(ctx, mailQueryForFolder(folder, "", ""))
+		return featureRefreshedMsg{
+			feature: FeatureMail,
+			labels:  labels,
+			threads: page,
+			err:     err,
+		}
+	}
+}
+
 func (m *Model) replacePending(pendingID string, msg api.ChatMessage, err error) {
 	for i := range m.chatMessages {
 		if m.chatMessages[i].ID == pendingID {
@@ -3110,6 +3369,33 @@ func (m *Model) applyMeetSpace(space api.MeetSpace) {
 		}
 	}
 	m.meetSpaces = append([]api.MeetSpace{space}, m.meetSpaces...)
+}
+
+func (m *Model) applyTask(task api.TaskItem) {
+	if task.ID == "" {
+		return
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID == task.ID {
+			m.tasks[i] = task
+			return
+		}
+	}
+	m.tasks = append(m.tasks, task)
+}
+
+func (m *Model) removeTask(taskListID, taskID string) {
+	if taskID == "" {
+		return
+	}
+	out := m.tasks[:0]
+	for _, task := range m.tasks {
+		if task.ID == taskID && (taskListID == "" || task.TaskListID == "" || task.TaskListID == taskListID) {
+			continue
+		}
+		out = append(out, task)
+	}
+	m.tasks = out
 }
 
 func (m Model) deleteSelectedChatMessage() (Model, tea.Cmd) {
@@ -3263,6 +3549,35 @@ func (m Model) deleteSelectedEvent() (Model, tea.Cmd) {
 	}
 }
 
+func (m Model) toggleSelectedTaskCompleted() (Model, tea.Cmd) {
+	list := m.selectedTaskList()
+	task := m.selectedTask()
+	if list.ID == "" || task.ID == "" {
+		return m, nil
+	}
+	completed := !strings.EqualFold(task.Status, "completed")
+	return m, func() tea.Msg {
+		updated, err := m.client.SetTaskCompleted(m.ctx, list.ID, task.ID, completed)
+		label := "task unchecked"
+		if completed {
+			label = "task completed"
+		}
+		return taskActionMsg{task: updated, taskListID: list.ID, taskID: task.ID, err: err, label: label}
+	}
+}
+
+func (m Model) deleteSelectedTask() (Model, tea.Cmd) {
+	list := m.selectedTaskList()
+	task := m.selectedTask()
+	if list.ID == "" || task.ID == "" {
+		return m, nil
+	}
+	return m, func() tea.Msg {
+		err := m.client.DeleteTask(m.ctx, list.ID, task.ID)
+		return taskActionMsg{taskListID: list.ID, taskID: task.ID, deleted: true, err: err, label: "task deleted"}
+	}
+}
+
 func (m Model) moveSelectedEventToNextCalendar() (Model, tea.Cmd) {
 	event := m.selectedEvent()
 	if event.ID == "" {
@@ -3298,22 +3613,26 @@ func (m Model) createMeetSpaceNow() (Model, tea.Cmd) {
 
 func (m Model) openMeetLink() (Model, tea.Cmd) {
 	space := m.selectedMeet()
-	if space.MeetingURI == "" {
+	joinURL := space.JoinURL()
+	if joinURL == "" {
+		m.toast = "no Meet URL available"
 		return m, nil
 	}
 	return m, func() tea.Msg {
-		err := openURL(space.MeetingURI)
+		err := openURL(joinURL)
 		return meetActionMsg{space: space, err: err, label: "opening browser"}
 	}
 }
 
 func (m Model) copyMeetLink() (Model, tea.Cmd) {
 	space := m.selectedMeet()
-	if space.MeetingURI == "" {
+	joinURL := space.JoinURL()
+	if joinURL == "" {
+		m.toast = "no Meet URL to copy"
 		return m, nil
 	}
 	return m, func() tea.Msg {
-		err := copyText(space.MeetingURI)
+		err := copyText(joinURL)
 		return meetActionMsg{space: space, err: err, label: "link copied"}
 	}
 }
@@ -3335,7 +3654,7 @@ func (m *Model) yankFocused() tea.Cmd {
 		event := m.selectedEvent()
 		text = event.Summary
 	case FeatureMeet:
-		text = m.selectedMeet().MeetingURI
+		text = m.selectedMeet().JoinURL()
 	case FeatureTasks:
 		task := m.selectedTask()
 		text = task.Title
@@ -3388,12 +3707,24 @@ func (m Model) pasteIntoComposer() (Model, tea.Cmd) {
 
 func (m Model) endSelectedMeet() (Model, tea.Cmd) {
 	space := m.selectedMeet()
-	if space.Name == "" {
+	spaceName := space.SpaceResourceName()
+	if spaceName == "" {
+		m.toast = "no Meet space to end"
+		return m, nil
+	}
+	if !space.IsActive() {
+		m.toast = "no active conference to end"
 		return m, nil
 	}
 	return m, func() tea.Msg {
-		err := m.client.EndMeetSpace(m.ctx, space.Name)
-		return meetActionMsg{space: space, err: err, label: "conference ended"}
+		err := m.client.EndMeetSpace(m.ctx, spaceName)
+		ended := space
+		ended.Active = false
+		ended.ActiveConference = nil
+		if ended.EndTime.IsZero() {
+			ended.EndTime = time.Now()
+		}
+		return meetActionMsg{space: ended, err: err, label: "conference ended"}
 	}
 }
 
@@ -3617,8 +3948,9 @@ func (m Model) detailRenderFingerprint() string {
 		if space.ActiveConference != nil {
 			activeConference = space.ActiveConference.ConferenceRecord
 		}
-		fmt.Fprintf(&b, "|meet=%s,%s,%s,%d,%s,%d,%t,%t,%s",
+		fmt.Fprintf(&b, "|meet=%s,%s,%s,%s,%d,%s,%d,%t,%t,%s",
 			space.Name,
+			space.SpaceName,
 			space.MeetingURI,
 			space.MeetingCode,
 			space.Created.UnixNano(),
@@ -3663,8 +3995,32 @@ func (m Model) detailRenderFingerprint() string {
 			m.doc.Body,
 			m.docLoadingID == file.ID,
 		)
+		writeDocFingerprint(&b, m.doc)
 	}
 	return b.String()
+}
+
+func writeDocFingerprint(b *strings.Builder, doc api.DocDocument) {
+	writeAttachmentFingerprint(b, doc.Attachments)
+	for _, block := range doc.Blocks {
+		fmt.Fprintf(b, "|block=%s,%d,%d,%s", block.Kind, block.Level, block.ListLevel, block.Text)
+		for _, inline := range block.Inlines {
+			fmt.Fprintf(b, ",inline=%s,%t,%t,%t,%t,%s",
+				inline.Text,
+				inline.Bold,
+				inline.Italic,
+				inline.Underline,
+				inline.Strikethrough,
+				inline.LinkURL,
+			)
+		}
+		for _, row := range block.Rows {
+			fmt.Fprintf(b, ",row=%s", strings.Join(row, "\x1f"))
+		}
+		if block.Attachment != nil {
+			fmt.Fprintf(b, ",image=%s", block.Attachment.PreviewSource())
+		}
+	}
 }
 
 func writeAttachmentFingerprint(b *strings.Builder, attachments []api.Attachment) {
