@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/fabhiansan/gws-tui/internal/api"
+import (
+	"strings"
+	"time"
+
+	"github.com/fabhiansan/gws-tui/internal/api"
+)
 
 const workspaceCacheVersion = api.WorkspaceSnapshotVersion
 
@@ -29,16 +34,21 @@ func (m *Model) hydrateWorkspaceCache(cache workspaceCache) {
 	m.auth = cache.Auth
 	m.spaces = cache.Spaces
 	m.mailLabels = cache.MailLabels
-	m.mailThreads = cache.MailThreads.Items
-	m.mailNext = cache.MailThreads.NextPageToken
 	m.mailFolder = cache.MailFolder
 	if m.mailFolder == "" {
 		m.mailFolder = defaultMailFolder
 	}
+	m.applyCachedSelectedMail()
 	m.calendars = cache.CalendarLists
 	m.calendarIndex = indexOfCalendar(cache.CalendarLists, cache.CalendarID)
-	m.events = cache.Events.Items
+	m.events = sortedEvents(cache.Events.Items)
 	m.calendarNext = cache.Events.NextPageToken
+	m.calendarMonth = cache.CalendarMonth
+	if !m.calendarMonth.IsZero() {
+		m.monthEvents = sortedEvents(cache.Events.Items)
+		m.events = m.monthEvents
+		m.calendarNext = ""
+	}
 	m.meetSpaces = cache.MeetSpaces
 	m.taskLists = cache.TaskLists
 	m.taskListIndex = indexOfTaskList(cache.TaskLists, cache.TaskListID)
@@ -101,25 +111,63 @@ func (m *Model) rememberChatPage(spaceName string, page api.Page[api.ChatMessage
 	if spaceName == "" {
 		return
 	}
-	m.cache.EnsureMaps()
-	m.cache.ChatMessagesBySpace[spaceName] = page
+	api.ApplyChatPage(&m.cache, spaceName, page)
 }
 
 func (m *Model) rememberChatMessage(message api.ChatMessage) {
 	if message.ID == "" || message.Space == "" {
 		return
 	}
+	api.ApplyChatMessage(&m.cache, message)
+}
+
+// applyCachedSelectedMail restores the thread list for the currently selected
+// mail folder from the cache, mirroring applyCachedSelectedChat. It returns
+// true when the folder had a cached page so callers can skip the network.
+func (m *Model) applyCachedSelectedMail() bool {
 	m.cache.EnsureMaps()
-	page := m.cache.ChatMessagesBySpace[message.Space]
-	for i := range page.Items {
-		if sameChatMessage(page.Items[i], message) {
-			page.Items[i] = message
-			m.cache.ChatMessagesBySpace[message.Space] = page
-			return
-		}
+	if m.mailFolder == "" {
+		m.mailThreads = nil
+		m.mailNext = ""
+		return false
 	}
-	page.Items = append(page.Items, message)
-	m.cache.ChatMessagesBySpace[message.Space] = page
+	page, ok := m.cache.MailThreadsByFolder[m.mailFolder]
+	if !ok {
+		m.mailThreads = nil
+		m.mailNext = ""
+		return false
+	}
+	m.mailThreads = page.Items
+	m.mailNext = page.NextPageToken
+	return true
+}
+
+// rememberCurrentMailPage stores the in-memory thread list under the active
+// folder. Search results are skipped so they never pollute a folder's cache.
+func (m *Model) rememberCurrentMailPage() {
+	if strings.TrimSpace(m.search) != "" {
+		return
+	}
+	m.rememberMailPage(m.mailFolder, api.Page[api.MailThread]{
+		Items:         m.mailThreads,
+		NextPageToken: m.mailNext,
+	})
+}
+
+func (m *Model) rememberMailPage(folder string, page api.Page[api.MailThread]) {
+	if folder == "" {
+		return
+	}
+	api.ApplyMailPage(&m.cache, folder, page)
+}
+
+// rememberMailThread upserts a single thread into every cached folder page that
+// already contains it, keeping non-active folders fresh on realtime updates.
+func (m *Model) rememberMailThread(thread api.MailThread) {
+	if thread.ID == "" {
+		return
+	}
+	api.ApplyMailThread(&m.cache, thread)
 }
 
 func (m *Model) persistWorkspaceCache() {
@@ -131,17 +179,23 @@ func (m *Model) persistWorkspaceCache() {
 	m.cache.Spaces = m.spaces
 	m.rememberCurrentChatPage()
 	m.cache.MailLabels = m.mailLabels
-	m.cache.MailThreads = api.Page[api.MailThread]{
-		Items:         m.mailThreads,
-		NextPageToken: m.mailNext,
-	}
+	m.rememberCurrentMailPage()
 	m.cache.MailFolder = m.mailFolder
+	calendarEvents := m.events
+	calendarNext := m.calendarNext
+	calendarMonth := time.Time{}
+	if !m.calendarMonth.IsZero() {
+		calendarEvents = m.monthEvents
+		calendarNext = ""
+		calendarMonth = m.calendarMonth
+	}
 	m.cache.Events = api.Page[api.CalendarEvent]{
-		Items:         m.events,
-		NextPageToken: m.calendarNext,
+		Items:         calendarEvents,
+		NextPageToken: calendarNext,
 	}
 	m.cache.CalendarLists = m.calendars
 	m.cache.CalendarID = m.selectedCalendar().ID
+	m.cache.CalendarMonth = calendarMonth
 	m.cache.MeetSpaces = m.meetSpaces
 	m.cache.TaskLists = m.taskLists
 	m.cache.Tasks = api.Page[api.TaskItem]{

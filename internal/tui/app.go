@@ -6,51 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fabhiansan/gws-tui/internal/api"
-	"github.com/fabhiansan/gws-tui/internal/tui/notify"
 	"github.com/fabhiansan/gws-tui/internal/tui/theme"
 )
-
-type Feature string
-
-const (
-	FeatureChat     Feature = "chat"
-	FeatureMail     Feature = "mail"
-	FeatureCalendar Feature = "calendar"
-	FeatureMeet     Feature = "meet"
-	FeatureTasks    Feature = "tasks"
-	FeatureDrive    Feature = "drive"
-	FeatureDocs     Feature = "docs"
-)
-
-var featureOrder = []Feature{FeatureChat, FeatureMail, FeatureCalendar, FeatureMeet, FeatureTasks, FeatureDrive, FeatureDocs}
-
-const defaultChatReaction = "\U0001F44D"
-
-var workspaceInitialLoadStages = []string{
-	"Auth",
-	"Chat spaces",
-	"Current chat",
-	"Mail labels",
-	"Inbox",
-	"Calendars",
-	"Calendar events",
-	"Meet",
-	"Task lists",
-	"Tasks",
-	"Drive files",
-	"Docs",
-	"Document preview",
-}
 
 type pane int
 
@@ -62,348 +27,6 @@ const (
 	// Mail feature, where it sits left of the inbox list.
 	paneMailSidebar
 )
-
-type Options struct {
-	Client          api.WorkspaceClient
-	Config          Config
-	InitialSnapshot *api.WorkspaceSnapshot
-	ForceAuth       bool
-	Version         string
-	Commit          string
-	BuildDate       string
-	UpstreamHint    string
-}
-
-type Model struct {
-	client api.WorkspaceClient
-	cfg    Config
-	theme  theme.Theme
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	width  int
-	height int
-
-	feature      Feature
-	authRequired bool
-	auth         api.AuthStatus
-	upstreamHint string
-	version      string
-	commit       string
-	buildDate    string
-
-	spinner spinner.Model
-	detail  viewport.Model
-	input   textarea.Model
-
-	focusedPane       pane
-	loading           bool
-	loadProgress      chan loadProgressMsg
-	loadStep          int
-	loadTotal         int
-	loadStage         string
-	err               string
-	toast             string
-	search            string
-	spaceFilter       string
-	spaceFilterActive bool
-	spaceFilterOrigin string
-
-	spaces        []api.Space
-	chatMessages  []api.ChatMessage
-	chatOlder     string
-	chatLoading   bool
-	chatLoadID    int
-	chatLoadSpace string
-	chatLoadIDs   map[string]int
-	seenMessages  map[string]bool
-	realtimeRetry time.Duration
-
-	mailLabels  []api.MailLabel
-	mailThreads []api.MailThread
-	mailNext    string
-	// mailFolder is the display name of the Gmail folder currently loaded
-	// into mailThreads; mailFolderCursor is the highlighted row while the
-	// folder sidebar is focused.
-	mailFolder       string
-	mailFolderCursor int
-
-	events        []api.CalendarEvent
-	calendarNext  string
-	calendars     []api.CalendarListItem
-	calendarIndex int
-	weekOffset    int
-
-	meetSpaces []api.MeetSpace
-
-	taskLists     []api.TaskList
-	tasks         []api.TaskItem
-	taskNext      string
-	taskListIndex int
-
-	driveFiles []api.DriveFile
-	driveNext  string
-
-	docFiles     []api.DriveFile
-	docNext      string
-	doc          api.DocDocument
-	docLoadingID string
-
-	userLabels     map[string]string
-	pendingUsers   map[string]bool
-	membersBySpace map[string][]api.SpaceMember
-	pendingMembers map[string]bool
-	selfUserIDs    map[string]bool
-	selfEmail      string
-	peopleAPIDown  bool
-
-	senderColorIdx   map[string]int
-	senderColorNext  int
-	senderColorSpace string
-
-	selected        map[Feature]int
-	persisted       persistedState
-	cache           workspaceCache
-	cacheLoaded     bool
-	imageFiles      map[string]string
-	imageLoading    map[string]bool
-	imageErrors     map[string]string
-	imageRenders    map[string]inlineImageRender
-	imageFramePend  map[string]bool
-	imageVersion    int
-	imagePlacement  int
-	modal           *composeModal
-	helpVisible     bool
-	daemonEvents    <-chan api.DaemonEvent
-	vimComposer     vimMode
-	vimPending      string
-	vimRegister     string
-	vimRegisterLine bool
-
-	detailCursor       int
-	detailCol          int
-	detailAnchor       int
-	detailAnchorCol    int
-	detailVisual       bool
-	detailVisualLine   bool
-	detailPending      string
-	detailLines        []string
-	detailLineCount    int
-	detailKey          string
-	detailRenderKey    string
-	detailImageAt      map[int]api.Attachment
-	detailAttachmentAt map[int]api.Attachment
-	detailMessageAt    map[int]string
-	replyThreadID      string
-	replyTargetName    string
-	editMessageName    string
-	editMessageID      string
-	createSpaceMode    bool
-	chatReactions      map[string]string
-
-	// pendingChatAttachments holds files staged for the next chat send.
-	// Populated by Ctrl+V pasting an image; drained (and the temp files
-	// deleted) after a successful send.
-	pendingChatAttachments []pendingAttachment
-
-	imageViewer *imageViewerState
-}
-
-// pendingAttachment is a file the TUI created locally (e.g. a clipboard paste)
-// and will hand off to the workspace client on the next send. Path points to a
-// temp file we own — submitAction removes it after the upload completes.
-type pendingAttachment struct {
-	path        string
-	contentType string
-	name        string
-}
-
-type loadedMsg struct {
-	auth         api.AuthStatus
-	spaces       api.Page[api.Space]
-	messages     api.Page[api.ChatMessage]
-	labels       []api.MailLabel
-	threads      api.Page[api.MailThread]
-	events       api.Page[api.CalendarEvent]
-	calendars    api.Page[api.CalendarListItem]
-	calendarID   string
-	meet         api.Page[api.MeetSpace]
-	taskLists    api.Page[api.TaskList]
-	tasks        api.Page[api.TaskItem]
-	taskListID   string
-	driveFiles   api.Page[api.DriveFile]
-	docFiles     api.Page[api.DriveFile]
-	doc          api.DocDocument
-	err          error
-	authRequired bool
-}
-
-type loadProgressMsg struct {
-	Step  int
-	Total int
-	Label string
-}
-
-type loadProgressDoneMsg struct{}
-
-type featureLoadedMsg struct {
-	feature Feature
-	items   any
-	next    string
-	err     error
-}
-
-type featureRefreshedMsg struct {
-	feature    Feature
-	labels     []api.MailLabel
-	threads    api.Page[api.MailThread]
-	events     api.Page[api.CalendarEvent]
-	calendars  api.Page[api.CalendarListItem]
-	calendarID string
-	meet       api.Page[api.MeetSpace]
-	taskLists  api.Page[api.TaskList]
-	tasks      api.Page[api.TaskItem]
-	taskListID string
-	driveFiles api.Page[api.DriveFile]
-	docFiles   api.Page[api.DriveFile]
-	doc        api.DocDocument
-	err        error
-}
-
-type docLoadedMsg struct {
-	documentID string
-	doc        api.DocDocument
-	err        error
-}
-
-type chatLoadedMsg struct {
-	spaceName string
-	loadID    int
-	messages  api.Page[api.ChatMessage]
-	err       error
-	refresh   bool
-}
-
-type chatSentMsg struct {
-	pendingID string
-	message   api.ChatMessage
-	err       error
-	// attachments carries the just-drained pending uploads so the handler
-	// can restore them when the send fails. On success the closure deletes
-	// the temp files and leaves this empty.
-	attachments []pendingAttachment
-}
-
-type chatEditedMsg struct {
-	messageID string
-	message   api.ChatMessage
-	err       error
-}
-
-type chatDeletedMsg struct {
-	messageID   string
-	messageName string
-	err         error
-}
-
-type chatSpaceCreatedMsg struct {
-	space api.Space
-	err   error
-}
-
-type chatReactionMsg struct {
-	messageID    string
-	messageName  string
-	reactionName string
-	emoji        string
-	remove       bool
-	err          error
-}
-
-type mailActionMsg struct {
-	thread api.MailThread
-	err    error
-	label  string
-}
-
-type mailDraftActionMsg struct {
-	draft api.MailDraftItem
-	err   error
-}
-
-type eventActionMsg struct {
-	event api.CalendarEvent
-	err   error
-	label string
-}
-
-type meetActionMsg struct {
-	space api.MeetSpace
-	err   error
-	label string
-}
-
-type taskActionMsg struct {
-	task       api.TaskItem
-	taskListID string
-	taskID     string
-	deleted    bool
-	err        error
-	label      string
-}
-
-type realtimeMsg struct {
-	message api.ChatMessage
-	err     error
-}
-
-type pinActionMsg struct {
-	space  string
-	pinned bool
-	err    error
-}
-
-type autosaveMsg struct{}
-
-type imageCachedMsg struct {
-	source string
-	path   string
-	err    error
-}
-
-type attachmentDownloadedMsg struct {
-	name string
-	path string
-	err  error
-}
-
-type daemonEventMsg struct {
-	events <-chan api.DaemonEvent
-	event  api.DaemonEvent
-	err    error
-}
-
-type userResolvedMsg struct {
-	userID    string
-	label     string
-	err       error
-	apiAbsent bool
-}
-
-type membersLoadedMsg struct {
-	spaceName string
-	members   []api.SpaceMember
-	err       error
-}
-
-type selfResolvedMsg struct {
-	userID    string
-	label     string
-	email     string
-	err       error
-	apiAbsent bool
-}
 
 func New(opts Options) Model {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -418,14 +41,6 @@ func New(opts Options) Model {
 		cacheLoaded = cache.HasData()
 	} else if !cfg.Daemon {
 		cache, cacheLoaded = loadWorkspaceCache(cfg.CachePath)
-	}
-	var loadProgress chan loadProgressMsg
-	loadTotal := 0
-	loadStage := ""
-	if !cacheLoaded {
-		loadProgress = make(chan loadProgressMsg, len(workspaceInitialLoadStages)+2)
-		loadTotal = len(workspaceInitialLoadStages)
-		loadStage = "Starting workspace fetch"
 	}
 	feature := Feature(cfg.InitialFeature)
 	if persisted.LastFeature != "" && cfg.InitialFeature == "chat" {
@@ -460,10 +75,11 @@ func New(opts Options) Model {
 		detail:         detail,
 		focusedPane:    paneList,
 		mailFolder:     defaultMailFolder,
-		loading:        !cacheLoaded,
-		loadProgress:   loadProgress,
-		loadTotal:      loadTotal,
-		loadStage:      loadStage,
+		calendarView:   calViewMonth,
+		calendarCursor: startOfDay(time.Now()),
+		loading:        false,
+		featureLoading: map[Feature]bool{},
+		featureLoaded:  map[Feature]bool{},
 		chatLoadIDs:    map[string]int{},
 		seenMessages:   map[string]bool{},
 		userLabels:     map[string]string{},
@@ -496,6 +112,15 @@ func New(opts Options) Model {
 	}
 	if cacheLoaded {
 		model.hydrateWorkspaceCache(cache)
+		for _, f := range featureOrder {
+			model.featureLoaded[f] = true
+		}
+	} else {
+		// Drive and Docs are deliberately omitted — they load lazily on first
+		// visit so the cold-start fan-out stays small.
+		for _, f := range startupFeatures {
+			model.featureLoading[f] = true
+		}
 	}
 	return model
 }
@@ -504,10 +129,11 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.autosaveTick()}
 	cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
 	if !m.cacheLoaded {
-		cmds = append(cmds, m.loadAllWithProgressCmd(m.loadProgress), m.whoamiCmd())
-		if m.loadProgress != nil {
-			cmds = append(cmds, m.loadProgressCmd())
-		}
+		// Cold start: the TUI opens immediately and each section fetches in
+		// its own goroutine via tea.Batch, so panes fill in progressively as
+		// data arrives instead of blocking on a single sequential load.
+		cmds = append(cmds, m.whoamiCmd())
+		cmds = append(cmds, m.startupLoadCmds()...)
 	} else {
 		cmds = append(cmds, m.whoamiCmd())
 		cmds = append(cmds, m.enrichSpacesCmds()...)
@@ -519,34 +145,18 @@ func (m Model) Init() tea.Cmd {
 	if m.cfg.Daemon {
 		cmds = append(cmds, m.daemonEventCmd())
 	}
-	return tea.Batch(cmds...)
-}
-
-func (m Model) whoamiCmd() tea.Cmd {
-	client := m.client
-	ctx := m.ctx
-	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-		person, err := client.PeopleGet(c, "me")
-		if err != nil {
-			if api.IsPeopleAPIUnavailable(err) {
-				return selfResolvedMsg{err: err, apiAbsent: true}
-			}
-			return selfResolvedMsg{err: err}
-		}
-		label := person.DisplayName
-		if label == "" {
-			label = person.Email
-		}
-		return selfResolvedMsg{userID: person.UserID, label: label, email: person.Email}
+	if m.cacheLoaded && m.feature == FeatureCalendar && m.calendarView == calViewMonth && !monthStart(m.calendarCursorOrToday()).Equal(m.calendarMonth) {
+		cmds = append(cmds, m.calendarMonthCmd(m.calendarCursorOrToday()))
 	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	prevFeature := m.feature
 	prevFocus := m.focusedPane
+	prevErr := m.err
+	prevToast := m.toast
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -558,312 +168,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
-	case loadProgressMsg:
-		m.loading = true
-		m.loadStep = msg.Step
-		m.loadTotal = msg.Total
-		m.loadStage = msg.Label
-		cmds = append(cmds, m.loadProgressCmd())
-	case loadProgressDoneMsg:
-		m.loadProgress = nil
-	case loadedMsg:
-		m.loading = false
-		m.chatLoading = false
-		m.chatLoadSpace = ""
-		m.loadProgress = nil
-		m.loadStage = ""
-		m.loadStep = 0
-		m.loadTotal = 0
+	case authLoadedMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
-		}
-		if msg.err == nil {
-			m.cacheLoaded = true
 		}
 		m.auth = msg.auth
-		m.authRequired = m.authRequired || msg.authRequired
-		m.spaces = msg.spaces.Items
-		m.chatMessages = dedupeChatMessages(msg.messages.Items)
-		m.chatOlder = msg.messages.NextPageToken
-		m.markSeenChatMessages(m.chatMessages)
-		m.mailLabels = msg.labels
-		m.mailThreads = msg.threads.Items
-		m.mailNext = msg.threads.NextPageToken
-		m.events = msg.events.Items
-		m.calendarNext = msg.events.NextPageToken
-		if msg.calendars.Items != nil {
-			m.calendars = msg.calendars.Items
-			m.calendarIndex = indexOfCalendar(m.calendars, msg.calendarID)
+		if !msg.auth.Valid() {
+			m.authRequired = true
 		}
-		m.meetSpaces = msg.meet.Items
-		m.taskLists = msg.taskLists.Items
-		m.taskListIndex = indexOfTaskList(m.taskLists, msg.taskListID)
-		m.tasks = msg.tasks.Items
-		m.taskNext = msg.tasks.NextPageToken
-		m.driveFiles = msg.driveFiles.Items
-		m.driveNext = msg.driveFiles.NextPageToken
-		m.docFiles = msg.docFiles.Items
-		m.docNext = msg.docFiles.NextPageToken
-		m.doc = msg.doc
-		m.docLoadingID = ""
-		m.clampSelections()
-		m.persistWorkspaceCache()
-		cmds = append(cmds, m.subscribeCmd())
-		cmds = append(cmds, m.enrichSpacesCmds()...)
-		cmds = append(cmds, m.enrichSendersCmds()...)
-		cmds = append(cmds, m.imageDownloadCmdsForWorkspace()...)
-		cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
+	case chatSectionLoadedMsg:
+		cmds = append(cmds, m.handleChatSectionLoaded(msg)...)
+	case loadedMsg:
+		cmds = append(cmds, m.handleLoaded(msg)...)
 	case chatLoadedMsg:
-		if !m.finishChatLoad(msg.spaceName, msg.loadID) {
-			break
-		}
-		selected := msg.spaceName == m.selectedSpace().Name
-		if m.chatLoadSpace == msg.spaceName {
-			m.loading = false
-			m.chatLoading = false
-			m.chatLoadSpace = ""
-		}
-		if msg.err != nil {
-			if selected || msg.refresh {
-				m.err = msg.err.Error()
-			}
-			break
-		}
-		messages := dedupeChatMessages(msg.messages.Items)
-		m.markSeenChatMessages(messages)
-		if msg.refresh {
-			m.toast = "chat refreshed"
-		}
-		m.rememberChatPage(msg.spaceName, api.Page[api.ChatMessage]{
-			Items:         messages,
-			NextPageToken: msg.messages.NextPageToken,
-		})
-		if selected {
-			m.chatMessages = messages
-			m.chatOlder = msg.messages.NextPageToken
-		}
-		if selected || msg.refresh {
-			// Opening or explicitly refreshing a space means the user has seen it,
-			// even if they navigated away before the background request finished.
-			m.setSpaceUnread(msg.spaceName, false)
-			cmds = append(cmds, m.markChatReadCmd(msg.spaceName))
-		}
-		m.persistWorkspaceCache()
-		if selected {
-			cmds = append(cmds, m.enrichSendersCmds()...)
-			cmds = append(cmds, m.imageDownloadCmdsForChat(m.chatMessages)...)
-			cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
-		} else {
-			cmds = append(cmds, m.imageDownloadCmdsForChat(messages)...)
-		}
+		cmds = append(cmds, m.handleChatLoaded(msg)...)
 	case featureLoadedMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.err = msg.err.Error()
-			break
-		}
-		switch msg.feature {
-		case FeatureChat:
-			if messages, ok := msg.items.([]api.ChatMessage); ok {
-				m.chatMessages = dedupeChatMessages(append(messages, m.chatMessages...))
-				m.chatOlder = msg.next
-				m.markSeenChatMessages(m.chatMessages)
-				m.toast = "older messages loaded"
-				m.persistWorkspaceCache()
-				cmds = append(cmds, m.enrichSendersCmds()...)
-				cmds = append(cmds, m.imageDownloadCmdsForChat(messages)...)
-			}
-		case FeatureMail:
-			if threads, ok := msg.items.([]api.MailThread); ok {
-				m.mailThreads = append(m.mailThreads, threads...)
-				m.mailNext = msg.next
-				m.toast = "more mail loaded"
-				m.persistWorkspaceCache()
-				cmds = append(cmds, m.imageDownloadCmdsForMail(threads)...)
-			}
-		case FeatureCalendar:
-			if events, ok := msg.items.([]api.CalendarEvent); ok {
-				m.events = append(m.events, events...)
-				m.calendarNext = msg.next
-				m.toast = "more events loaded"
-				m.persistWorkspaceCache()
-			}
-		case FeatureTasks:
-			if tasks, ok := msg.items.([]api.TaskItem); ok {
-				m.tasks = append(m.tasks, tasks...)
-				m.taskNext = msg.next
-				m.toast = "more tasks loaded"
-				m.persistWorkspaceCache()
-			}
-		case FeatureDrive:
-			if files, ok := msg.items.([]api.DriveFile); ok {
-				m.driveFiles = append(m.driveFiles, files...)
-				m.driveNext = msg.next
-				m.toast = "more drive files loaded"
-				m.persistWorkspaceCache()
-			}
-		case FeatureDocs:
-			if files, ok := msg.items.([]api.DriveFile); ok {
-				m.docFiles = append(m.docFiles, files...)
-				m.docNext = msg.next
-				m.toast = "more docs loaded"
-				m.persistWorkspaceCache()
-			}
-		}
+		cmds = append(cmds, m.handleFeatureLoaded(msg)...)
 	case featureRefreshedMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.err = msg.err.Error()
-			break
-		}
-		switch msg.feature {
-		case FeatureMail:
-			m.mailLabels = msg.labels
-			m.mailThreads = msg.threads.Items
-			m.mailNext = msg.threads.NextPageToken
-			if strings.TrimSpace(m.search) != "" {
-				m.toast = "search: " + m.search
-			} else {
-				m.toast = fallback(m.mailFolder, defaultMailFolder)
-			}
-			m.clampSelections()
-			m.persistWorkspaceCache()
-			cmds = append(cmds, m.imageDownloadCmdsForMail(m.mailThreads)...)
-		case FeatureCalendar:
-			if msg.calendars.Items != nil {
-				m.calendars = msg.calendars.Items
-				m.calendarIndex = indexOfCalendar(m.calendars, msg.calendarID)
-			}
-			m.events = msg.events.Items
-			m.calendarNext = msg.events.NextPageToken
-			m.toast = "calendar refreshed"
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		case FeatureMeet:
-			m.meetSpaces = msg.meet.Items
-			m.toast = "meet refreshed"
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		case FeatureTasks:
-			m.taskLists = msg.taskLists.Items
-			m.taskListIndex = indexOfTaskList(m.taskLists, msg.taskListID)
-			m.tasks = msg.tasks.Items
-			m.taskNext = msg.tasks.NextPageToken
-			m.toast = "tasks refreshed"
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		case FeatureDrive:
-			m.driveFiles = msg.driveFiles.Items
-			m.driveNext = msg.driveFiles.NextPageToken
-			m.toast = "drive refreshed"
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		case FeatureDocs:
-			m.docFiles = msg.docFiles.Items
-			m.docNext = msg.docFiles.NextPageToken
-			m.doc = msg.doc
-			m.docLoadingID = ""
-			if strings.TrimSpace(m.search) != "" {
-				m.toast = "search: " + m.search
-			} else {
-				m.toast = "docs refreshed"
-			}
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleFeatureRefreshed(msg)...)
 	case chatSentMsg:
-		m.replacePending(msg.pendingID, msg.message, msg.err)
-		m.persistWorkspaceCache()
-		if msg.err == nil {
-			cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{msg.message})...)
-		} else if len(msg.attachments) > 0 {
-			// Put the staged uploads back so the user can retry without
-			// re-pasting. Prepended to preserve order if they paste more.
-			m.pendingChatAttachments = append(msg.attachments, m.pendingChatAttachments...)
-		}
+		cmds = append(cmds, m.handleChatSent(msg)...)
 	case chatEditedMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			if msg.message.ID == "" {
-				msg.message.ID = msg.messageID
-			}
-			m.applyChatMessage(msg.message)
-			m.toast = "message edited"
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleChatEdited(msg)...)
 	case chatDeletedMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.removeChatMessage(msg.messageID, msg.messageName)
-			m.toast = "message deleted"
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleChatDeleted(msg)...)
 	case chatSpaceCreatedMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.applyChatSpace(msg.space)
-			m.toast = "space created"
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleChatSpaceCreated(msg)...)
 	case chatReactionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else if msg.remove {
-			delete(m.chatReactions, msg.messageName)
-			m.toast = "reaction removed"
-		} else {
-			m.chatReactions[msg.messageName] = msg.reactionName
-			m.toast = "reaction added " + msg.emoji
-		}
+		cmds = append(cmds, m.handleChatReaction(msg)...)
 	case mailActionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.toast = msg.label
-			m.applyMailThread(msg.thread)
-			m.persistWorkspaceCache()
-			cmds = append(cmds, m.imageDownloadCmdsForMail([]api.MailThread{msg.thread})...)
-		}
+		cmds = append(cmds, m.handleMailAction(msg)...)
 	case mailDraftActionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.toast = "draft saved"
-		}
+		cmds = append(cmds, m.handleMailDraftAction(msg)...)
 	case eventActionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.toast = msg.label
-			m.applyEvent(msg.event)
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleEventAction(msg)...)
+	case calendarMonthLoadedMsg:
+		cmds = append(cmds, m.handleCalendarMonthLoaded(msg)...)
 	case meetActionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.toast = msg.label
-			if msg.space.Name != "" {
-				m.applyMeetSpace(msg.space)
-				m.persistWorkspaceCache()
-			}
-		}
+		cmds = append(cmds, m.handleMeetAction(msg)...)
 	case taskActionMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			m.toast = msg.label
-			if msg.deleted {
-				m.removeTask(msg.taskListID, msg.taskID)
-			} else {
-				m.applyTask(msg.task)
-			}
-			m.clampSelections()
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleTaskAction(msg)...)
 	case pinActionMsg:
 		if msg.err != nil {
 			// Roll back the optimistic local flip so the indicator
@@ -877,22 +221,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 		}
 	case realtimeMsg:
-		if msg.err != nil {
-			m.err = msg.err.Error()
-			if m.realtimeRetry == 0 {
-				m.realtimeRetry = time.Second
-			} else {
-				m.realtimeRetry = minDuration(30*time.Second, m.realtimeRetry*2)
-			}
-			delay := m.realtimeRetry
-			cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg {
-				return realtimeMsg{}
-			}))
-			break
-		}
-		m.realtimeRetry = 0
-		cmds = append(cmds, m.applyIncomingChatMessage(msg.message, true)...)
-		cmds = append(cmds, m.subscribeCmd())
+		cmds = append(cmds, m.handleRealtime(msg)...)
 	case imageCachedMsg:
 		delete(m.imageLoading, msg.source)
 		if msg.err == nil && msg.source != "" && msg.path != "" {
@@ -929,123 +258,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = "downloaded to " + compactHomePath(msg.path)
 		}
 	case docLoadedMsg:
-		if msg.documentID != m.selectedDocFile().ID {
-			break
-		}
-		m.docLoadingID = ""
-		if msg.err != nil {
-			m.err = msg.err.Error()
-			break
-		}
-		m.doc = msg.doc
-		m.persistWorkspaceCache()
+		cmds = append(cmds, m.handleDocLoaded(msg)...)
 	case daemonEventMsg:
-		if msg.events != nil {
-			m.daemonEvents = msg.events
-		}
-		if msg.err != nil {
-			m.daemonEvents = nil
-			m.err = msg.err.Error()
-			cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-				return daemonEventMsg{}
-			}))
-			break
-		}
-		if msg.event.Topic == "image.cached" {
-			var payload struct {
-				Source string `json:"source"`
-				Path   string `json:"path"`
-			}
-			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Source != "" && payload.Path != "" {
-				m.imageFiles[payload.Source] = payload.Path
-				delete(m.imageErrors, payload.Source)
-				delete(m.imageLoading, payload.Source)
-				m.imageVersion++
-				cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
-			}
-		}
-		if msg.event.Topic == "notify" {
-			var payload struct {
-				Space string `json:"space"`
-			}
-			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Space != "" {
-				if m.isSelectedSpace(payload.Space) {
-					m.setSpaceUnread(payload.Space, false)
-					cmds = append(cmds, m.markChatReadCmd(payload.Space))
-				} else {
-					m.setSpaceUnread(payload.Space, true)
-					m.toast = "new chat message"
-				}
-			}
-		}
-		if msg.event.Topic == "chat.message" {
-			var message api.ChatMessage
-			if json.Unmarshal(msg.event.Payload, &message) == nil {
-				cmds = append(cmds, m.applyIncomingChatMessage(message, false)...)
-			}
-		}
-		if msg.event.Topic == "chat.read" {
-			var payload struct {
-				Space string `json:"space"`
-			}
-			if json.Unmarshal(msg.event.Payload, &payload) == nil && payload.Space != "" {
-				m.setSpaceUnread(payload.Space, false)
-			}
-		}
-		cmds = append(cmds, m.daemonEventCmd())
+		cmds = append(cmds, m.handleDaemonEvent(msg)...)
 	case selfResolvedMsg:
-		if msg.apiAbsent {
-			m.peopleAPIDown = true
-			break
-		}
-		if msg.err != nil || msg.userID == "" {
-			break
-		}
-		m.peopleAPIDown = false
-		m.markSelfUser(msg.userID)
-		m.markSelfUser(msg.email)
-		if msg.email != "" {
-			m.selfEmail = msg.email
-		}
-		if msg.label != "" {
-			m.userLabels[normalizeUserKey(msg.userID)] = msg.label
-		}
-		m.persistWorkspaceCache()
-		cmds = append(cmds, m.enrichSpacesCmds()...)
-		cmds = append(cmds, m.enrichSendersCmds()...)
+		cmds = append(cmds, m.handleSelfResolved(msg)...)
 	case userResolvedMsg:
-		delete(m.pendingUsers, normalizeUserKey(msg.userID))
-		if msg.apiAbsent {
-			m.peopleAPIDown = true
-			break
-		}
-		if msg.err != nil {
-			break
-		}
-		m.peopleAPIDown = false
-		if msg.label != "" {
-			m.userLabels[normalizeUserKey(msg.userID)] = msg.label
-			m.persistWorkspaceCache()
-		}
+		cmds = append(cmds, m.handleUserResolved(msg)...)
 	case membersLoadedMsg:
-		delete(m.pendingMembers, msg.spaceName)
-		if msg.err != nil {
-			break
-		}
-		m.membersBySpace[msg.spaceName] = msg.members
-		m.selfUserIDs = api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
-		m.persistWorkspaceCache()
-		for _, member := range msg.members {
-			if member.Type != "" && member.Type != "HUMAN" {
-				continue
-			}
-			if m.isSelfUserID(member.UserID) {
-				continue
-			}
-			if cmd := m.resolveUserCmd(member.UserID); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
+		cmds = append(cmds, m.handleMembersLoaded(msg)...)
 	case autosaveMsg:
 		if m.modal != nil && m.modal.autosave {
 			if err := m.saveDraft(); err == nil {
@@ -1083,6 +304,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focusedPane = paneList
 		}
 	}
+	// Meet renders single-pane, so it never has a detail or action pane to
+	// focus; keep focus on the list so j/k always move the conference cursor.
+	if m.feature == FeatureMeet {
+		m.focusedPane = paneList
+	}
 
 	// Mail uses a different pane layout than the other features, and its
 	// composer pane appears only while focused — so the viewport sizes have
@@ -1090,9 +316,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.feature != prevFeature || m.focusedPane != prevFocus {
 		m.resize()
 	}
+	// Drive and Docs aren't fetched at startup; the first time the user opens
+	// one, kick off its load now.
+	if m.feature != prevFeature {
+		if m.feature == FeatureCalendar && m.calendarView == calViewMonth {
+			var cmd tea.Cmd
+			m, cmd = m.ensureCalendarMonth(m.calendarCursorOrToday())
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else if cmd := m.ensureFeatureLoadedCmd(m.feature); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
 	cmds = append(cmds, m.imageDownloadCmdsForCurrentDetail()...)
 	cmds = append(cmds, m.precomputeFrameCmdsForCurrentDetail()...)
 	m.updateDetailContent()
+	m.captureTransientMessages(prevErr, prevToast)
 	return m, tea.Batch(cmds...)
 }
 
@@ -1100,10 +340,22 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.imageViewer != nil {
 		return m.updateImageViewer(msg)
 	}
+	if m.messagesVisible {
+		if msg.String() == "ctrl+c" {
+			m.persist()
+			m.cancel()
+			return m, tea.Quit
+		}
+		return m.updateMessageLogKey(msg), nil
+	}
 	if m.helpVisible {
-		switch msg.String() {
+		key := msg.String()
+		switch key {
 		case "?", "esc", "q":
 			m.helpVisible = false
+			m.helpScroll = 0
+		default:
+			m.updateHelpScroll(key)
 		}
 		return m, nil
 	}
@@ -1178,6 +430,15 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	}
 
+	// The month grid remaps the list-pane navigation keys to day/week/month
+	// movement; everything it does not claim falls through to the switch
+	// below so global keys (Tab, Ctrl+N, ?, …) keep working.
+	if m.feature == FeatureCalendar && m.calendarView == calViewMonth && m.focusedPane == paneList {
+		if next, cmd, handled := m.updateCalendarMonthKey(msg); handled {
+			return next, cmd
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		m.persist()
@@ -1185,6 +446,11 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, tea.Quit
 	case "?":
 		m.helpVisible = true
+		m.helpScroll = 0
+		m.helpPending = ""
+		return m, nil
+	case ":":
+		m.openMessageLog()
 		return m, nil
 	case "H", "ctrl+h":
 		// In Mail the folder rail sits left of the list, so H steps left
@@ -1202,6 +468,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		if m.feature == FeatureDocs {
 			return m.openSelectedDoc()
+		}
+		if m.feature == FeatureMeet {
+			return m, nil
 		}
 		m.focusedPane = paneDetail
 		return m, nil
@@ -1243,10 +512,13 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.feature == FeatureDocs {
 			return m.openSelectedDoc()
 		}
+		if m.feature == FeatureMeet {
+			return m, nil
+		}
 		m.focusedPane = paneDetail
 		return m, nil
 	case "3":
-		if m.feature == FeatureDocs {
+		if m.feature == FeatureDocs || m.feature == FeatureMeet {
 			return m, nil
 		}
 		m.focusedPane = paneAction
@@ -1340,6 +612,14 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.feature == FeatureDocs && m.focusedPane == paneList {
 			return m.openSelectedDoc()
 		}
+		if m.feature == FeatureCalendar && m.focusedPane == paneList {
+			if m.selectedEvent().ID == "" {
+				m.toast = "no event selected"
+				return m, nil
+			}
+			m.focusedPane = paneDetail
+			return m, nil
+		}
 		if m.feature == FeatureDrive {
 			return m.downloadSelectedDriveFile()
 		}
@@ -1361,6 +641,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.input.CursorEnd()
 	case "y":
 		if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			return m.rsvpSelected("accepted")
 		}
 		cmd := m.yankFocused()
@@ -1446,10 +729,13 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.feature == FeatureMail {
 			return m.trashSelectedMail()
 		}
-	case "n":
+	case "n", "N":
 		if m.feature == FeatureChat {
 			m.beginCreateChatSpace()
 		} else if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			return m.rsvpSelected("declined")
 		}
 		if m.feature == FeatureMeet {
@@ -1457,6 +743,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "M":
 		if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			return m.rsvpSelected("tentative")
 		}
 	case "d":
@@ -1464,6 +753,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m.deleteSelectedChatMessage()
 		}
 		if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			return m.deleteSelectedEvent()
 		}
 		if m.feature == FeatureTasks {
@@ -1473,10 +765,22 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.feature == FeatureTasks {
 			return m.toggleSelectedTaskCompleted()
 		}
+	case "v":
+		if m.feature == FeatureCalendar {
+			return m.toggleCalendarView()
+		}
+	case "D":
+		if m.feature == FeatureCalendar {
+			m.openGoToDateModal()
+			return m, nil
+		}
 	case "t":
 		if m.feature == FeatureCalendar {
-			m.weekOffset = 0
+			// The month grid handles 't' in updateCalendarMonthKey; here the
+			// agenda jumps the selection to the first event from today on.
+			m.selected[FeatureCalendar] = m.firstEventOnOrAfter(startOfDay(time.Now()))
 			m.toast = "today"
+			return m, nil
 		}
 	case "]":
 		if m.feature == FeatureCalendar {
@@ -1508,6 +812,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			event := m.selectedEvent()
 			if event.ID != "" {
 				m.openEventCompose(&event)
@@ -1519,6 +826,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case ">":
 		if m.feature == FeatureCalendar {
+			if m.calendarMonthBlocksEventAction() {
+				return m, nil
+			}
 			return m.moveSelectedEventToNextCalendar()
 		}
 	case "+":
@@ -1532,79 +842,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "x":
 		m.err = ""
 		m.toast = ""
-	}
-	return m, nil
-}
-
-// clearPendingChatAttachments drops every staged upload and deletes the temp
-// files. Bound to Ctrl+X so users can abort an accidental paste without having
-// to send a junk message.
-func (m Model) clearPendingChatAttachments() Model {
-	for _, att := range m.pendingChatAttachments {
-		_ = os.Remove(att.path)
-	}
-	n := len(m.pendingChatAttachments)
-	m.pendingChatAttachments = nil
-	if n == 1 {
-		m.toast = "attachment cleared"
-	} else {
-		m.toast = fmt.Sprintf("%d attachments cleared", n)
-	}
-	return m
-}
-
-// handleChatPaste runs when the user presses Ctrl+V while the chat feature is
-// active. An image on the clipboard becomes a pending attachment (and focuses
-// the composer so the next keystroke is either send-text or send-image).
-// Without an image we fall back to inserting clipboard text into the composer
-// when it is focused — that mirrors what users expect Ctrl+V to do.
-func (m Model) handleChatPaste() (Model, tea.Cmd) {
-	if m.feature != FeatureChat {
-		return m, nil
-	}
-	tmp, err := os.CreateTemp("", "gws-paste-*.png")
-	if err != nil {
-		m.toast = "paste: " + err.Error()
-		return m, nil
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		m.toast = "paste: " + err.Error()
-		return m, nil
-	}
-	mime, err := pasteImageTo(tmpPath)
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		// No image on clipboard — degrade gracefully to text paste when
-		// the composer is focused, otherwise just inform the user.
-		if m.focusedPane == paneAction {
-			if text, perr := pasteText(); perr == nil && text != "" {
-				m.input.InsertString(text)
-				return m, nil
-			}
-		}
-		m.toast = "no image on clipboard"
-		return m, nil
-	}
-	name := fmt.Sprintf("paste-%d.png", time.Now().Unix())
-	m.pendingChatAttachments = append(m.pendingChatAttachments, pendingAttachment{
-		path:        tmpPath,
-		contentType: mime,
-		name:        name,
-	})
-	// Move focus to the composer so Enter sends right away — the message
-	// pane is read-only, so leaving the user there would force an extra
-	// keystroke to switch panes before sending.
-	m.focusedPane = paneAction
-	m.input.Focus()
-	if m.cfg.VimMode {
-		m.vimComposer = vimModeInsert
-	}
-	if n := len(m.pendingChatAttachments); n == 1 {
-		m.toast = "image attached - Enter to send"
-	} else {
-		m.toast = fmt.Sprintf("image attached (%d pending) - Enter to send", n)
 	}
 	return m, nil
 }
@@ -1719,409 +956,40 @@ func (m Model) submitAction() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// chatMessageUnderCursor returns the chat message the detail-pane cursor is
-// currently resting on. Returns ok=false when the cursor is off-message
-// (day separator, blank line, list pane focused) so callers can fall back to
-// other behavior — used by the `r` keybinding to choose between reply and
-// refresh without clobbering refresh in views where there's no cursor.
-func (m *Model) chatMessageUnderCursor() (api.ChatMessage, bool) {
-	if m.feature != FeatureChat || len(m.chatMessages) == 0 {
-		return api.ChatMessage{}, false
-	}
-	id, ok := m.detailMessageAt[m.detailCursor]
-	if !ok || id == "" {
-		return api.ChatMessage{}, false
-	}
-	for i := range m.chatMessages {
-		if m.chatMessages[i].ID == id {
-			return m.chatMessages[i], true
-		}
-	}
-	return api.ChatMessage{}, false
-}
-
-func (m *Model) beginThreadReply(target api.ChatMessage) {
-	m.editMessageName = ""
-	m.editMessageID = ""
-	m.createSpaceMode = false
-	thread := target.ThreadID
-	if thread == "" {
-		// No thread metadata — sending without thread context creates a
-		// new top-level message instead of failing silently.
-		m.toast = "no thread info; sending as new message"
-		thread = ""
-	}
-	m.replyThreadID = thread
-	m.replyTargetName = target.SenderName
-	m.focusedPane = paneAction
-	m.input.Placeholder = fmt.Sprintf("reply to %s (esc to cancel)", target.SenderName)
-	m.input.Focus()
-	m.vimComposer = vimModeInsert
-	if thread != "" {
-		m.toast = "replying to " + target.SenderName
-	}
-}
-
-func (m *Model) beginEditChatMessage(target api.ChatMessage) {
-	name := target.Name
-	if name == "" && target.Space != "" && target.ID != "" {
-		name = target.Space + "/messages/" + target.ID
-	}
-	if name == "" {
-		m.toast = "message name unavailable"
-		return
-	}
-	m.replyThreadID = ""
-	m.replyTargetName = ""
-	m.createSpaceMode = false
-	m.editMessageName = name
-	m.editMessageID = target.ID
-	m.focusedPane = paneAction
-	m.input.SetValue(target.Text)
-	m.input.Placeholder = "edit message (esc to cancel)"
-	m.input.Focus()
-	m.input.CursorEnd()
-	m.vimComposer = vimModeInsert
-	m.toast = "editing message"
-}
-
-func (m *Model) beginCreateChatSpace() {
-	m.replyThreadID = ""
-	m.replyTargetName = ""
-	m.editMessageName = ""
-	m.editMessageID = ""
-	m.createSpaceMode = true
-	m.focusedPane = paneAction
-	m.input.SetValue("")
-	m.input.Placeholder = "new space name | user@example.com, user2@example.com"
-	m.input.Focus()
-	m.vimComposer = vimModeInsert
-	m.toast = "creating chat space"
-}
-
-func parseChatSpaceSetupInput(value string) (string, []string) {
-	name, memberText, hasMembers := strings.Cut(value, "|")
-	name = strings.TrimSpace(name)
-	if !hasMembers {
-		return name, nil
-	}
-	return name, splitCSV(memberText)
-}
-
-func (m *Model) clearReplyContext() {
-	m.replyThreadID = ""
-	m.replyTargetName = ""
-	m.editMessageName = ""
-	m.editMessageID = ""
-	m.createSpaceMode = false
-	m.input.Placeholder = "message"
-}
-
-func lastSegmentOfName(value string) string {
-	if value == "" {
-		return ""
-	}
-	idx := strings.LastIndex(value, "/")
-	if idx < 0 {
-		return value
-	}
-	return value[idx+1:]
-}
-
-func spaceFromMessageName(value string) string {
-	if idx := strings.Index(value, "/messages/"); idx > 0 {
-		return value[:idx]
-	}
-	return ""
-}
-
-func normalizeUserKey(value string) string {
-	return api.NormalizeUserID(value)
-}
-
-func (m *Model) markSelfUser(value string) {
-	key := normalizeUserKey(value)
-	if key == "" {
-		return
-	}
-	m.selfUserIDs[key] = true
-}
-
-func (m Model) isSelfUserID(value string) bool {
-	key := normalizeUserKey(value)
-	if key == "" {
-		return false
-	}
-	if key == "me" {
-		return true
-	}
-	return m.inferredSelfUserIDs()[key]
-}
-
-func (m Model) inferredSelfUserIDs() map[string]bool {
-	return api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
-}
-
-func (m Model) stripSelfFromSpaceTitle(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	parts := splitSpaceTitleParts(value)
-	if len(parts) <= 1 {
-		if m.isSelfSpaceLabel(value) {
-			return ""
-		}
-		return value
-	}
-	kept := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" || m.isSelfSpaceLabel(part) {
-			continue
-		}
-		kept = append(kept, part)
-	}
-	return strings.Join(kept, ", ")
-}
-
-func splitSpaceTitleParts(value string) []string {
-	raw := strings.FieldsFunc(value, func(r rune) bool {
-		switch r {
-		case ',', ';', '|', '\n', '\r', '·', '•':
-			return true
-		default:
-			return false
-		}
-	})
-	parts := make([]string, 0, len(raw))
-	for _, part := range raw {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			parts = append(parts, part)
-		}
-	}
-	return parts
-}
-
-func (m Model) isSelfSpaceLabel(value string) bool {
-	needle := normalizeSpaceLabel(value)
-	if needle == "" {
-		return false
-	}
-	for userID := range m.inferredSelfUserIDs() {
-		if normalizeSpaceLabel(userID) == needle {
-			return true
-		}
-		if label := m.userLabels[userID]; normalizeSpaceLabel(label) == needle {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeSpaceLabel(value string) string {
-	value = strings.TrimSpace(api.UserIDFromName(value))
-	value = strings.Join(strings.Fields(value), " ")
-	return strings.ToLower(value)
-}
-
-func (m *Model) normalizeUserCaches() {
-	if m.userLabels != nil {
-		normalized := make(map[string]string, len(m.userLabels))
-		for userID, label := range m.userLabels {
-			key := normalizeUserKey(userID)
-			if key == "" {
-				continue
-			}
-			normalized[key] = label
-		}
-		m.userLabels = normalized
-	}
-	if m.selfUserIDs != nil {
-		normalized := make(map[string]bool, len(m.selfUserIDs))
-		for userID, isSelf := range m.selfUserIDs {
-			if !isSelf {
-				continue
-			}
-			key := normalizeUserKey(userID)
-			if key != "" {
-				normalized[key] = true
-			}
-		}
-		m.selfUserIDs = normalized
-	}
-	m.selfUserIDs = api.InferSelfUserIDs(m.spaces, m.membersBySpace, m.selfUserIDs)
-}
-
-func (m *Model) resolveUserCmd(userID string) tea.Cmd {
-	userID = normalizeUserKey(userID)
-	if userID == "" || m.peopleAPIDown {
-		return nil
-	}
-	if label, ok := m.userLabels[userID]; ok && label != "" && label != userID && label != "users/"+userID {
-		return nil
-	}
-	if m.pendingUsers[userID] {
-		return nil
-	}
-	m.pendingUsers[userID] = true
-	client := m.client
-	ctx := m.ctx
-	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-		person, err := client.PeopleGet(c, userID)
-		if err != nil {
-			if api.IsPeopleAPIUnavailable(err) {
-				return userResolvedMsg{userID: userID, err: err, apiAbsent: true}
-			}
-			return userResolvedMsg{userID: userID, err: err}
-		}
-		label := person.DisplayName
-		if label == "" {
-			label = person.Email
-		}
-		if label == "" {
-			label = userID
-		}
-		return userResolvedMsg{userID: userID, label: label}
-	}
-}
-
-func (m *Model) loadMembersCmd(space api.Space) tea.Cmd {
-	if space.Name == "" {
-		return nil
-	}
-	if !space.UsesMemberLabels() {
-		return nil
-	}
-	if _, ok := m.membersBySpace[space.Name]; ok {
-		return nil
-	}
-	if m.pendingMembers[space.Name] {
-		return nil
-	}
-	m.pendingMembers[space.Name] = true
-	client := m.client
-	ctx := m.ctx
-	name := space.Name
-	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-		members, err := client.ChatMembers(c, name)
-		return membersLoadedMsg{spaceName: name, members: members, err: err}
-	}
-}
-
-func (m *Model) enrichSpacesCmds() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, space := range m.spaces {
-		for _, member := range m.membersBySpace[space.Name] {
-			if member.Type != "" && member.Type != "HUMAN" {
-				continue
-			}
-			if m.isSelfUserID(member.UserID) {
-				continue
-			}
-			if cmd := m.resolveUserCmd(member.UserID); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-		if cmd := m.loadMembersCmd(space); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	}
-	return cmds
-}
-
-func (m *Model) enrichSendersCmds() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, msg := range m.chatMessages {
-		userID := api.UserIDFromName(msg.SenderID)
-		if userID == "" {
-			continue
-		}
-		if cmd := m.resolveUserCmd(userID); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	}
-	return cmds
-}
-
-func (m Model) loadProgressCmd() tea.Cmd {
-	progress := m.loadProgress
-	if progress == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		msg, ok := <-progress
-		if !ok {
-			return loadProgressDoneMsg{}
-		}
-		return msg
-	}
-}
-
-func sendLoadProgress(progress chan loadProgressMsg, step int, label string) {
-	if progress == nil {
-		return
-	}
-	select {
-	case progress <- loadProgressMsg{Step: step, Total: len(workspaceInitialLoadStages), Label: label}:
-	default:
-	}
-}
-
+// loadAllCmd refetches every workspace section in a single command. It backs
+// the manual full-reload key; the cold-start path uses startupLoadCmds instead
+// so panes can fill in progressively.
 func (m Model) loadAllCmd() tea.Cmd {
-	return m.loadAllWithProgressCmd(nil)
-}
-
-func (m Model) loadAllWithProgressCmd(progress chan loadProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		if progress != nil {
-			defer close(progress)
-		}
 		ctx, cancel := context.WithTimeout(m.ctx, 45*time.Second)
 		defer cancel()
 
-		sendLoadProgress(progress, 1, "Auth")
 		auth, authErr := m.client.AuthStatus(ctx)
-		sendLoadProgress(progress, 2, "Chat spaces")
 		spaces, spacesErr := m.client.ChatSpaces(ctx)
 		selectedSpace := ""
 		if len(spaces.Items) > 0 {
 			selectedSpace = spaces.Items[clamp(m.selected[FeatureChat], len(spaces.Items))].Name
 		}
-		sendLoadProgress(progress, 3, "Current chat")
 		messages, messagesErr := m.client.ChatMessages(ctx, selectedSpace, "")
-		sendLoadProgress(progress, 4, "Mail labels")
 		labels, labelsErr := m.client.MailLabels(ctx)
-		sendLoadProgress(progress, 5, "Inbox")
 		threads, threadsErr := m.client.MailThreads(ctx, api.MailQuery{Label: "Inbox"})
-		sendLoadProgress(progress, 6, "Calendars")
 		calendars, calendarsErr := m.client.CalendarLists(ctx)
 		calendarID := selectedCalendarID(calendars.Items, m.calendarIndex)
-		sendLoadProgress(progress, 7, "Calendar events")
-		events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendarID})
-		sendLoadProgress(progress, 8, "Meet")
+		calendarMonth := monthStart(m.calendarCursorOrToday())
+		events, eventsErr := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendarID, TimeMin: calendarMonth, TimeMax: calendarMonth.AddDate(0, 1, 0)})
 		meet, meetErr := m.client.MeetSpaces(ctx)
-		sendLoadProgress(progress, 9, "Task lists")
 		taskLists, taskListsErr := m.client.TaskLists(ctx)
 		tasks := api.Page[api.TaskItem]{}
 		taskListID := ""
 		var tasksErr error
-		sendLoadProgress(progress, 10, "Tasks")
 		if len(taskLists.Items) > 0 {
 			taskListID = taskLists.Items[clamp(m.taskListIndex, len(taskLists.Items))].ID
 			tasks, tasksErr = m.client.Tasks(ctx, api.TaskQuery{TaskListID: taskListID})
 		}
-		sendLoadProgress(progress, 11, "Drive files")
 		driveFiles, driveErr := m.client.DriveFiles(ctx, api.DriveQuery{})
-		sendLoadProgress(progress, 12, "Docs")
 		docFiles, docsErr := m.client.Docs(ctx, api.DriveQuery{})
 		doc := api.DocDocument{}
 		var docErr error
-		sendLoadProgress(progress, 13, "Document preview")
 		if len(docFiles.Items) > 0 {
 			doc = api.DocDocument{ID: docFiles.Items[clamp(m.selected[FeatureDocs], len(docFiles.Items))].ID}
 			doc, docErr = m.client.Doc(ctx, doc.ID)
@@ -2129,10 +997,52 @@ func (m Model) loadAllWithProgressCmd(progress chan loadProgressMsg) tea.Cmd {
 
 		err := firstErr(authErr, spacesErr, messagesErr, labelsErr, threadsErr, calendarsErr, eventsErr, meetErr, taskListsErr, tasksErr, driveErr, docsErr, docErr)
 		return loadedMsg{
-			auth: auth, spaces: spaces, messages: messages, labels: labels, threads: threads, events: events, calendars: calendars, calendarID: calendarID, meet: meet,
+			auth: auth, spaces: spaces, messages: messages, labels: labels, threads: threads, events: events, calendars: calendars, calendarID: calendarID, calendarMonth: calendarMonth, meet: meet,
 			taskLists: taskLists, tasks: tasks, taskListID: taskListID, driveFiles: driveFiles, docFiles: docFiles, doc: doc,
 			err: err, authRequired: !auth.Valid(),
 		}
+	}
+}
+
+// startupLoadCmds fans the cold-start fetch out into one command per pane.
+// tea.Batch runs each in its own goroutine, so the requests hit the daemon in
+// parallel and every pane renders the moment its own response lands. Drive and
+// Docs are intentionally absent — they load lazily on first visit.
+func (m Model) startupLoadCmds() []tea.Cmd {
+	return []tea.Cmd{
+		m.loadAuthCmd(),
+		m.loadChatSectionCmd(),
+		m.loadMailSectionCmd(),
+		m.loadCalendarSectionCmd(),
+		m.loadMeetSectionCmd(),
+		m.loadTasksSectionCmd(),
+	}
+}
+
+// ensureFeatureLoadedCmd returns the fetch command for a lazily-loaded pane
+// (Drive, Docs) the first time it is opened, or nil if it is already loaded,
+// already in flight, or eagerly loaded at startup.
+func (m *Model) ensureFeatureLoadedCmd(f Feature) tea.Cmd {
+	if m.featureLoaded[f] || m.featureLoading[f] {
+		return nil
+	}
+	switch f {
+	case FeatureDrive:
+		m.featureLoading[f] = true
+		return m.loadDriveSectionCmd()
+	case FeatureDocs:
+		m.featureLoading[f] = true
+		return m.loadDocsSectionCmd()
+	}
+	return nil
+}
+
+func (m Model) loadAuthCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		defer cancel()
+		auth, err := m.client.AuthStatus(ctx)
+		return authLoadedMsg{auth: auth, err: err}
 	}
 }
 
@@ -2158,6 +1068,9 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 			}
 		}
 	case FeatureCalendar:
+		if m.calendarView == calViewMonth {
+			return m.loadCalendarMonth(m.calendarCursorOrToday())
+		}
 		m.loading = true
 		search := m.search
 		calendarID := m.selectedCalendar().ID
@@ -2227,58 +1140,6 @@ func (m Model) refreshCurrentFeature() (Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) startChatLoad(spaceName string) int {
-	m.chatLoadID++
-	if m.chatLoadIDs == nil {
-		m.chatLoadIDs = map[string]int{}
-	}
-	m.chatLoadIDs[spaceName] = m.chatLoadID
-	return m.chatLoadID
-}
-
-func (m *Model) finishChatLoad(spaceName string, loadID int) bool {
-	if m.chatLoadIDs == nil {
-		return loadID == m.chatLoadID
-	}
-	latest, ok := m.chatLoadIDs[spaceName]
-	if !ok {
-		return loadID == m.chatLoadID
-	}
-	if latest != loadID {
-		return false
-	}
-	delete(m.chatLoadIDs, spaceName)
-	return true
-}
-
-func (m Model) refreshSelectedChat() (Model, tea.Cmd) {
-	space := m.selectedSpace()
-	if space.Name == "" {
-		m.chatMessages = nil
-		m.chatOlder = ""
-		m.chatLoading = false
-		m.chatLoadSpace = ""
-		m.loading = false
-		return m, nil
-	}
-
-	spaceName := space.Name
-	loadID := m.startChatLoad(spaceName)
-	m.loading = true
-	m.chatLoading = true
-	m.chatLoadSpace = spaceName
-	m.chatMessages = nil
-	m.chatOlder = ""
-
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		page, err := m.client.ChatMessages(ctx, spaceName, "")
-		return chatLoadedMsg{spaceName: spaceName, loadID: loadID, messages: page, err: err, refresh: true}
-	}
-}
-
 func (m Model) loadMore() (Model, tea.Cmd) {
 	switch m.feature {
 	case FeatureChat:
@@ -2307,6 +1168,10 @@ func (m Model) loadMore() (Model, tea.Cmd) {
 			return featureLoadedMsg{feature: FeatureMail, items: page.Items, next: page.NextPageToken, err: err}
 		}
 	case FeatureCalendar:
+		if m.calendarView == calViewMonth {
+			m.toast = "month view already shows the whole month"
+			return m, nil
+		}
 		if m.calendarNext == "" {
 			m.toast = "no more events"
 			return m, nil
@@ -2354,126 +1219,6 @@ func (m Model) loadMore() (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-func (m Model) subscribeCmd() tea.Cmd {
-	space := m.selectedSpace()
-	if space.Name == "" || !space.Live {
-		return nil
-	}
-	return func() tea.Msg {
-		ch, err := m.client.SubscribeChat(m.ctx, space.Name)
-		if err != nil {
-			return realtimeMsg{err: err}
-		}
-		select {
-		case <-m.ctx.Done():
-			return realtimeMsg{}
-		case msg, ok := <-ch:
-			if !ok {
-				return realtimeMsg{err: api.ErrRemoteClosed}
-			}
-			return realtimeMsg{message: msg}
-		}
-	}
-}
-
-func (m *Model) applyIncomingChatMessage(message api.ChatMessage, sendStandaloneNotify bool) []tea.Cmd {
-	var cmds []tea.Cmd
-	if chatMessageKey(message) == "" || m.hasSeenChatMessage(message) {
-		return cmds
-	}
-	m.markSeenChatMessage(message)
-	m.rememberChatMessage(message)
-	m.promoteSpaceToTop(message.Space)
-	// selfUserIDs is keyed by the bare numeric id; message.SenderID has the
-	// "users/" resource prefix. Normalize before lookup.
-	senderBareID := api.UserIDFromName(message.SenderID)
-	fromSelf := m.isSelfUserID(senderBareID)
-	if m.isSelectedSpace(message.Space) {
-		m.chatMessages, _ = upsertChatMessage(m.chatMessages, message)
-		// User is actively viewing; keep the daemon's read marker in sync so the
-		// badge doesn't reappear on reconnect.
-		cmds = append(cmds, m.markChatReadCmd(message.Space))
-	} else if !fromSelf {
-		m.setSpaceUnread(message.Space, true)
-	}
-	if !fromSelf {
-		m.toast = "new chat message"
-	}
-	if cmd := m.resolveUserCmd(senderBareID); cmd != nil {
-		cmds = append(cmds, cmd)
-	}
-	cmds = append(cmds, m.imageDownloadCmdsForChat([]api.ChatMessage{message})...)
-	if sendStandaloneNotify && !fromSelf && !m.cfg.Daemon && (m.feature != FeatureChat || !m.isSelectedSpace(message.Space)) {
-		notify.Send(m.chatNotifyTitle(message.Space), message.SenderName+": "+message.Text, notify.Options{
-			Desktop:   m.cfg.NotifyDesktop,
-			Sound:     m.cfg.NotifySound,
-			SoundFile: m.cfg.NotifySoundFile,
-		})
-	}
-	m.persistWorkspaceCache()
-	return cmds
-}
-
-func (m Model) chatNotifyTitle(spaceName string) string {
-	if spaceName == "" {
-		return "gws chat"
-	}
-	for _, space := range m.spaces {
-		if space.Name == spaceName {
-			if label := m.spaceLabel(space); label != "" {
-				return "gws chat · " + label
-			}
-			break
-		}
-	}
-	return "gws chat"
-}
-
-func (m Model) markChatReadCmd(spaceName string) tea.Cmd {
-	if spaceName == "" || !m.cfg.Daemon {
-		return nil
-	}
-	reader, ok := m.client.(api.ChatReader)
-	if !ok {
-		return nil
-	}
-	ctx := m.ctx
-	return func() tea.Msg {
-		_ = reader.MarkChatRead(ctx, spaceName)
-		return nil
-	}
-}
-
-func (m Model) daemonEventCmd() tea.Cmd {
-	subscriber, ok := m.client.(interface {
-		SubscribeEvents(context.Context, []string) (<-chan api.DaemonEvent, error)
-	})
-	if !ok {
-		return nil
-	}
-	topics := []string{"image.cached", "notify", "chat.message", "chat.read", "auth.changed", "mail.changed", "calendar.changed", "meet.changed"}
-	events := m.daemonEvents
-	return func() tea.Msg {
-		ch := events
-		if ch == nil {
-			var err error
-			ch, err = subscriber.SubscribeEvents(m.ctx, topics)
-			if err != nil {
-				return daemonEventMsg{err: err}
-			}
-		}
-		select {
-		case <-m.ctx.Done():
-			return daemonEventMsg{events: ch}
-		case event, ok := <-ch:
-			if !ok {
-				return daemonEventMsg{err: api.ErrRemoteClosed}
-			}
-			return daemonEventMsg{events: ch, event: event}
-		}
-	}
 }
 
 func (m Model) autosaveTick() tea.Cmd {
@@ -2555,6 +1300,7 @@ func (m *Model) clampSelections() {
 		m.selected[feature] = clamp(m.selected[feature], m.listLenFor(feature))
 	}
 	m.taskListIndex = clamp(m.taskListIndex, len(m.taskLists))
+	m.clampCalendarDayEventCursor()
 }
 
 func (m Model) nextFeature(delta int) Feature {
@@ -2570,6 +1316,10 @@ func (m Model) nextFeature(delta int) Feature {
 }
 
 func (m Model) moveSelection(delta int) (Model, tea.Cmd) {
+	// The month grid has no list index — wheel/arrow steps move by a week.
+	if m.feature == FeatureCalendar && m.calendarView == calViewMonth {
+		return m.calendarShiftCursor(7*delta, 0)
+	}
 	length := m.listLen()
 	if length == 0 {
 		m.selected[m.feature] = 0
@@ -2591,127 +1341,6 @@ func (m Model) loadSelectedItem() (Model, tea.Cmd) {
 		return m.loadSelectedDoc()
 	default:
 		return m, nil
-	}
-}
-
-func (m *Model) openSpaceFilter() {
-	if !m.spaceFilterActive {
-		m.spaceFilterOrigin = m.selectedSpace().Name
-	}
-	m.spaceFilterActive = true
-	m.focusedPane = paneList
-	m.toast = ""
-}
-
-func (m Model) updateSpaceFilter(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		m.persist()
-		m.cancel()
-		return m, tea.Quit
-	case "esc":
-		m.spaceFilterActive = false
-		m.spaceFilter = ""
-		m.restoreSpaceFilterOrigin()
-		m.spaceFilterOrigin = ""
-		return m, nil
-	case "enter":
-		m.spaceFilterActive = false
-		m.spaceFilterOrigin = ""
-		return m.loadSelectedChat()
-	case "backspace", "ctrl+h":
-		value := []rune(m.spaceFilter)
-		if len(value) > 0 {
-			m.setSpaceFilter(string(value[:len(value)-1]))
-		}
-		return m, nil
-	case "ctrl+u":
-		m.setSpaceFilter("")
-		return m, nil
-	case "up":
-		m.moveSpaceFilterSelection(-1)
-		return m, nil
-	case "down":
-		m.moveSpaceFilterSelection(1)
-		return m, nil
-	case "space":
-		m.setSpaceFilter(m.spaceFilter + " ")
-		return m, nil
-	default:
-		if len(msg.Runes) > 0 {
-			m.setSpaceFilter(m.spaceFilter + string(msg.Runes))
-		}
-		return m, nil
-	}
-}
-
-func (m *Model) setSpaceFilter(value string) {
-	m.spaceFilter = value
-	m.selected[FeatureChat] = 0
-	m.clampSelections()
-}
-
-func (m *Model) moveSpaceFilterSelection(delta int) {
-	length := len(m.visibleSpaces())
-	if length == 0 {
-		m.selected[FeatureChat] = 0
-		return
-	}
-	m.selected[FeatureChat] = clamp(m.selected[FeatureChat]+delta, length)
-}
-
-func (m *Model) restoreSpaceFilterOrigin() {
-	if m.spaceFilterOrigin == "" {
-		m.clampSelections()
-		return
-	}
-	for index, space := range m.spaces {
-		if space.Name == m.spaceFilterOrigin {
-			m.selected[FeatureChat] = index
-			return
-		}
-	}
-	m.clampSelections()
-}
-
-func (m Model) loadSelectedChat() (Model, tea.Cmd) {
-	if m.feature != FeatureChat {
-		return m, nil
-	}
-	space := m.selectedSpace()
-	if space.Name == "" {
-		m.chatMessages = nil
-		m.chatOlder = ""
-		m.chatLoading = false
-		m.chatLoadSpace = ""
-		return m, nil
-	}
-
-	if m.applyCachedSelectedChat() {
-		m.loading = false
-		m.chatLoading = false
-		m.chatLoadSpace = ""
-		m.setSpaceUnread(space.Name, false)
-		m.persistWorkspaceCache()
-		cmds := []tea.Cmd{m.markChatReadCmd(space.Name)}
-		cmds = append(cmds, m.precomputeFrameCmdsForChat(m.chatMessages)...)
-		return m, tea.Batch(cmds...)
-	}
-
-	spaceName := space.Name
-	loadID := m.startChatLoad(spaceName)
-	m.loading = true
-	m.chatLoading = true
-	m.chatLoadSpace = spaceName
-	m.chatMessages = nil
-	m.chatOlder = ""
-
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		page, err := m.client.ChatMessages(ctx, spaceName, "")
-		return chatLoadedMsg{spaceName: spaceName, loadID: loadID, messages: page, err: err}
 	}
 }
 
@@ -2737,903 +1366,6 @@ func (m Model) listLenFor(feature Feature) int {
 		return len(m.docFiles)
 	default:
 		return 0
-	}
-}
-
-func (m Model) visibleSpaces() []api.Space {
-	if strings.TrimSpace(m.spaceFilter) == "" {
-		return m.spaces
-	}
-	query := strings.TrimSpace(m.spaceFilter)
-	matches := make([]spaceFilterMatch, 0, len(m.spaces))
-	for index, space := range m.spaces {
-		if score, ok := fuzzySpaceScore(m.spaceSearchText(space), query); ok {
-			matches = append(matches, spaceFilterMatch{
-				space: space,
-				score: score,
-				index: index,
-			})
-		}
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].score != matches[j].score {
-			return matches[i].score < matches[j].score
-		}
-		return matches[i].index < matches[j].index
-	})
-	filtered := make([]api.Space, 0, len(matches))
-	for _, match := range matches {
-		filtered = append(filtered, match.space)
-	}
-	return filtered
-}
-
-type spaceFilterMatch struct {
-	space api.Space
-	score int
-	index int
-}
-
-func (m Model) spaceSearchText(space api.Space) string {
-	return strings.Join([]string{
-		m.spaceLabel(space),
-		space.DisplayName,
-		space.FormattedName,
-		space.Name,
-		lastSegment(space.Name),
-	}, " ")
-}
-
-func fuzzySpaceScore(candidate, query string) (int, bool) {
-	candidate = strings.ToLower(candidate)
-	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
-	if len(terms) == 0 {
-		return 0, true
-	}
-	total := 0
-	for _, term := range terms {
-		score, ok := fuzzyTermScore(candidate, term)
-		if !ok {
-			return 0, false
-		}
-		total += score
-	}
-	return total, true
-}
-
-func fuzzyTermScore(candidate, term string) (int, bool) {
-	if term == "" {
-		return 0, true
-	}
-	if idx := strings.Index(candidate, term); idx >= 0 {
-		return idx, true
-	}
-	query := []rune(term)
-	haystack := []rune(candidate)
-	queryIndex := 0
-	first := -1
-	last := -1
-	gaps := 0
-	boundaryBonus := 0
-	for index, char := range haystack {
-		if char != query[queryIndex] {
-			continue
-		}
-		if first == -1 {
-			first = index
-		}
-		if last >= 0 {
-			gaps += index - last - 1
-		}
-		if index == 0 || isFuzzyBoundary(haystack[index-1]) {
-			boundaryBonus++
-		}
-		last = index
-		queryIndex++
-		if queryIndex == len(query) {
-			return 100 + first + gaps*2 - boundaryBonus*3, true
-		}
-	}
-	return 0, false
-}
-
-func isFuzzyBoundary(char rune) bool {
-	return unicode.IsSpace(char) || char == '-' || char == '_' || char == '/' || char == '#' || char == '.' || char == ','
-}
-
-func (m Model) visibleChatMessages() []api.ChatMessage {
-	if strings.TrimSpace(m.search) == "" {
-		return m.chatMessages
-	}
-	needle := strings.ToLower(strings.TrimSpace(m.search))
-	filtered := make([]api.ChatMessage, 0, len(m.chatMessages))
-	for _, msg := range m.chatMessages {
-		if strings.Contains(strings.ToLower(msg.Text), needle) {
-			filtered = append(filtered, msg)
-			continue
-		}
-		if strings.Contains(strings.ToLower(m.senderLabel(msg)), needle) {
-			filtered = append(filtered, msg)
-		}
-	}
-	return filtered
-}
-
-func (m Model) selectedSpace() api.Space {
-	visible := m.visibleSpaces()
-	if len(visible) == 0 {
-		return api.Space{}
-	}
-	return visible[clamp(m.selected[FeatureChat], len(visible))]
-}
-
-func (m *Model) selectSpaceByName(spaceName string) bool {
-	if spaceName == "" {
-		m.clampSelections()
-		return false
-	}
-	for index, space := range m.visibleSpaces() {
-		if space.Name == spaceName {
-			m.selected[FeatureChat] = index
-			return true
-		}
-	}
-	m.clampSelections()
-	return false
-}
-
-func (m *Model) promoteSpaceToTop(spaceName string) {
-	if spaceName == "" || len(m.spaces) < 2 {
-		return
-	}
-	selectedName := m.selectedSpace().Name
-	for index, space := range m.spaces {
-		if space.Name != spaceName {
-			continue
-		}
-		if index > 0 {
-			copy(m.spaces[1:index+1], m.spaces[:index])
-			m.spaces[0] = space
-		}
-		m.selectSpaceByName(selectedName)
-		return
-	}
-}
-
-func chatMessageKey(msg api.ChatMessage) string {
-	if msg.Space != "" && msg.ID != "" {
-		return msg.Space + "\x00" + msg.ID
-	}
-	if msg.Name != "" {
-		return msg.Name
-	}
-	return ""
-}
-
-func sameChatMessage(a, b api.ChatMessage) bool {
-	if key := chatMessageKey(a); key != "" && key == chatMessageKey(b) {
-		return true
-	}
-	return a.Space != "" &&
-		a.Space == b.Space &&
-		a.SenderID == b.SenderID &&
-		a.Text == b.Text &&
-		!a.CreateTime.IsZero() &&
-		a.CreateTime.Equal(b.CreateTime)
-}
-
-func upsertChatMessage(items []api.ChatMessage, msg api.ChatMessage) ([]api.ChatMessage, bool) {
-	for i := range items {
-		if sameChatMessage(items[i], msg) {
-			items[i] = msg
-			return items, false
-		}
-	}
-	return append(items, msg), true
-}
-
-func dedupeChatMessages(items []api.ChatMessage) []api.ChatMessage {
-	if len(items) < 2 {
-		return items
-	}
-	out := make([]api.ChatMessage, 0, len(items))
-	for _, msg := range items {
-		out, _ = upsertChatMessage(out, msg)
-	}
-	return out
-}
-
-func (m *Model) markSeenChatMessage(msg api.ChatMessage) {
-	if msg.ID != "" {
-		m.seenMessages[msg.ID] = true
-	}
-	if msg.Name != "" {
-		m.seenMessages[msg.Name] = true
-	}
-	if key := chatMessageKey(msg); key != "" {
-		m.seenMessages[key] = true
-	}
-}
-
-func (m *Model) markSeenChatMessages(items []api.ChatMessage) {
-	for _, msg := range items {
-		m.markSeenChatMessage(msg)
-	}
-}
-
-func (m Model) hasSeenChatMessage(msg api.ChatMessage) bool {
-	if msg.ID != "" && m.seenMessages[msg.ID] {
-		return true
-	}
-	if msg.Name != "" && m.seenMessages[msg.Name] {
-		return true
-	}
-	if key := chatMessageKey(msg); key != "" && m.seenMessages[key] {
-		return true
-	}
-	for _, existing := range m.chatMessages {
-		if sameChatMessage(existing, msg) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m Model) isSelectedSpace(space string) bool {
-	return m.selectedSpace().Name == space
-}
-
-func (m *Model) setSpaceUnread(spaceName string, unread bool) {
-	for i := range m.spaces {
-		if m.spaces[i].Name == spaceName {
-			m.spaces[i].Unread = unread
-			return
-		}
-	}
-}
-
-func (m Model) selectedMail() api.MailThread {
-	if len(m.mailThreads) == 0 {
-		return api.MailThread{}
-	}
-	return m.mailThreads[clamp(m.selected[FeatureMail], len(m.mailThreads))]
-}
-
-func (m Model) selectedEvent() api.CalendarEvent {
-	if len(m.events) == 0 {
-		return api.CalendarEvent{}
-	}
-	return m.events[clamp(m.selected[FeatureCalendar], len(m.events))]
-}
-
-func (m Model) selectedCalendar() api.CalendarListItem {
-	if len(m.calendars) == 0 {
-		return api.CalendarListItem{ID: "primary", Summary: "Primary", Primary: true}
-	}
-	return m.calendars[clamp(m.calendarIndex, len(m.calendars))]
-}
-
-func (m Model) selectedMeet() api.MeetSpace {
-	if len(m.meetSpaces) == 0 {
-		return api.MeetSpace{}
-	}
-	return m.meetSpaces[clamp(m.selected[FeatureMeet], len(m.meetSpaces))]
-}
-
-func (m Model) selectedTaskList() api.TaskList {
-	if len(m.taskLists) == 0 {
-		return api.TaskList{}
-	}
-	return m.taskLists[clamp(m.taskListIndex, len(m.taskLists))]
-}
-
-func (m Model) selectedTask() api.TaskItem {
-	if len(m.tasks) == 0 {
-		return api.TaskItem{}
-	}
-	return m.tasks[clamp(m.selected[FeatureTasks], len(m.tasks))]
-}
-
-func (m Model) selectedDriveFile() api.DriveFile {
-	if len(m.driveFiles) == 0 {
-		return api.DriveFile{}
-	}
-	return m.driveFiles[clamp(m.selected[FeatureDrive], len(m.driveFiles))]
-}
-
-func (m Model) selectedDocFile() api.DriveFile {
-	if len(m.docFiles) == 0 {
-		return api.DriveFile{}
-	}
-	return m.docFiles[clamp(m.selected[FeatureDocs], len(m.docFiles))]
-}
-
-func (m Model) openSelectedDoc() (Model, tea.Cmd) {
-	m.focusedPane = paneDetail
-	return m.loadSelectedDoc()
-}
-
-func (m Model) loadSelectedDoc() (Model, tea.Cmd) {
-	file := m.selectedDocFile()
-	if file.ID == "" {
-		m.doc = api.DocDocument{}
-		m.docLoadingID = ""
-		return m, nil
-	}
-	if m.doc.ID == file.ID && m.doc.Body != "" {
-		return m, nil
-	}
-	m.doc = api.DocDocument{ID: file.ID, Title: file.Name}
-	m.docLoadingID = file.ID
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		doc, err := m.client.Doc(ctx, file.ID)
-		return docLoadedMsg{documentID: file.ID, doc: doc, err: err}
-	}
-}
-
-func indexOfTaskList(lists []api.TaskList, id string) int {
-	if id == "" {
-		return 0
-	}
-	for i, list := range lists {
-		if list.ID == id {
-			return i
-		}
-	}
-	return 0
-}
-
-func indexOfCalendar(calendars []api.CalendarListItem, id string) int {
-	if id == "" {
-		return 0
-	}
-	for i, calendar := range calendars {
-		if calendar.ID == id {
-			return i
-		}
-	}
-	return 0
-}
-
-func selectedCalendarID(calendars []api.CalendarListItem, index int) string {
-	if len(calendars) == 0 {
-		return "primary"
-	}
-	return calendars[clamp(index, len(calendars))].ID
-}
-
-func (m Model) moveCalendar(delta int) (Model, tea.Cmd) {
-	if len(m.calendars) == 0 {
-		m.toast = "no calendars"
-		return m, nil
-	}
-	next := clamp(m.calendarIndex+delta, len(m.calendars))
-	if next == m.calendarIndex {
-		return m, nil
-	}
-	m.calendarIndex = next
-	m.selected[FeatureCalendar] = 0
-	return m.loadSelectedCalendar()
-}
-
-func (m Model) loadSelectedCalendar() (Model, tea.Cmd) {
-	calendar := m.selectedCalendar()
-	if calendar.ID == "" {
-		m.events = nil
-		m.calendarNext = ""
-		return m, nil
-	}
-	m.loading = true
-	m.events = nil
-	m.calendarNext = ""
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		page, err := m.client.CalendarEvents(ctx, api.CalendarQuery{CalendarID: calendar.ID, Search: m.search})
-		return featureRefreshedMsg{
-			feature:    FeatureCalendar,
-			calendars:  api.Page[api.CalendarListItem]{Items: m.calendars},
-			calendarID: calendar.ID,
-			events:     page,
-			err:        err,
-		}
-	}
-}
-
-func (m Model) moveTaskList(delta int) (Model, tea.Cmd) {
-	if len(m.taskLists) == 0 {
-		m.toast = "no task lists"
-		return m, nil
-	}
-	next := clamp(m.taskListIndex+delta, len(m.taskLists))
-	if next == m.taskListIndex {
-		return m, nil
-	}
-	m.taskListIndex = next
-	m.selected[FeatureTasks] = 0
-	return m.loadSelectedTaskList()
-}
-
-func (m Model) loadSelectedTaskList() (Model, tea.Cmd) {
-	list := m.selectedTaskList()
-	if list.ID == "" {
-		m.tasks = nil
-		m.taskNext = ""
-		return m, nil
-	}
-	m.loading = true
-	m.tasks = nil
-	m.taskNext = ""
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		page, err := m.client.Tasks(ctx, api.TaskQuery{TaskListID: list.ID})
-		return featureRefreshedMsg{
-			feature:    FeatureTasks,
-			taskLists:  api.Page[api.TaskList]{Items: m.taskLists},
-			tasks:      page,
-			taskListID: list.ID,
-			err:        err,
-		}
-	}
-}
-
-// mailFolderByName resolves a folder display name to its definition, falling
-// back to the Inbox so the inbox is always reachable.
-func (m Model) mailFolderByName(name string) api.MailLabel {
-	for _, folder := range m.mailFolderList() {
-		if strings.EqualFold(folder.Name, name) {
-			return folder
-		}
-	}
-	return mailSystemFolderDefs[0]
-}
-
-// mailFolderIndex returns the position of a folder name in the sidebar list.
-func (m Model) mailFolderIndex(name string) int {
-	for i, folder := range m.mailFolderList() {
-		if strings.EqualFold(folder.Name, name) {
-			return i
-		}
-	}
-	return 0
-}
-
-// mailQueryForFolder builds the Gmail thread query for a folder, carrying the
-// resolved label IDs / search expression so custom labels and folders like
-// Spam or All Mail fetch correctly.
-func mailQueryForFolder(folder api.MailLabel, search, pageToken string) api.MailQuery {
-	return api.MailQuery{
-		Label:            folder.Name,
-		LabelIDs:         folder.LabelIDs,
-		LabelQuery:       folder.Query,
-		IncludeSpamTrash: folder.IncludeSpamTrash,
-		Search:           search,
-		PageToken:        pageToken,
-	}
-}
-
-// focusMailSidebar moves focus onto the folder rail, placing the cursor on the
-// folder that is currently loaded.
-func (m *Model) focusMailSidebar() {
-	m.focusedPane = paneMailSidebar
-	m.mailFolderCursor = m.mailFolderIndex(m.mailFolder)
-}
-
-func (m *Model) moveMailFolderCursor(delta int) {
-	folders := m.mailFolderList()
-	if len(folders) == 0 {
-		m.mailFolderCursor = 0
-		return
-	}
-	m.mailFolderCursor = clamp(m.mailFolderCursor+delta, len(folders))
-}
-
-// selectMailFolder loads the folder under the sidebar cursor and moves focus
-// to the inbox list so the user can start browsing it immediately.
-func (m Model) selectMailFolder() (Model, tea.Cmd) {
-	folders := m.mailFolderList()
-	if len(folders) == 0 {
-		return m, nil
-	}
-	folder := folders[clamp(m.mailFolderCursor, len(folders))]
-	m.mailFolder = folder.Name
-	m.search = ""
-	m.selected[FeatureMail] = 0
-	m.focusedPane = paneList
-	return m.loadMailFolder(folder)
-}
-
-// loadMailFolder fetches the thread list for a folder, replacing the inbox.
-func (m Model) loadMailFolder(folder api.MailLabel) (Model, tea.Cmd) {
-	m.loading = true
-	m.mailThreads = nil
-	m.mailNext = ""
-	labels := m.mailLabels
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-
-		page, err := m.client.MailThreads(ctx, mailQueryForFolder(folder, "", ""))
-		return featureRefreshedMsg{
-			feature: FeatureMail,
-			labels:  labels,
-			threads: page,
-			err:     err,
-		}
-	}
-}
-
-func (m *Model) replacePending(pendingID string, msg api.ChatMessage, err error) {
-	for i := range m.chatMessages {
-		if m.chatMessages[i].ID == pendingID {
-			if err != nil {
-				m.chatMessages[i].Pending = false
-				m.chatMessages[i].Text += "\n[send failed: " + err.Error() + "]"
-				m.err = err.Error()
-				return
-			}
-			m.chatMessages[i] = msg
-			m.markSeenChatMessage(msg)
-			// A realtime push for this same message may have raced the
-			// API response and appended a copy under the real ID while
-			// the pending placeholder was still here. Collapse those
-			// copies — sameChatMessage keys on real ID now that the
-			// placeholder has been swapped out.
-			m.chatMessages = dedupeChatMessages(m.chatMessages)
-			m.toast = "sent"
-			return
-		}
-	}
-}
-
-func (m *Model) applyChatMessage(msg api.ChatMessage) {
-	if msg.ID == "" && msg.Name != "" {
-		msg.ID = lastSegmentOfName(msg.Name)
-	}
-	if msg.Space == "" && msg.Name != "" {
-		msg.Space = spaceFromMessageName(msg.Name)
-	}
-	if msg.ID == "" {
-		return
-	}
-	m.chatMessages, _ = upsertChatMessage(m.chatMessages, msg)
-	m.markSeenChatMessage(msg)
-}
-
-func (m *Model) removeChatMessage(messageID, messageName string) {
-	if messageID == "" && messageName != "" {
-		messageID = lastSegmentOfName(messageName)
-	}
-	filtered := m.chatMessages[:0]
-	for _, msg := range m.chatMessages {
-		if msg.Name == messageName || (messageID != "" && msg.ID == messageID) {
-			continue
-		}
-		filtered = append(filtered, msg)
-	}
-	m.chatMessages = filtered
-}
-
-func (m *Model) applyChatSpace(space api.Space) {
-	if space.Name == "" {
-		return
-	}
-	for i := range m.spaces {
-		if m.spaces[i].Name == space.Name {
-			m.spaces[i] = space
-			m.selected[FeatureChat] = i
-			return
-		}
-	}
-	m.spaces = append([]api.Space{space}, m.spaces...)
-	m.selected[FeatureChat] = 0
-}
-
-func (m *Model) applyMailThread(thread api.MailThread) {
-	if thread.ID == "" {
-		return
-	}
-	for i := range m.mailThreads {
-		if m.mailThreads[i].ID == thread.ID {
-			m.mailThreads[i] = thread
-			return
-		}
-	}
-	m.mailThreads = append([]api.MailThread{thread}, m.mailThreads...)
-}
-
-func (m *Model) applyEvent(event api.CalendarEvent) {
-	if event.ID == "" {
-		return
-	}
-	for i := range m.events {
-		if m.events[i].ID == event.ID {
-			m.events[i] = event
-			return
-		}
-	}
-	m.events = append(m.events, event)
-}
-
-func (m *Model) applyMeetSpace(space api.MeetSpace) {
-	for i := range m.meetSpaces {
-		if m.meetSpaces[i].Name == space.Name {
-			m.meetSpaces[i] = space
-			return
-		}
-	}
-	m.meetSpaces = append([]api.MeetSpace{space}, m.meetSpaces...)
-}
-
-func (m *Model) applyTask(task api.TaskItem) {
-	if task.ID == "" {
-		return
-	}
-	for i := range m.tasks {
-		if m.tasks[i].ID == task.ID {
-			m.tasks[i] = task
-			return
-		}
-	}
-	m.tasks = append(m.tasks, task)
-}
-
-func (m *Model) removeTask(taskListID, taskID string) {
-	if taskID == "" {
-		return
-	}
-	out := m.tasks[:0]
-	for _, task := range m.tasks {
-		if task.ID == taskID && (taskListID == "" || task.TaskListID == "" || task.TaskListID == taskListID) {
-			continue
-		}
-		out = append(out, task)
-	}
-	m.tasks = out
-}
-
-func (m Model) deleteSelectedChatMessage() (Model, tea.Cmd) {
-	msg, ok := m.chatMessageUnderCursor()
-	if !ok {
-		m.toast = "move cursor onto a message to delete"
-		return m, nil
-	}
-	name := msg.Name
-	if name == "" && msg.Space != "" && msg.ID != "" {
-		name = msg.Space + "/messages/" + msg.ID
-	}
-	if name == "" {
-		m.toast = "message name unavailable"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.DeleteChatMessage(m.ctx, name)
-		return chatDeletedMsg{messageID: msg.ID, messageName: name, err: err}
-	}
-}
-
-func (m Model) addSelectedChatReaction() (Model, tea.Cmd) {
-	msg, ok := m.chatMessageUnderCursor()
-	if !ok {
-		m.toast = "move cursor onto a message to react"
-		return m, nil
-	}
-	name := msg.Name
-	if name == "" && msg.Space != "" && msg.ID != "" {
-		name = msg.Space + "/messages/" + msg.ID
-	}
-	if name == "" {
-		m.toast = "message name unavailable"
-		return m, nil
-	}
-	emoji := defaultChatReaction
-	return m, func() tea.Msg {
-		reactionName, err := m.client.AddChatReaction(m.ctx, name, emoji)
-		return chatReactionMsg{messageID: msg.ID, messageName: name, reactionName: reactionName, emoji: emoji, err: err}
-	}
-}
-
-func (m Model) removeSelectedChatReaction() (Model, tea.Cmd) {
-	msg, ok := m.chatMessageUnderCursor()
-	if !ok {
-		m.toast = "move cursor onto a message to remove reaction"
-		return m, nil
-	}
-	name := msg.Name
-	if name == "" && msg.Space != "" && msg.ID != "" {
-		name = msg.Space + "/messages/" + msg.ID
-	}
-	reactionName := m.chatReactions[name]
-	if reactionName == "" {
-		m.toast = "no TUI reaction to remove"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.DeleteChatReaction(m.ctx, reactionName)
-		return chatReactionMsg{messageID: msg.ID, messageName: name, reactionName: reactionName, remove: true, err: err}
-	}
-}
-
-func (m Model) downloadSelectedDriveFile() (Model, tea.Cmd) {
-	file := m.selectedDriveFile()
-	if file.ID == "" {
-		return m, nil
-	}
-	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps.") {
-		m.toast = "Google-native files open in Docs tab"
-		return m, nil
-	}
-	attachment := api.Attachment{
-		ID:           file.ID,
-		ResourceName: "drive/files/" + file.ID,
-		Name:         file.Name,
-		ContentType:  file.MimeType,
-	}
-	return m.downloadAttachment(attachment)
-}
-
-func (m Model) toggleSelectedStar() (Model, tea.Cmd) {
-	thread := m.selectedMail()
-	if thread.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		updated, err := m.client.ToggleStar(m.ctx, thread.ID)
-		return mailActionMsg{thread: updated, err: err, label: "star toggled"}
-	}
-}
-
-func (m Model) toggleSelectedUnread() (Model, tea.Cmd) {
-	thread := m.selectedMail()
-	if thread.ID == "" {
-		return m, nil
-	}
-	unread := !thread.Unread
-	label := "marked read"
-	if unread {
-		label = "marked unread"
-	}
-	return m, func() tea.Msg {
-		updated, err := m.client.SetMailUnread(m.ctx, thread.ID, unread)
-		return mailActionMsg{thread: updated, err: err, label: label}
-	}
-}
-
-func (m Model) archiveSelectedMail() (Model, tea.Cmd) {
-	thread := m.selectedMail()
-	if thread.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.ArchiveMail(m.ctx, thread.ID)
-		return mailActionMsg{thread: thread, err: err, label: "archived"}
-	}
-}
-
-func (m Model) trashSelectedMail() (Model, tea.Cmd) {
-	thread := m.selectedMail()
-	if thread.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.TrashMail(m.ctx, thread.ID)
-		return mailActionMsg{thread: thread, err: err, label: "moved to trash"}
-	}
-}
-
-func (m Model) rsvpSelected(response string) (Model, tea.Cmd) {
-	event := m.selectedEvent()
-	if event.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		updated, err := m.client.RSVPEvent(m.ctx, event.ID, response)
-		return eventActionMsg{event: updated, err: err, label: "RSVP " + response}
-	}
-}
-
-func (m Model) deleteSelectedEvent() (Model, tea.Cmd) {
-	event := m.selectedEvent()
-	if event.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.DeleteEvent(m.ctx, event.ID)
-		return eventActionMsg{event: event, err: err, label: "event deleted"}
-	}
-}
-
-func (m Model) toggleSelectedTaskCompleted() (Model, tea.Cmd) {
-	list := m.selectedTaskList()
-	task := m.selectedTask()
-	if list.ID == "" || task.ID == "" {
-		return m, nil
-	}
-	completed := !strings.EqualFold(task.Status, "completed")
-	return m, func() tea.Msg {
-		updated, err := m.client.SetTaskCompleted(m.ctx, list.ID, task.ID, completed)
-		label := "task unchecked"
-		if completed {
-			label = "task completed"
-		}
-		return taskActionMsg{task: updated, taskListID: list.ID, taskID: task.ID, err: err, label: label}
-	}
-}
-
-func (m Model) deleteSelectedTask() (Model, tea.Cmd) {
-	list := m.selectedTaskList()
-	task := m.selectedTask()
-	if list.ID == "" || task.ID == "" {
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.DeleteTask(m.ctx, list.ID, task.ID)
-		return taskActionMsg{taskListID: list.ID, taskID: task.ID, deleted: true, err: err, label: "task deleted"}
-	}
-}
-
-func (m Model) moveSelectedEventToNextCalendar() (Model, tea.Cmd) {
-	event := m.selectedEvent()
-	if event.ID == "" {
-		return m, nil
-	}
-	if len(m.calendars) < 2 {
-		m.toast = "no other calendar"
-		return m, nil
-	}
-	source := event.CalendarID
-	if source == "" {
-		source = m.selectedCalendar().ID
-	}
-	current := indexOfCalendar(m.calendars, source)
-	destination := m.calendars[(current+1)%len(m.calendars)]
-	if destination.ID == source {
-		m.toast = "no other calendar"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		updated, err := m.client.MoveEvent(m.ctx, event.ID, source, destination.ID)
-		return eventActionMsg{event: updated, err: err, label: "event moved to " + destination.Summary}
-	}
-}
-
-func (m Model) createMeetSpaceNow() (Model, tea.Cmd) {
-	m.toast = "creating meet space..."
-	return m, func() tea.Msg {
-		space, err := m.client.CreateMeetSpace(m.ctx, "")
-		return meetActionMsg{space: space, err: err, label: "meet space created"}
-	}
-}
-
-func (m Model) openMeetLink() (Model, tea.Cmd) {
-	space := m.selectedMeet()
-	joinURL := space.JoinURL()
-	if joinURL == "" {
-		m.toast = "no Meet URL available"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := openURL(joinURL)
-		return meetActionMsg{space: space, err: err, label: "opening browser"}
-	}
-}
-
-func (m Model) copyMeetLink() (Model, tea.Cmd) {
-	space := m.selectedMeet()
-	joinURL := space.JoinURL()
-	if joinURL == "" {
-		m.toast = "no Meet URL to copy"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := copyText(joinURL)
-		return meetActionMsg{space: space, err: err, label: "link copied"}
 	}
 }
 
@@ -3703,68 +1435,6 @@ func (m Model) pasteIntoComposer() (Model, tea.Cmd) {
 	}
 	m.input.CursorEnd()
 	return m, nil
-}
-
-func (m Model) endSelectedMeet() (Model, tea.Cmd) {
-	space := m.selectedMeet()
-	spaceName := space.SpaceResourceName()
-	if spaceName == "" {
-		m.toast = "no Meet space to end"
-		return m, nil
-	}
-	if !space.IsActive() {
-		m.toast = "no active conference to end"
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		err := m.client.EndMeetSpace(m.ctx, spaceName)
-		ended := space
-		ended.Active = false
-		ended.ActiveConference = nil
-		if ended.EndTime.IsZero() {
-			ended.EndTime = time.Now()
-		}
-		return meetActionMsg{space: ended, err: err, label: "conference ended"}
-	}
-}
-
-func (m *Model) toggleChatSubscription() tea.Cmd {
-	space := m.selectedSpace()
-	for i := range m.spaces {
-		if m.spaces[i].Name == space.Name {
-			m.spaces[i].Live = !m.spaces[i].Live
-			pinned := m.spaces[i].Live
-			spaceName := m.spaces[i].Name
-			if pinned {
-				m.toast = "subscription on"
-			} else {
-				m.toast = "subscription off"
-			}
-			m.persistWorkspaceCache()
-			var cmds []tea.Cmd
-			if pinner, ok := m.client.(api.Pinner); ok && m.cfg.Daemon {
-				cmds = append(cmds, func() tea.Msg {
-					var err error
-					if pinned {
-						err = pinner.PinChatSpace(m.ctx, spaceName)
-					} else {
-						err = pinner.UnpinChatSpace(m.ctx, spaceName)
-					}
-					return pinActionMsg{space: spaceName, pinned: pinned, err: err}
-				})
-			}
-			if pinned {
-				if cmd := m.subscribeCmd(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
-			if len(cmds) == 0 {
-				return nil
-			}
-			return tea.Batch(cmds...)
-		}
-	}
-	return nil
 }
 
 func (m Model) openHint() string {
@@ -3930,8 +1600,17 @@ func (m Model) detailRenderFingerprint() string {
 		)
 		writeAttachmentFingerprint(&b, thread.Attachments)
 	case FeatureCalendar:
+		if m.calendarView == calViewMonth && m.focusedPane != paneDetail {
+			day := m.calendarCursorOrToday()
+			dayEvents := eventsOnDay(m.monthEvents, day)
+			fmt.Fprintf(&b, "|calmonth=%s,%t,%d,%d", day.Format("2006-01-02"), m.loading, len(dayEvents), m.calendarDayEventCursor)
+			for _, e := range dayEvents {
+				fmt.Fprintf(&b, ",%s:%s:%d:%s", e.ID, e.Summary, e.Start.UnixNano(), e.RSVP)
+			}
+			break
+		}
 		event := m.selectedEvent()
-		fmt.Fprintf(&b, "|event=%s,%s,%s,%d,%d,%s,%s,%s,%s",
+		fmt.Fprintf(&b, "|event=%s,%s,%s,%d,%d,%s,%s,%s,%s,%t,%t",
 			event.ID,
 			event.Summary,
 			event.Description,
@@ -3941,7 +1620,12 @@ func (m Model) detailRenderFingerprint() string {
 			event.HangoutLink,
 			event.RSVP,
 			strings.Join(event.Attendees, ","),
+			event.AllDay,
+			event.Recurring,
 		)
+		if m.calendarFeedback.eventID == event.ID {
+			fmt.Fprintf(&b, "|calendarFeedback=%s", m.calendarFeedback.response)
+		}
 	case FeatureMeet:
 		space := m.selectedMeet()
 		activeConference := ""
@@ -4046,6 +1730,9 @@ func (m Model) detailKeyForSelection() string {
 	case FeatureMail:
 		return "mail:" + m.selectedMail().ID
 	case FeatureCalendar:
+		if m.calendarView == calViewMonth && m.focusedPane != paneDetail {
+			return fmt.Sprintf("calmonth:%s:%d", m.calendarCursorOrToday().Format("2006-01-02"), m.calendarDayEventCursor)
+		}
 		return "cal:" + m.selectedEvent().ID
 	case FeatureMeet:
 		return "meet:" + m.selectedMeet().Name
@@ -4057,25 +1744,6 @@ func (m Model) detailKeyForSelection() string {
 		return "docs:" + m.selectedDocFile().ID
 	default:
 		return string(m.feature)
-	}
-}
-
-func normalizeFeature(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "mail", "gmail":
-		return string(FeatureMail)
-	case "calendar", "cal":
-		return string(FeatureCalendar)
-	case "meet":
-		return string(FeatureMeet)
-	case "tasks", "task":
-		return string(FeatureTasks)
-	case "drive":
-		return string(FeatureDrive)
-	case "docs", "doc":
-		return string(FeatureDocs)
-	default:
-		return string(FeatureChat)
 	}
 }
 
@@ -4130,12 +1798,6 @@ func splitCSV(value string) []string {
 			out = append(out, part)
 		}
 	}
-	return out
-}
-
-func sortedEvents(events []api.CalendarEvent) []api.CalendarEvent {
-	out := append([]api.CalendarEvent(nil), events...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
 	return out
 }
 

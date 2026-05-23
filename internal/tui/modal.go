@@ -15,10 +15,11 @@ import (
 type modalKind string
 
 const (
-	modalMail   modalKind = "mail"
-	modalEvent  modalKind = "event"
-	modalSearch modalKind = "search"
-	modalLabel  modalKind = "label"
+	modalMail     modalKind = "mail"
+	modalEvent    modalKind = "event"
+	modalSearch   modalKind = "search"
+	modalLabel    modalKind = "label"
+	modalGoToDate modalKind = "gotodate"
 )
 
 // mailComposeMode selects how openMailCompose pre-fills the compose modal.
@@ -307,6 +308,11 @@ func (m Model) resolveMailLabelID(name string) string {
 
 func (m *Model) openEventCompose(event *api.CalendarEvent) {
 	start := time.Now().Add(24 * time.Hour).Truncate(time.Hour)
+	// A new event from the month grid defaults to the focused day at 09:00.
+	if event == nil && m.feature == FeatureCalendar && m.calendarView == calViewMonth && !m.calendarCursor.IsZero() {
+		c := m.calendarCursor
+		start = time.Date(c.Year(), c.Month(), c.Day(), 9, 0, 0, 0, time.Local)
+	}
 	end := start.Add(time.Hour)
 	summary, location, attendees, description := "", "Google Meet", "", ""
 	eventID := ""
@@ -337,6 +343,20 @@ func (m *Model) openEventCompose(event *api.CalendarEvent) {
 			newModalField("location", "Where", location, false),
 			newModalField("attendees", "Attendees", attendees, false),
 			newModalField("description", "Description", description, true),
+		},
+	}
+	m.initModal()
+}
+
+// openGoToDateModal prompts for a calendar date to jump the month grid to.
+func (m *Model) openGoToDateModal() {
+	cursor := m.calendarCursorOrToday()
+	m.modal = &composeModal{
+		id:    fmt.Sprintf("gotodate-%d", time.Now().UnixNano()),
+		kind:  modalGoToDate,
+		title: "Go to date",
+		fields: []modalField{
+			newModalField("date", "Date (YYYY-MM-DD)", cursor.Format("2006-01-02"), false),
 		},
 	}
 	m.initModal()
@@ -581,6 +601,8 @@ func (m Model) submitModal() (Model, tea.Cmd) {
 				return loadedMsg{threads: page, labels: m.mailLabels, spaces: api.Page[api.Space]{Items: m.spaces}, messages: api.Page[api.ChatMessage]{Items: m.chatMessages, NextPageToken: m.chatOlder}, events: api.Page[api.CalendarEvent]{Items: m.events, NextPageToken: m.calendarNext}, meet: api.Page[api.MeetSpace]{Items: m.meetSpaces}, taskLists: api.Page[api.TaskList]{Items: m.taskLists}, tasks: api.Page[api.TaskItem]{Items: m.tasks, NextPageToken: m.taskNext}, taskListID: m.selectedTaskList().ID, driveFiles: api.Page[api.DriveFile]{Items: m.driveFiles, NextPageToken: m.driveNext}, docFiles: api.Page[api.DriveFile]{Items: m.docFiles, NextPageToken: m.docNext}, doc: m.doc, auth: m.auth, err: err}
 			}
 		case FeatureCalendar:
+			// Search results populate the agenda; show that view, not the grid.
+			m.calendarView = calViewAgenda
 			m.loading = true
 			return m, func() tea.Msg {
 				calendarID := m.selectedCalendar().ID
@@ -617,6 +639,19 @@ func (m Model) submitModal() (Model, tea.Cmd) {
 			m.clampSelections()
 			return m, nil
 		}
+	case modalGoToDate:
+		raw := strings.TrimSpace(modal.field("date"))
+		m.modal = nil
+		day, err := parseModalTime(raw)
+		if err != nil {
+			m.err = "date must use YYYY-MM-DD"
+			return m, nil
+		}
+		m.calendarCursor = startOfDay(day)
+		m.calendarDayEventCursor = 0
+		m.calendarView = calViewMonth
+		m.toast = day.Format("Mon, 02 Jan 2006")
+		return m.loadCalendarMonth(m.calendarCursor)
 	case modalMail:
 		draft := api.MailDraft{
 			To:       strings.TrimSpace(modal.field("to")),

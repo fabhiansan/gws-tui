@@ -243,6 +243,64 @@ func TestRenderStatusFitsNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestStatusBarReportsDaemonFetchActivity(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoColor:        true,
+			NoIcons:        true,
+		},
+	})
+	model.width = 120
+	model.height = 30
+	model.resize()
+
+	// A cold-start model still has its startup panes flagged loading, so the
+	// status bar must announce that the daemon is fetching.
+	status := ansi.Strip(model.renderStatus(120))
+	if !strings.Contains(status, "fetching") {
+		t.Fatalf("status bar should report daemon fetch activity at cold start:\n%s", status)
+	}
+
+	// Once every pane has its data the indicator clears.
+	for _, f := range featureOrder {
+		model.featureLoading[f] = false
+	}
+	model.loading = false
+	model.chatLoading = false
+	model.docLoadingID = ""
+	status = ansi.Strip(model.renderStatus(120))
+	if strings.Contains(status, "fetching") {
+		t.Fatalf("status bar should be idle once fetches finish:\n%s", status)
+	}
+
+	// A single in-flight refresh names the feature being fetched.
+	model.feature = FeatureMail
+	model.loading = true
+	if summary, active := model.fetchActivity(); !active || summary != "Mail" {
+		t.Fatalf("refresh should name the feature being fetched, got %q active=%v", summary, active)
+	}
+
+	// A chat space load is reported even though m.loading stays false.
+	model.feature = FeatureChat
+	model.loading = false
+	model.chatLoading = true
+	if summary, active := model.fetchActivity(); !active || summary != "Chat" {
+		t.Fatalf("chat space load should be reported, got %q active=%v", summary, active)
+	}
+
+	// Concurrent fetches collapse to a count so the status row never overflows.
+	model.featureLoading[FeatureCalendar] = true
+	model.featureLoading[FeatureDrive] = true
+	if summary, active := model.fetchActivity(); !active || summary != "3 sections" {
+		t.Fatalf("concurrent fetches should collapse to a count, got %q active=%v", summary, active)
+	}
+}
+
 func TestDocsDefaultRenderUsesSingleListPane(t *testing.T) {
 	dir := t.TempDir()
 	model := New(Options{

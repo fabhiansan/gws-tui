@@ -24,7 +24,7 @@ func (m Model) renderCards(cards []api.ChatCard, width int) []string {
 		if body == "" {
 			continue
 		}
-		boxed := m.cardStyle().Width(cardBoxWidth(width)).Render(body)
+		boxed := renderStylePreserve(m.cardStyle().Width(cardBoxWidth(width)), body)
 		for _, line := range strings.Split(boxed, "\n") {
 			out = append(out, "  "+line)
 		}
@@ -42,7 +42,9 @@ func (m Model) cardStyle() lipgloss.Style {
 	if !m.cfg.NoColor {
 		style = style.
 			BorderForeground(lipgloss.Color(m.theme.Border)).
-			Foreground(lipgloss.Color(m.theme.Fg))
+			BorderBackground(lipgloss.Color(m.theme.Surface)).
+			Foreground(lipgloss.Color(m.theme.Fg)).
+			Background(lipgloss.Color(m.theme.Surface))
 	}
 	return style
 }
@@ -363,6 +365,12 @@ func knownIconGlyph(name string) (iconGlyph, bool) {
 	return iconGlyph{}, false
 }
 
+// wrapBreakpoints is the set of characters ansi.Wrap may break a long word
+// after. The wrapped-URL rejoin logic in detail_url.go must use the exact
+// same set to reason about where soft wraps happen, so it lives here as a
+// shared constant.
+const wrapBreakpoints = " -.,;:"
+
 // wrapAnsi wraps a (possibly ANSI-styled) string into lines of at most
 // width display cells. lipgloss's ansi.Wrap inserts "-" continuation
 // markers; that's appropriate for inline text but not for our card body,
@@ -376,7 +384,7 @@ func wrapAnsi(value string, width int) []string {
 	if width <= 0 {
 		return []string{value}
 	}
-	wrapped := ansi.Wrap(value, width, " -.,;:")
+	wrapped := ansi.Wrap(value, width, wrapBreakpoints)
 	return strings.Split(wrapped, "\n")
 }
 

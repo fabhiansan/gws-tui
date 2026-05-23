@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const WorkspaceSnapshotVersion = 7
+const WorkspaceSnapshotVersion = 9
 
 var ErrSnapshotLockBusy = errors.New("workspace snapshot lock is held by another process")
 
@@ -20,11 +20,12 @@ type WorkspaceSnapshot struct {
 	Spaces              []Space                      `json:"spaces,omitempty"`
 	ChatMessagesBySpace map[string]Page[ChatMessage] `json:"chat_messages_by_space,omitempty"`
 	MailLabels          []MailLabel                  `json:"mail_labels,omitempty"`
-	MailThreads         Page[MailThread]             `json:"mail_threads,omitempty"`
+	MailThreadsByFolder map[string]Page[MailThread]  `json:"mail_threads_by_folder,omitempty"`
 	MailFolder          string                       `json:"mail_folder,omitempty"`
 	MailDrafts          Page[MailDraftItem]          `json:"mail_drafts,omitempty"`
 	CalendarLists       []CalendarListItem           `json:"calendar_lists,omitempty"`
 	CalendarID          string                       `json:"calendar_id,omitempty"`
+	CalendarMonth       time.Time                    `json:"calendar_month,omitempty"`
 	Events              Page[CalendarEvent]          `json:"events,omitempty"`
 	MeetSpaces          []MeetSpace                  `json:"meet_spaces,omitempty"`
 	TaskLists           []TaskList                   `json:"task_lists,omitempty"`
@@ -107,6 +108,9 @@ func (s *WorkspaceSnapshot) EnsureMaps() {
 	if s.ChatMessagesBySpace == nil {
 		s.ChatMessagesBySpace = map[string]Page[ChatMessage]{}
 	}
+	if s.MailThreadsByFolder == nil {
+		s.MailThreadsByFolder = map[string]Page[MailThread]{}
+	}
 	if s.UserLabels == nil {
 		s.UserLabels = map[string]string{}
 	}
@@ -130,7 +134,7 @@ func (s *WorkspaceSnapshot) EnsureMaps() {
 func (s WorkspaceSnapshot) HasData() bool {
 	return len(s.Spaces) > 0 ||
 		len(s.MailLabels) > 0 ||
-		len(s.MailThreads.Items) > 0 ||
+		len(s.MailThreadsByFolder) > 0 ||
 		len(s.MailDrafts.Items) > 0 ||
 		len(s.CalendarLists) > 0 ||
 		len(s.Events.Items) > 0 ||
@@ -162,8 +166,14 @@ func (s WorkspaceSnapshot) Clone() WorkspaceSnapshot {
 	if s.MailLabels != nil {
 		out.MailLabels = append([]MailLabel(nil), s.MailLabels...)
 	}
-	if s.MailThreads.Items != nil {
-		out.MailThreads.Items = append([]MailThread(nil), s.MailThreads.Items...)
+	if s.MailThreadsByFolder != nil {
+		out.MailThreadsByFolder = make(map[string]Page[MailThread], len(s.MailThreadsByFolder))
+		for k, page := range s.MailThreadsByFolder {
+			if page.Items != nil {
+				page.Items = append([]MailThread(nil), page.Items...)
+			}
+			out.MailThreadsByFolder[k] = page
+		}
 	}
 	if s.MailDrafts.Items != nil {
 		out.MailDrafts.Items = append([]MailDraftItem(nil), s.MailDrafts.Items...)

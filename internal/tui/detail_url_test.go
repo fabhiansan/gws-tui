@@ -70,6 +70,29 @@ func TestDetailURLAtCursorJoinsWrappedURLSegments(t *testing.T) {
 	}
 }
 
+func TestDetailURLAtCursorJoinsURLWrappedEarlyAtBreakpoint(t *testing.T) {
+	// ansi.Wrap breaks long URLs at "." and "-" breakpoints, so a soft-
+	// wrapped continuation row can be far shorter than the panel width.
+	lines := []string{
+		"https://click.emktng.shutterstock.",
+		"com/?qs=ABB7InYiOjEsImQiOjQ4ODN9AA0AAAAAAEdhB3PCYZX7IuE62aXWY0xB0Z7h9td-",
+		"sh-T2Lv6eDWszemhd9cCs-",
+		"SLajonPkSUGxrvKJjBt_yL4QR6P9dPEFahWgUlj0Q6JgaYme8KM_5tNbo",
+	}
+	width := 71
+	want := "https://click.emktng.shutterstock.com/?qs=ABB7InYiOjEsImQiOjQ4ODN9AA0AAAAAAEdhB3PCYZX7IuE62aXWY0xB0Z7h9td-sh-T2Lv6eDWszemhd9cCs-SLajonPkSUGxrvKJjBt_yL4QR6P9dPEFahWgUlj0Q6JgaYme8KM_5tNbo"
+
+	for line := range lines {
+		got, ok := detailURLAtCursorWrapped(lines, line, 0, width)
+		if !ok {
+			t.Fatalf("line %d: expected wrapped URL", line)
+		}
+		if got != want {
+			t.Fatalf("line %d: URL mismatch:\n got %q\nwant %q", line, got, want)
+		}
+	}
+}
+
 func TestDetailURLAtCursorDoesNotJoinShortExplicitNextLine(t *testing.T) {
 	lines := []string{
 		"see https://example.com/path",

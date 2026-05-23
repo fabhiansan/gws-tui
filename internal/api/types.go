@@ -51,13 +51,20 @@ type Person struct {
 }
 
 type Space struct {
-	Name          string   `json:"name"`
-	DisplayName   string   `json:"displayName,omitempty"`
-	FormattedName string   `json:"formattedName,omitempty"`
-	SpaceType     string   `json:"spaceType,omitempty"`
-	Unread        bool     `json:"unread,omitempty"`
-	Live          bool     `json:"live,omitempty"`
-	Members       []Member `json:"members,omitempty"`
+	Name           string    `json:"name"`
+	DisplayName    string    `json:"displayName,omitempty"`
+	FormattedName  string    `json:"formattedName,omitempty"`
+	SpaceType      string    `json:"spaceType,omitempty"`
+	Unread         bool      `json:"unread,omitempty"`
+	Live           bool      `json:"live,omitempty"`
+	LastActiveTime time.Time `json:"lastActiveTime,omitempty"`
+	LastReadTime   time.Time `json:"lastReadTime,omitempty"`
+	Members        []Member  `json:"members,omitempty"`
+}
+
+type SpaceReadState struct {
+	Name         string    `json:"name"`
+	LastReadTime time.Time `json:"lastReadTime,omitempty"`
 }
 
 func (s Space) UsesMemberLabels() bool {
@@ -333,8 +340,12 @@ type MailDraftItem struct {
 type CalendarQuery struct {
 	CalendarID string
 	Search     string
-	WeekStart  time.Time
-	PageToken  string
+	// TimeMin and TimeMax bound the fetch window. When both are zero the
+	// client defaults to "from now" so the agenda shows upcoming events;
+	// the month grid sets them to the visible month's first and last day.
+	TimeMin   time.Time
+	TimeMax   time.Time
+	PageToken string
 }
 
 type CalendarListItem struct {
@@ -357,6 +368,10 @@ type CalendarEvent struct {
 	Description string    `json:"description,omitempty"`
 	RSVP        string    `json:"rsvp,omitempty"`
 	Type        string    `json:"type,omitempty"`
+	// AllDay marks events that came from a date-only start (no clock time).
+	AllDay bool `json:"allDay,omitempty"`
+	// Recurring marks an instance expanded from a recurring event series.
+	Recurring bool `json:"recurring,omitempty"`
 }
 
 type EventDraft struct {
@@ -370,10 +385,14 @@ type EventDraft struct {
 }
 
 type MeetSpace struct {
-	Name               string                `json:"name"`
-	SpaceName          string                `json:"spaceName,omitempty"`
-	MeetingURI         string                `json:"meetingUri"`
-	MeetingCode        string                `json:"meetingCode,omitempty"`
+	Name        string `json:"name"`
+	SpaceName   string `json:"spaceName,omitempty"`
+	MeetingURI  string `json:"meetingUri"`
+	MeetingCode string `json:"meetingCode,omitempty"`
+	// Title and InvitedEmails are filled by cross-referencing the conference
+	// against the calendar event that shares its Meet link; they stay empty
+	// for ad-hoc meetings that have no calendar event.
+	Title              string                `json:"title,omitempty"`
 	Created            time.Time             `json:"created,omitempty"`
 	StartTime          time.Time             `json:"startTime,omitempty"`
 	EndTime            time.Time             `json:"endTime,omitempty"`
@@ -384,6 +403,7 @@ type MeetSpace struct {
 	Config             *MeetSpaceConfig      `json:"config,omitempty"`
 	ActiveConference   *MeetActiveConference `json:"activeConference,omitempty"`
 	Participants       []MeetParticipant     `json:"participants,omitempty"`
+	InvitedEmails      []string              `json:"invitedEmails,omitempty"`
 	Recordings         []MeetArtifact        `json:"recordings,omitempty"`
 	Transcripts        []MeetArtifact        `json:"transcripts,omitempty"`
 }
@@ -522,6 +542,19 @@ func (s MeetSpace) IsActive() bool {
 		return true
 	}
 	return s.Active
+}
+
+// DisplayTitle returns the most human-readable label for a conference: the
+// matched calendar event title when present, then the meeting code, and only
+// the trailing segment of the resource name as a last resort.
+func (s MeetSpace) DisplayTitle() string {
+	if title := strings.TrimSpace(s.Title); title != "" {
+		return title
+	}
+	if code := strings.TrimSpace(s.MeetingCode); code != "" {
+		return code
+	}
+	return lastSegment(s.Name)
 }
 
 // Pinner is implemented by clients that can ask the daemon to keep a chat

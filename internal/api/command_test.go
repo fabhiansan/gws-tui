@@ -37,6 +37,37 @@ func TestCommandClientChatMessagesLoadsLatestPageChronologically(t *testing.T) {
 	}
 }
 
+func TestCommandClientChatSpacesUsesSpaceReadState(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	page, err := client.ChatSpaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("expected 2 spaces, got %#v", page.Items)
+	}
+	if !page.Items[0].Unread {
+		t.Fatalf("engineering should be unread from server read state: %#v", page.Items[0])
+	}
+	if page.Items[0].LastReadTime.IsZero() {
+		t.Fatalf("engineering should carry server last read time: %#v", page.Items[0])
+	}
+	if page.Items[1].Unread {
+		t.Fatalf("design should be read from server read state: %#v", page.Items[1])
+	}
+}
+
+func TestCommandClientMarkChatReadUpdatesSpaceReadState(t *testing.T) {
+	t.Setenv("GWS_FAKE_COMMAND", "1")
+
+	client := NewCommandClient(os.Args[0])
+	if err := client.MarkChatRead(context.Background(), "spaces/engineering"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommandClientSubscribeChatStreamsCloudEvents(t *testing.T) {
 	t.Setenv("GWS_FAKE_COMMAND", "1")
 	t.Setenv("GWS_EVENTS_PROJECT", "test-project")
@@ -67,6 +98,16 @@ func TestCommandClientSubscribeChatStreamsCloudEvents(t *testing.T) {
 		}
 		if msg.SenderName != "Alice" {
 			t.Fatalf("unexpected sender: %q", msg.SenderName)
+		}
+		if len(msg.Attachments) != 1 {
+			t.Fatalf("expected streamed attachment, got %#v", msg.Attachments)
+		}
+		attachment := msg.Attachments[0]
+		if attachment.ResourceName != "spaces/engineering/messages/stream-1/attachments/image-1" {
+			t.Fatalf("unexpected attachment resource: %#v", attachment)
+		}
+		if attachment.ContentType != "image/png" || attachment.Name != "stream.png" {
+			t.Fatalf("unexpected streamed attachment metadata: %#v", attachment)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for streamed chat event")
@@ -145,6 +186,14 @@ func emitFakeChatEventStream() {
 				"createTime": "2026-05-18T10:00:00+07:00",
 				"sender":     map[string]any{"name": "users/alice", "displayName": "Alice"},
 				"space":      map[string]any{"name": "spaces/engineering"},
+				"attachment": []any{map[string]any{
+					"name":        "spaces/engineering/messages/stream-1/attachments/image-1",
+					"contentName": "stream.png",
+					"contentType": "image/png",
+					"attachmentDataRef": map[string]any{
+						"resourceName": "spaces/engineering/messages/stream-1/attachments/image-1",
+					},
+				}},
 			},
 		},
 	}
@@ -633,6 +682,47 @@ func fakeCommand() {
 		os.Args[2] == "subscriptions" &&
 		os.Args[3] == "delete":
 		fmt.Print(`{"done":true}`)
+	case len(os.Args) >= 4 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "spaces" &&
+		os.Args[3] == "list":
+		if params["pageSize"] != float64(100) {
+			fmt.Fprintf(os.Stderr, "unexpected spaces params: %v\n", params)
+			os.Exit(2)
+		}
+		fmt.Print(`{"spaces":[
+			{"name":"spaces/engineering","displayName":"Engineering","spaceType":"SPACE","lastActiveTime":"2026-05-18T10:00:00Z"},
+			{"name":"spaces/design","displayName":"Design","spaceType":"SPACE","lastActiveTime":"2026-05-18T08:00:00Z"}
+		]}`)
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "spaces" &&
+		os.Args[4] == "getSpaceReadState":
+		switch params["name"] {
+		case "users/me/spaces/engineering/spaceReadState":
+			fmt.Print(`{"name":"users/me/spaces/engineering/spaceReadState","lastReadTime":"2026-05-18T09:59:00Z"}`)
+		case "users/me/spaces/design/spaceReadState":
+			fmt.Print(`{"name":"users/me/spaces/design/spaceReadState","lastReadTime":"2026-05-18T08:00:01Z"}`)
+		default:
+			fmt.Fprintf(os.Stderr, "unexpected read state name: %v\n", params["name"])
+			os.Exit(2)
+		}
+	case len(os.Args) >= 5 &&
+		os.Args[1] == "chat" &&
+		os.Args[2] == "users" &&
+		os.Args[3] == "spaces" &&
+		os.Args[4] == "updateSpaceReadState":
+		if params["name"] != "users/me/spaces/engineering/spaceReadState" || params["updateMask"] != "lastReadTime" {
+			fmt.Fprintf(os.Stderr, "unexpected update read state params: %v\n", params)
+			os.Exit(2)
+		}
+		body := fakeJSONArg("--json")
+		if _, ok := body["lastReadTime"].(string); !ok {
+			fmt.Fprintf(os.Stderr, "missing lastReadTime body: %v\n", body)
+			os.Exit(2)
+		}
+		fmt.Print(`{"name":"users/me/spaces/engineering/spaceReadState"}`)
 	case len(os.Args) >= 5 &&
 		os.Args[1] == "chat" &&
 		os.Args[2] == "spaces" &&

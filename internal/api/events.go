@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,8 +50,11 @@ type ChatEventConfigurer interface {
 	PrepareChatEvents() string
 }
 
+// chatEventsLogf records one chat-events status line. It routes through the
+// shared slog logger so the line lands in daemon.log with a timestamp and a
+// level alongside the rest of the daemon's diagnostics.
 func chatEventsLogf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "gws: chat events: "+format+"\n", args...)
+	slog.Info("chat events: " + fmt.Sprintf(format, args...))
 }
 
 // ConfigureChatEvents records real-time delivery preferences. Call it before

@@ -107,8 +107,11 @@ func buildDetailURLCandidate(lines []string, lineIndex, start, end, width int) (
 	}}
 	b.WriteString(line[start:end])
 
-	for current := lineIndex; width > 0 && end == len(line) && detailLineLooksSoftWrapped(line, width) && current+1 < len(lines); current++ {
+	for current := lineIndex; width > 0 && end == len(line) && current+1 < len(lines); current++ {
 		next := lines[current+1]
+		if !detailLineSoftWrapsInto(line, next, width) {
+			break
+		}
 		nextEnd, ok := detailURLContinuationEnd(next)
 		if !ok {
 			break
@@ -154,8 +157,40 @@ func detailURLContinuationEnd(line string) (int, bool) {
 	return match[1], true
 }
 
-func detailLineLooksSoftWrapped(line string, width int) bool {
-	return width > 0 && lipgloss.Width(line) >= max(1, width-1)
+// detailLineSoftWrapsInto reports whether `next` is a soft-wrap continuation
+// of `line` rather than a separate source line. ansi.Wrap (see wrapAnsi)
+// pushes a word onto a new row only when the current row plus that word
+// exceeds the wrap width, so the two rows belong to the same logical line
+// exactly when joining the first word of `next` back onto `line` would
+// overflow. This must not assume soft-wrapped lines are near-full width:
+// ansi.Wrap breaks early at "." and "-" inside long URLs, leaving short
+// rows that are still continuations.
+func detailLineSoftWrapsInto(line, next string, width int) bool {
+	if width <= 0 {
+		return false
+	}
+	lineWidth := lipgloss.Width(line)
+	// A row filled to the wrap target was clearly broken by width alone.
+	if lineWidth >= width {
+		return true
+	}
+	wordWidth := lipgloss.Width(detailFirstWrapWord(next))
+	if wordWidth == 0 {
+		return false
+	}
+	return lineWidth+wordWidth > width
+}
+
+// detailFirstWrapWord returns the leading run of `next` up to and including
+// the first ansi.Wrap breakpoint — the "word" ansi.Wrap would try to fit
+// onto the previous row before deciding whether to wrap.
+func detailFirstWrapWord(next string) string {
+	for i, r := range next {
+		if strings.ContainsRune(wrapBreakpoints, r) {
+			return next[:i+utf8.RuneLen(r)]
+		}
+	}
+	return next
 }
 
 func trimDetailURLRanges(ranges []detailURLRange, runes int) []detailURLRange {

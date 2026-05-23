@@ -59,11 +59,15 @@ func NewRemoteClientConn(conn net.Conn) *RemoteClient {
 	return client
 }
 
+// Core and auth RPC wrappers.
+
 func (c *RemoteClient) AuthStatus(ctx context.Context) (AuthStatus, error) {
 	var out AuthStatus
 	err := c.request(ctx, "AuthStatus", nil, &out)
 	return out, err
 }
+
+// Chat RPC wrappers.
 
 func (c *RemoteClient) ChatSpaces(ctx context.Context) (Page[Space], error) {
 	var out Page[Space]
@@ -152,9 +156,13 @@ func (c *RemoteClient) PeopleGet(ctx context.Context, userID string) (Person, er
 	return out, err
 }
 
+// Shared attachment RPC wrappers.
+
 func (c *RemoteClient) DownloadAttachment(ctx context.Context, attachment Attachment, outputPath string) error {
 	return c.request(ctx, "DownloadAttachment", DownloadAttachmentParams{Attachment: attachment, OutputPath: outputPath}, nil)
 }
+
+// Mail RPC wrappers.
 
 func (c *RemoteClient) MailLabels(ctx context.Context) ([]MailLabel, error) {
 	var out []MailLabel
@@ -218,6 +226,8 @@ func (c *RemoteClient) ToggleMailLabel(ctx context.Context, threadID, labelID st
 	return out, err
 }
 
+// Calendar RPC wrappers.
+
 func (c *RemoteClient) CalendarLists(ctx context.Context) (Page[CalendarListItem], error) {
 	var out Page[CalendarListItem]
 	err := c.request(ctx, "CalendarLists", nil, &out)
@@ -264,6 +274,8 @@ func (c *RemoteClient) DeleteEvent(ctx context.Context, eventID string) error {
 	return c.request(ctx, "DeleteEvent", EventIDParams{EventID: eventID}, nil)
 }
 
+// Meet RPC wrappers.
+
 func (c *RemoteClient) MeetSpaces(ctx context.Context) (Page[MeetSpace], error) {
 	var out Page[MeetSpace]
 	err := c.request(ctx, "MeetSpaces", nil, &out)
@@ -279,6 +291,8 @@ func (c *RemoteClient) CreateMeetSpace(ctx context.Context, title string) (MeetS
 func (c *RemoteClient) EndMeetSpace(ctx context.Context, name string) error {
 	return c.request(ctx, "EndMeetSpace", MeetSpaceNameParams{Name: name}, nil)
 }
+
+// Tasks RPC wrappers.
 
 func (c *RemoteClient) TaskLists(ctx context.Context) (Page[TaskList], error) {
 	var out Page[TaskList]
@@ -302,6 +316,8 @@ func (c *RemoteClient) DeleteTask(ctx context.Context, taskListID, taskID string
 	return c.request(ctx, "DeleteTask", TaskIDParams{TaskListID: taskListID, TaskID: taskID}, nil)
 }
 
+// Drive and Docs RPC wrappers.
+
 func (c *RemoteClient) DriveFiles(ctx context.Context, query DriveQuery) (Page[DriveFile], error) {
 	var out Page[DriveFile]
 	err := c.request(ctx, "DriveFiles", DriveFilesParams{Query: query}, &out)
@@ -319,6 +335,8 @@ func (c *RemoteClient) Doc(ctx context.Context, documentID string) (DocDocument,
 	err := c.request(ctx, "Doc", DocIDParams{DocumentID: documentID}, &out)
 	return out, err
 }
+
+// Daemon session, snapshot, subscription, draft, and status RPC wrappers.
 
 func (c *RemoteClient) PinChatSpace(ctx context.Context, spaceName string) error {
 	return c.request(ctx, "PinChatSpace", SpaceNameParams{SpaceName: spaceName}, nil)

@@ -147,6 +147,23 @@ var palettes = map[string]palette{
 		Selected:     "#3e4452",
 		StatusFg:     "#282c34",
 	},
+	"gmail": {
+		Accent:       "#8ab4f8", // Google blue (dark)
+		Live:         "#81c995", // Google green (dark)
+		Warn:         "#fdd663", // Google yellow (dark)
+		Error:        "#f28b82", // Google red (dark)
+		Info:         "#8ab4f8",
+		Subtle:       "#9aa0a6", // Google grey 500
+		Bg:           "#202124", // Google grey 900 — Gmail dark backdrop
+		Surface:      "#2d2e30", // raised pane/card
+		SurfaceAlt:   "#3c4043", // Google grey 800
+		Fg:           "#e8eaed", // Google grey 200
+		FgMuted:      "#bdc1c6", // Google grey 400
+		Border:       "#5f6368", // Google grey 700
+		BorderActive: "#8ab4f8",
+		Selected:     "#2a3f5f", // blue-tinted dark selection
+		StatusFg:     "#202124", // dark text on light-blue badges
+	},
 }
 
 func pickPalette(name string) (string, palette) {
@@ -179,6 +196,10 @@ func New(name string, noColor bool) Theme {
 	rounded := lipgloss.RoundedBorder()
 	thick := lipgloss.ThickBorder()
 	normal := lipgloss.NormalBorder()
+	activeBorder := thick
+	if resolvedName == "gmail" {
+		activeBorder = rounded
+	}
 
 	if noColor {
 		t.Root = lipgloss.NewStyle()
@@ -216,18 +237,34 @@ func New(name string, noColor bool) Theme {
 	surfaceAlt := lipgloss.Color(t.SurfaceAlt)
 	selectedBg := lipgloss.Color(p.Selected)
 	statusFg := lipgloss.Color(p.StatusFg)
+	bg := lipgloss.Color(t.Bg)
 
-	t.Root = lipgloss.NewStyle().Foreground(fg)
+	// The gmail theme renders flat: no pane/card background fills, so Kitty
+	// inline images composite cleanly against the terminal backdrop.
+	var paneBg, rootBg lipgloss.TerminalColor = surface, bg
+	if resolvedName == "gmail" {
+		paneBg = lipgloss.NoColor{}
+		rootBg = lipgloss.NoColor{}
+	}
+
+	t.Root = lipgloss.NewStyle().
+		Foreground(fg).
+		Background(rootBg)
 
 	t.Pane = lipgloss.NewStyle().
 		Border(rounded).
 		BorderForeground(border).
+		BorderBackground(paneBg).
+		Foreground(fg).
+		Background(paneBg).
 		Padding(0, 2, 0, 1)
 
 	t.Active = lipgloss.NewStyle().
-		Border(thick).
+		Border(activeBorder).
 		BorderForeground(borderActive).
+		BorderBackground(paneBg).
 		Foreground(fg).
+		Background(paneBg).
 		Padding(0, 2, 0, 1).
 		Bold(true)
 
@@ -238,6 +275,7 @@ func New(name string, noColor bool) Theme {
 
 	t.Title = lipgloss.NewStyle().
 		Foreground(accent).
+		Background(paneBg).
 		Bold(true)
 
 	t.Subtitle = lipgloss.NewStyle().
@@ -307,32 +345,39 @@ func New(name string, noColor bool) Theme {
 	t.ErrorBox = lipgloss.NewStyle().
 		Border(rounded).
 		BorderForeground(lipgloss.Color(t.Error)).
+		BorderBackground(paneBg).
 		Foreground(lipgloss.Color(t.Error)).
+		Background(paneBg).
 		Bold(true).
 		Padding(0, 2)
 
 	t.Modal = lipgloss.NewStyle().
 		Border(thick).
 		BorderForeground(borderActive).
+		BorderBackground(paneBg).
 		Foreground(fg).
+		Background(paneBg).
 		Padding(1, 3)
 
 	t.Input = lipgloss.NewStyle().
 		Border(rounded).
 		BorderForeground(border).
+		BorderBackground(paneBg).
 		Foreground(fg).
+		Background(paneBg).
 		Padding(0, 2)
 
 	t.Code = lipgloss.NewStyle().
 		Border(normal).
 		BorderForeground(border).
+		BorderBackground(paneBg).
 		Foreground(fgMuted).
-		Background(surface).
+		Background(paneBg).
 		Padding(0, 1)
 
 	return t
 }
 
 func AvailableNames() []string {
-	return []string{"catppuccin", "tokyonight", "gruvbox", "rosepine", "onedark"}
+	return []string{"gmail", "catppuccin", "tokyonight", "gruvbox", "rosepine", "onedark"}
 }

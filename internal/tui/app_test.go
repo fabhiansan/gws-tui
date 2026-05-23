@@ -103,11 +103,8 @@ func TestMeetResourceNameIsNotTreatedAsJoinURL(t *testing.T) {
 	if updated.toast != "no Meet URL available" {
 		t.Fatalf("toast=%q", updated.toast)
 	}
-	if strings.Contains(updated.meetDetail(), "Link:       spaces/meet-1") {
-		t.Fatalf("detail rendered API resource as join link:\n%s", updated.meetDetail())
-	}
-	if !strings.Contains(updated.meetDetail(), "Space:      spaces/meet-1") {
-		t.Fatalf("detail did not preserve space resource:\n%s", updated.meetDetail())
+	if strings.Contains(updated.meetDetail(), "spaces/meet-1") {
+		t.Fatalf("detail rendered the raw API resource name instead of a human-readable title:\n%s", updated.meetDetail())
 	}
 }
 
@@ -146,7 +143,10 @@ func TestEndMeetUsesSpaceResourceForConferenceRecord(t *testing.T) {
 	}
 }
 
-func TestLoadAllCommandEmitsProgressStages(t *testing.T) {
+// TestStartupLoadCommandsFanOutPerSection guards the progressive cold start:
+// startup must dispatch one command per eager pane (plus auth) so the requests
+// run in parallel, and each must report itself with the right message type.
+func TestStartupLoadCommandsFanOutPerSection(t *testing.T) {
 	model := New(Options{
 		Client: newTestWorkspaceClient(),
 		Config: Config{
@@ -156,43 +156,258 @@ func TestLoadAllCommandEmitsProgressStages(t *testing.T) {
 		},
 		Version: "test",
 	})
-	progress := make(chan loadProgressMsg, len(workspaceInitialLoadStages)+2)
-	msg := model.loadAllWithProgressCmd(progress)().(loadedMsg)
-	if msg.err != nil {
-		t.Fatal(msg.err)
+	cmds := model.startupLoadCmds()
+	if len(cmds) != len(startupFeatures)+1 {
+		t.Fatalf("expected %d startup commands (auth + %d sections), got %d", len(startupFeatures)+1, len(startupFeatures), len(cmds))
 	}
-	var labels []string
-	for update := range progress {
-		labels = append(labels, update.Label)
+	seen := map[string]bool{}
+	for _, cmd := range cmds {
+		switch msg := cmd().(type) {
+		case authLoadedMsg:
+			seen["auth"] = true
+		case chatSectionLoadedMsg:
+			seen["chat"] = true
+		case featureRefreshedMsg:
+			if !msg.startup {
+				t.Fatalf("section %s refresh not flagged startup", msg.feature)
+			}
+			seen[string(msg.feature)] = true
+		default:
+			t.Fatalf("unexpected startup message %T", msg)
+		}
 	}
-	if len(labels) != len(workspaceInitialLoadStages) {
-		t.Fatalf("expected %d progress updates, got %d: %#v", len(workspaceInitialLoadStages), len(labels), labels)
-	}
-	if labels[0] != "Auth" || labels[len(labels)-1] != "Document preview" {
-		t.Fatalf("unexpected progress boundaries: %#v", labels)
+	for _, want := range []string{"auth", "chat", "mail", "calendar", "meet", "tasks"} {
+		if !seen[want] {
+			t.Fatalf("startup commands missing %q section: %#v", want, seen)
+		}
 	}
 }
 
-func TestInitialLoadingViewShowsFetchProgress(t *testing.T) {
+func TestChatStartupKeepsSpacesWhenInitialMessagesFail(t *testing.T) {
+	model := New(Options{
+		Client: &chatMessagesErrorClient{WorkspaceClient: newTestWorkspaceClient()},
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+
+	msg := model.loadChatSectionCmd()().(chatSectionLoadedMsg)
+	updated, _ := model.Update(msg)
+	model = updated.(Model)
+
+	if len(model.spaces) != 2 {
+		t.Fatalf("spaces should render even when initial messages fail, got %#v", model.spaces)
+	}
+	if model.selectedSpace().Name != "spaces/engineering" {
+		t.Fatalf("selected space should stay valid, got %#v", model.selectedSpace())
+	}
+	if len(model.chatMessages) != 0 {
+		t.Fatalf("messages should stay empty after message load failure, got %#v", model.chatMessages)
+	}
+	if !model.featureLoaded[FeatureChat] {
+		t.Fatal("chat feature should be considered loaded once spaces are available")
+	}
+	if model.err == "" {
+		t.Fatal("message load failure should still surface as an error")
+	}
+}
+
+// TestColdStartRendersMainViewWithLoadingPanes guards that the TUI opens
+// immediately on a cold start — no full-screen loader — and that a pane
+// awaiting its first fetch shows a Loading placeholder, then fills when its
+// own section message lands.
+func TestColdStartRendersMainViewWithLoadingPanes(t *testing.T) {
 	model := New(Options{
 		Client: newTestWorkspaceClient(),
 		Config: Config{
 			InitialFeature: "chat",
 			StatePath:      t.TempDir() + "/state.json",
 			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 32})
+	model = updated.(Model)
+
+	view := model.View()
+	for _, want := range []string{"Chat", "Mail", "Loading"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("cold-start view missing %q:\n%s", want, view)
+		}
+	}
+
+	msg := model.loadChatSectionCmd()().(chatSectionLoadedMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.featureLoading[FeatureChat] {
+		t.Fatal("chat pane still flagged loading after its data arrived")
+	}
+	if !strings.Contains(model.View(), "#engineering") {
+		t.Fatalf("chat pane did not fill after section load:\n%s", model.View())
+	}
+}
+
+// TestDriveLoadsLazilyOnFirstVisit guards that Drive is excluded from the
+// eager cold-start fan-out and fetches once, on first visit, never refetching.
+func TestDriveLoadsLazilyOnFirstVisit(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+		},
+		Version: "test",
+	})
+	if model.featureLoading[FeatureDrive] || model.featureLoaded[FeatureDrive] {
+		t.Fatal("Drive should be neither loading nor loaded at cold start")
+	}
+	if cmd := model.ensureFeatureLoadedCmd(FeatureChat); cmd != nil {
+		t.Fatal("eager Chat feature should not trigger a lazy load")
+	}
+	cmd := model.ensureFeatureLoadedCmd(FeatureDrive)
+	if cmd == nil {
+		t.Fatal("first Drive visit should return a load command")
+	}
+	if !model.featureLoading[FeatureDrive] {
+		t.Fatal("Drive should be flagged loading after the lazy trigger")
+	}
+	refresh, ok := cmd().(featureRefreshedMsg)
+	if !ok || refresh.feature != FeatureDrive || !refresh.startup {
+		t.Fatalf("unexpected Drive lazy-load message: %#v", cmd())
+	}
+	updated, _ := model.Update(refresh)
+	model = updated.(Model)
+	if model.featureLoading[FeatureDrive] || !model.featureLoaded[FeatureDrive] {
+		t.Fatal("Drive flags not settled after load completed")
+	}
+	if cmd := model.ensureFeatureLoadedCmd(FeatureDrive); cmd != nil {
+		t.Fatal("loaded Drive feature should not refetch on revisit")
+	}
+}
+
+func TestMessagesOverlayCapturesToastAndError(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			NoColor:        true,
 		},
 		Version: "test",
 	})
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
 	model = updated.(Model)
-	updated, _ = model.Update(loadProgressMsg{Step: 5, Total: len(workspaceInitialLoadStages), Label: "Inbox"})
-	model = updated.(Model)
 
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if len(model.messageLog) != 1 || model.messageLog[0].text != "mail" {
+		t.Fatalf("toast was not captured: %#v", model.messageLog)
+	}
+
+	updated, _ = model.Update(featureLoadedMsg{err: errors.New("network down")})
+	model = updated.(Model)
+	if len(model.messageLog) != 2 || model.messageLog[1].level != "error" || model.messageLog[1].text != "network down" {
+		t.Fatalf("error was not captured: %#v", model.messageLog)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+	model = updated.(Model)
+	if !model.messagesVisible {
+		t.Fatal(": should open the messages overlay")
+	}
 	view := model.View()
-	for _, want := range []string{"Loading workspace", "Inbox", "5/13"} {
+	for _, want := range []string{"gws - messages", "mail", "network down"} {
 		if !strings.Contains(view, want) {
-			t.Fatalf("loading view missing %q:\n%s", want, view)
+			t.Fatalf("messages overlay missing %q:\n%s", want, view)
 		}
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("closing messages overlay should not return a command, got %v", cmd)
+	}
+	if model.messagesVisible {
+		t.Fatal("Esc should close the messages overlay")
+	}
+}
+
+func TestMessagesOverlayVimYanksCurrentLine(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			NoColor:        true,
+			VimMode:        true,
+		},
+		Version: "test",
+	})
+	model.width = 100
+	model.height = 32
+	at := time.Date(2026, 5, 21, 10, 11, 12, 0, time.UTC)
+	model.messageLog = []messageLogEntry{
+		{at: at, level: "info", text: "first message"},
+		{at: at.Add(time.Second), level: "error", text: "second issue"},
+	}
+	model.openMessageLog()
+
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if model.messageLogPending != "y" {
+		t.Fatalf("first y should wait for yy, pending=%q", model.messageLogPending)
+	}
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if !model.vimRegisterLine {
+		t.Fatal("yy should yank linewise")
+	}
+	if !strings.Contains(model.vimRegister, "10:11:13 ERROR second issue") {
+		t.Fatalf("yy yanked wrong line: %q", model.vimRegister)
+	}
+}
+
+func TestMessagesOverlayVimVisualLineYankRange(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			NoColor:        true,
+			VimMode:        true,
+		},
+		Version: "test",
+	})
+	model.width = 100
+	model.height = 32
+	at := time.Date(2026, 5, 21, 10, 11, 12, 0, time.UTC)
+	model.messageLog = []messageLogEntry{
+		{at: at, level: "info", text: "first message"},
+		{at: at.Add(time.Second), level: "error", text: "second issue"},
+		{at: at.Add(2 * time.Second), level: "event", text: "daemon: notify"},
+	}
+	model.openMessageLog()
+
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = model.updateMessageLogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if !model.vimRegisterLine {
+		t.Fatal("visual line yank should be linewise")
+	}
+	if !strings.Contains(model.vimRegister, "10:11:12 INFO  first message\n10:11:13 ERROR second issue") {
+		t.Fatalf("visual line yank got wrong range: %q", model.vimRegister)
+	}
+	if model.messageLogVisual {
+		t.Fatal("yank should exit visual mode")
 	}
 }
 
@@ -277,8 +492,8 @@ func TestModelHydratesWorkspaceCacheWithoutInitialLoad(t *testing.T) {
 			},
 		},
 		MailLabels: []api.MailLabel{{Name: "Inbox"}},
-		MailThreads: api.Page[api.MailThread]{
-			Items: []api.MailThread{{ID: "mail-1", Subject: "Cached mail"}},
+		MailThreadsByFolder: map[string]api.Page[api.MailThread]{
+			"Inbox": {Items: []api.MailThread{{ID: "mail-1", Subject: "Cached mail"}}},
 		},
 		Events: api.Page[api.CalendarEvent]{
 			Items: []api.CalendarEvent{{ID: "event-1", Summary: "Cached event"}},
@@ -878,6 +1093,55 @@ func TestIncomingSelfChatMessageDoesNotToastOrMarkUnread(t *testing.T) {
 	cached := model.cache.ChatMessagesBySpace["spaces/design"]
 	if len(cached.Items) != 1 || cached.Items[0].ID != "design-self" {
 		t.Fatalf("self message should still hydrate cache, got %#v", cached.Items)
+	}
+}
+
+func TestDaemonChatHistoryLoadedEventUpdatesSelectedSpace(t *testing.T) {
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			StatePath:      t.TempDir() + "/state.json",
+			DraftDir:       t.TempDir(),
+			Daemon:         true,
+		},
+	})
+	model.spaces = []api.Space{{Name: "spaces/design", DisplayName: "#design"}}
+	model.selected[FeatureChat] = 0
+	page := api.Page[api.ChatMessage]{
+		Items: []api.ChatMessage{{
+			ID:         "design-history-1",
+			Name:       "spaces/design/messages/design-history-1",
+			Space:      "spaces/design",
+			SenderID:   "users/alice",
+			SenderName: "Alice",
+			Text:       "loaded in background",
+			CreateTime: time.Date(2026, 5, 19, 11, 0, 0, 0, time.UTC),
+		}},
+		NextPageToken: "older",
+	}
+	payload, err := json.Marshal(struct {
+		Space string                    `json:"space"`
+		Page  api.Page[api.ChatMessage] `json:"page"`
+	}{Space: "spaces/design", Page: page})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _ := model.Update(daemonEventMsg{
+		event: api.DaemonEvent{Topic: "chat.history.loaded", Payload: payload},
+	})
+	model = updated.(Model)
+
+	if len(model.chatMessages) != 1 || model.chatMessages[0].Text != "loaded in background" {
+		t.Fatalf("selected chat history should update from daemon event, got %#v", model.chatMessages)
+	}
+	if model.chatOlder != "older" {
+		t.Fatalf("expected older token from history event, got %q", model.chatOlder)
+	}
+	cached := model.cache.ChatMessagesBySpace["spaces/design"]
+	if len(cached.Items) != 1 || cached.Items[0].ID != "design-history-1" {
+		t.Fatalf("history event should update cache, got %#v", cached)
 	}
 }
 
@@ -1894,6 +2158,14 @@ type countingWorkspaceClient struct {
 	lastDriveQuery api.DriveQuery
 	lastDocsQuery  api.DriveQuery
 	lastDocID      string
+}
+
+type chatMessagesErrorClient struct {
+	api.WorkspaceClient
+}
+
+func (c *chatMessagesErrorClient) ChatMessages(context.Context, string, string) (api.Page[api.ChatMessage], error) {
+	return api.Page[api.ChatMessage]{}, context.DeadlineExceeded
 }
 
 func (c *countingWorkspaceClient) AuthStatus(ctx context.Context) (api.AuthStatus, error) {

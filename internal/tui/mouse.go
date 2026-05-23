@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -61,6 +62,23 @@ func (m Model) paneRects() (list, detail, action, sidebar paneRect) {
 		return
 	}
 
+	if m.feature == FeatureCalendar {
+		mainRect := paneRect{x: 0, y: 0, w: w, h: max(1, h-statusH)}
+		if m.focusedPane == paneDetail {
+			detail = mainRect
+			return
+		}
+		if m.focusedPane == paneAction {
+			actionContentH := max(3, min(8, strings.Count(m.input.Value(), "\n")+3))
+			calendarH := max(8, h-statusH-detailVBorder-actionContentH-actionVBorder)
+			list = paneRect{x: 0, y: 0, w: w, h: calendarH + detailVBorder}
+			action = paneRect{x: 0, y: list.h, w: w, h: actionContentH + actionVBorder}
+			return
+		}
+		list = mainRect
+		return
+	}
+
 	if m.feature == FeatureDocs {
 		mainRect := paneRect{x: 0, y: 0, w: w, h: max(1, h-statusH)}
 		if m.singlePaneDetailVisible() {
@@ -107,7 +125,7 @@ func (m Model) paneAt(x, y int) (pane, paneRect, bool) {
 }
 
 func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
-	if m.helpVisible {
+	if m.helpVisible || m.messagesVisible {
 		return m, nil
 	}
 	if m.modal != nil {
@@ -240,24 +258,35 @@ func (m Model) listRowAt(rect paneRect, y int) (int, bool) {
 		return 0, false
 	}
 	switch m.feature {
-	case FeatureChat, FeatureMeet, FeatureTasks, FeatureDrive, FeatureDocs:
+	case FeatureChat, FeatureTasks, FeatureDrive, FeatureDocs:
 		return row, true
+	case FeatureMeet:
+		// Date headers and the inline-expanded selection make Meet rows
+		// variable-height, so a click only focuses the pane; j/k drive the
+		// conference cursor.
+		return 0, false
 	case FeatureMail:
 		// Gmail-style inbox: one terminal line per thread.
 		return row, true
 	case FeatureCalendar:
+		if m.calendarView == calViewMonth {
+			// The grid is addressed by row and column; a click only focuses
+			// the pane (keys drive day selection).
+			return 0, false
+		}
 		// Day headers are interleaved with events, so walk the rendered
-		// sequence to find which event sits at this row.
-		lastDay := ""
+		// sequence (matching renderList) to find the event at this row.
+		today := startOfDay(time.Now())
+		lastLabel := ""
 		visualRow := 0
-		for i, event := range sortedEvents(m.events) {
-			day := event.Start.Format("Mon 02 Jan")
-			if day != lastDay {
+		for i, event := range m.events {
+			label := relativeDayLabel(startOfDay(event.Start), today)
+			if label != lastLabel {
 				if visualRow == row {
 					return i, true
 				}
 				visualRow++
-				lastDay = day
+				lastLabel = label
 			}
 			if visualRow == row {
 				return i, true

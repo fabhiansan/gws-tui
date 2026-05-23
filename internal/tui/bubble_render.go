@@ -165,7 +165,8 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 		}
 	}
 
-	label := m.bubbleHeaderLabel(burst)
+	bubbleBg := m.bubbleBackground(burst)
+	label := m.bubbleHeaderLabel(burst, bubbleBg)
 	labelW := lipgloss.Width(label)
 
 	bubbleW := contentW + 4
@@ -181,15 +182,15 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 
 	style := m.bubbleStyle(burst).Width(bubbleW)
 	content := strings.Join(contentLines, "\n")
-	box := style.Render(content)
-	box = injectBubbleHeader(box, label, m.bubbleBorderColor(burst))
+	box := renderStylePreserve(style, content)
+	box = injectBubbleHeader(box, label, m.bubbleBorderColor(burst), bubbleBg)
 
 	boxLines := strings.Split(box, "\n")
 	if burst.isSelf {
 		// Right-align to the full textWidth so self bubbles continue to
 		// hug the right wall regardless of indent.
 		for i, line := range boxLines {
-			boxLines[i] = rightAlign(line, textWidth)
+			boxLines[i] = m.rightAlignBubbleLine(line, textWidth)
 		}
 	} else if indent > 0 {
 		pad := strings.Repeat(" ", indent)
@@ -198,6 +199,25 @@ func (m *Model) renderBubble(burst messageBurst, textWidth int) []string {
 		}
 	}
 	return boxLines
+}
+
+func (m Model) rightAlignBubbleLine(value string, width int) string {
+	value = displayText(value)
+	pad := width - lipgloss.Width(value)
+	if pad <= 0 {
+		return value
+	}
+	if m.cfg.NoColor {
+		return strings.Repeat(" ", pad) + value
+	}
+	reset := "\x1b[0m"
+	if m.theme.Name == "gmail" {
+		return reset + strings.Repeat(" ", pad) + reset + value
+	}
+	prefix := lipgloss.NewStyle().
+		Background(lipgloss.Color(m.theme.Surface)).
+		Render(strings.Repeat(" ", pad))
+	return reset + prefix + reset + value
 }
 
 // renderBubblePlain is the narrow-terminal fallback: no box, just the
@@ -284,17 +304,20 @@ func (m *Model) bubbleContentLines(burst messageBurst, innerW int) []string {
 	return lines
 }
 
-func (m *Model) bubbleHeaderLabel(burst messageBurst) string {
-	name := burst.senderName
-	if burst.isSelf {
-		name = m.accent(name)
-	} else {
-		// senderColor populates m.senderColorIdx, which bubbleBorderColor
-		// then reads — call this first so the border matches the name.
-		name = m.senderColor(burst.senderID, name)
+func (m *Model) bubbleHeaderLabel(burst messageBurst, bg lipgloss.TerminalColor) string {
+	if m.cfg.NoColor {
+		return " " + burst.senderName + "  " + burst.messages[0].CreateTime.Format("15:04") + " "
 	}
-	timestamp := m.subtle(burst.messages[0].CreateTime.Format("15:04"))
-	return " " + name + "  " + timestamp + " "
+	base := lipgloss.NewStyle().Background(bg)
+	nameColor := lipgloss.Color(m.theme.Accent)
+	if !burst.isSelf {
+		// senderColorValue populates m.senderColorIdx, which bubbleBorderColor
+		// then reads so the border matches the name.
+		nameColor = lipgloss.Color(m.senderColorValue(burst.senderID))
+	}
+	name := base.Foreground(nameColor).Render(burst.senderName)
+	timestamp := base.Foreground(lipgloss.Color(m.theme.Subtle)).Render(burst.messages[0].CreateTime.Format("15:04"))
+	return base.Render(" ") + name + base.Render("  ") + timestamp + base.Render(" ")
 }
 
 func (m Model) bubbleStyle(burst messageBurst) lipgloss.Style {
@@ -305,7 +328,22 @@ func (m Model) bubbleStyle(burst messageBurst) lipgloss.Style {
 		return style
 	}
 	color := m.bubbleBorderColor(burst)
-	return style.BorderForeground(color).Foreground(lipgloss.Color(m.theme.Fg))
+	bg := m.bubbleBackground(burst)
+	return style.
+		BorderForeground(color).
+		BorderBackground(bg).
+		Foreground(lipgloss.Color(m.theme.Fg)).
+		Background(bg)
+}
+
+func (m Model) bubbleBackground(burst messageBurst) lipgloss.TerminalColor {
+	if m.cfg.NoColor {
+		return lipgloss.NoColor{}
+	}
+	if burst.isSelf && m.theme.Name == "gmail" {
+		return lipgloss.Color(m.theme.SurfaceAlt)
+	}
+	return lipgloss.Color(m.theme.Surface)
 }
 
 func (m Model) bubbleBorderColor(burst messageBurst) lipgloss.Color {
@@ -326,7 +364,7 @@ func (m Model) bubbleBorderColor(burst messageBurst) lipgloss.Color {
 // the sender label, left-aligned after the rounded corner. lipgloss doesn't
 // expose this directly, but a rendered box always starts with "╭<border…>╮"
 // followed by "\n", so we can splice into the plain bytes safely.
-func injectBubbleHeader(box, label string, borderColor lipgloss.Color) string {
+func injectBubbleHeader(box, label string, borderColor lipgloss.Color, bg lipgloss.TerminalColor) string {
 	nl := strings.Index(box, "\n")
 	if nl == -1 {
 		return box
@@ -358,7 +396,7 @@ func injectBubbleHeader(box, label string, borderColor lipgloss.Color) string {
 		rightPad = 1
 	}
 
-	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor).Background(bg)
 	left := borderStyle.Render(leftCorner + strings.Repeat(borderChar, leftPad))
 	right := borderStyle.Render(strings.Repeat(borderChar, rightPad) + rightCorner)
 	return left + label + right + rest

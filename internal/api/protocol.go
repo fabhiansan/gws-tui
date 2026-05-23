@@ -45,6 +45,8 @@ func (e *ProtocolError) Error() string {
 	return e.Code + ": " + e.Message
 }
 
+// Chat RPC params.
+
 type ChatMessagesParams struct {
 	SpaceName string `json:"space_name"`
 	PageToken string `json:"page_token,omitempty"`
@@ -89,10 +91,14 @@ type UserIDParams struct {
 	UserID string `json:"user_id"`
 }
 
+// Shared attachment RPC params.
+
 type DownloadAttachmentParams struct {
 	Attachment Attachment `json:"attachment"`
 	OutputPath string     `json:"output_path"`
 }
+
+// Mail RPC params.
 
 type MailThreadsParams struct {
 	Query MailQuery `json:"query"`
@@ -123,6 +129,8 @@ type ToggleMailLabelParams struct {
 	ThreadID string `json:"thread_id"`
 	LabelID  string `json:"label_id"`
 }
+
+// Calendar RPC params.
 
 type CalendarEventsParams struct {
 	Query CalendarQuery `json:"query"`
@@ -156,6 +164,8 @@ type EventIDParams struct {
 	EventID string `json:"event_id"`
 }
 
+// Meet RPC params.
+
 type CreateMeetSpaceParams struct {
 	Title string `json:"title"`
 }
@@ -163,6 +173,8 @@ type CreateMeetSpaceParams struct {
 type MeetSpaceNameParams struct {
 	Name string `json:"name"`
 }
+
+// Tasks RPC params.
 
 type TasksParams struct {
 	Query TaskQuery `json:"query"`
@@ -179,6 +191,8 @@ type SetTaskCompletedParams struct {
 	Completed  bool   `json:"completed"`
 }
 
+// Drive and Docs RPC params.
+
 type DriveFilesParams struct {
 	Query DriveQuery `json:"query"`
 }
@@ -186,6 +200,8 @@ type DriveFilesParams struct {
 type DocIDParams struct {
 	DocumentID string `json:"document_id"`
 }
+
+// Daemon session and local draft RPC params.
 
 type SubscribeTopicsParams struct {
 	Topics []string `json:"topics"`

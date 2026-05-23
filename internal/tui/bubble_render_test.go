@@ -120,6 +120,34 @@ func TestRenderBubbleSelfMessageRightAligned(t *testing.T) {
 	}
 }
 
+func TestGmailSelfBubbleAlignmentPaddingDoesNotPaintBackground(t *testing.T) {
+	dir := t.TempDir()
+	model := New(Options{
+		Client: newTestWorkspaceClient(),
+		Config: Config{
+			InitialFeature: "chat",
+			Theme:          "gmail",
+			StatePath:      filepath.Join(dir, "state.json"),
+			DraftDir:       dir,
+			NoIcons:        true,
+		},
+	})
+
+	got := model.rightAlignBubbleLine("box", 8)
+	if plain := stripANSI(got); plain != "     box" {
+		t.Fatalf("plain aligned line = %q, want %q", plain, "     box")
+	}
+	prefix, _, ok := strings.Cut(got, "box")
+	if !ok {
+		t.Fatalf("aligned line missing content: %q", got)
+	}
+	prefixWithoutResets := strings.ReplaceAll(prefix, "\x1b[0m", "")
+	prefixWithoutResets = strings.ReplaceAll(prefixWithoutResets, "\x1b[m", "")
+	if strings.Contains(prefixWithoutResets, "\x1b[") {
+		t.Fatalf("gmail alignment padding should be plain spaces, got ANSI-painted prefix %q in %q", prefix, got)
+	}
+}
+
 func TestRenderBubbleCoalescesShowsInlineTimestamp(t *testing.T) {
 	model := newBubbleTestModel(t)
 	base := time.Date(2026, 5, 19, 10, 23, 0, 0, time.UTC)

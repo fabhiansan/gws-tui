@@ -46,7 +46,7 @@ func LoadConfig() (Config, error) {
 
 	cfg := Config{
 		InitialFeature:         "chat",
-		Theme:                  "catppuccin",
+		Theme:                  "gmail",
 		DaemonSocket:           defaultDaemonSocket(cacheBase),
 		DaemonAutospawn:        true,
 		DaemonLog:              filepath.Join(cacheBase, "daemon.log"),

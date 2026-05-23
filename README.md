@@ -158,8 +158,12 @@ Calendar:
 
 - `c`: full event composer
 - `i`: quick add from action pane
+- `h`/`l`: move day in month view
+- `j`/`k`: move week in month view
+- `J`/`K`: choose activity within the focused day
 - `y`/`n`/`M`: RSVP yes/no/maybe
 - `d`: delete
+- `r`: refresh the current calendar view
 - `t`: jump to today
 - `[`/`]`: previous/next week marker
 
@@ -191,6 +195,7 @@ The example below shows the default keys and default path layout:
 
 ```toml
 initial_feature = "chat"
+theme = "gmail"
 no_icons = false
 no_color = false
 notify_desktop = true

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -192,6 +193,102 @@ func TestHandleChatMessagePromotesSpaceInSnapshot(t *testing.T) {
 	}
 }
 
+func TestRefreshSnapshotKeepsSuccessfulSectionsWhenOneSectionFails(t *testing.T) {
+	server := NewServer(&calendarErrorClient{testWorkspaceClient: newTestWorkspaceClient()}, Options{})
+	server.snapshot = api.NewWorkspaceSnapshot()
+
+	if err := server.refreshSnapshot(context.Background()); err != nil {
+		t.Fatalf("partial refresh should keep successful sections: %v", err)
+	}
+	if len(server.snapshot.Spaces) == 0 {
+		t.Fatalf("chat spaces should be retained after unrelated section failure: %#v", server.snapshot)
+	}
+	if len(server.snapshot.Events.Items) != 0 {
+		t.Fatalf("failed calendar section should not populate events: %#v", server.snapshot.Events)
+	}
+}
+
+func TestBackgroundChatPrefetchBroadcastsHistoryLoaded(t *testing.T) {
+	dir := t.TempDir()
+	socketDir := shortSocketDir(t)
+	socketPath := filepath.Join(socketDir, "daemon.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := &delayedChatMessagesClient{
+		testWorkspaceClient: newTestWorkspaceClient(),
+		started:             make(chan string, 4),
+		release:             make(chan struct{}),
+	}
+	server := NewServer(backend, Options{
+		SocketPath: socketPath,
+		CachePath:  filepath.Join(dir, "cache.json"),
+	})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	waitFor(t, 2*time.Second, func() bool {
+		return len(backend.started) > 0
+	}, "background prefetch did not start")
+
+	client, err := api.NewRemoteClient(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	events, err := client.SubscribeEvents(ctx, []string{"chat.history.loaded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	close(backend.release)
+	select {
+	case event := <-events:
+		if event.Topic != "chat.history.loaded" {
+			t.Fatalf("unexpected event topic: %q", event.Topic)
+		}
+		var payload struct {
+			Space string                    `json:"space"`
+			Page  api.Page[api.ChatMessage] `json:"page"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Space == "" || len(payload.Page.Items) == 0 {
+			t.Fatalf("history event should carry the loaded page: %#v", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for chat.history.loaded event")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down")
+	}
+}
+
+func TestStampLivePreservesServerUnreadWithoutMessageCache(t *testing.T) {
+	server := NewServer(newTestWorkspaceClient(), Options{})
+	server.snapshot = api.NewWorkspaceSnapshot()
+	server.snapshot.Spaces = []api.Space{{Name: "spaces/engineering", Unread: true}}
+
+	spaces := append([]api.Space(nil), server.snapshot.Spaces...)
+	server.stampLiveLocked(spaces)
+
+	if !spaces[0].Unread {
+		t.Fatalf("server unread state should survive when no message cache exists: %#v", spaces[0])
+	}
+}
+
 func TestServerSnapshotAndDraftRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	socketDir := shortSocketDir(t)
@@ -221,7 +318,7 @@ func TestServerSnapshotAndDraftRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProtocolVersion != api.ProtocolVersion || len(snapshot.Spaces) == 0 || len(snapshot.MailThreads.Items) == 0 {
+	if snapshot.ProtocolVersion != api.ProtocolVersion || len(snapshot.Spaces) == 0 || len(snapshot.MailThreadsByFolder) == 0 {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "cache.json")); err != nil {

@@ -12,6 +12,36 @@ type testWorkspaceClient struct {
 	now time.Time
 }
 
+type calendarErrorClient struct {
+	*testWorkspaceClient
+}
+
+func (c *calendarErrorClient) CalendarEvents(context.Context, api.CalendarQuery) (api.Page[api.CalendarEvent], error) {
+	return api.Page[api.CalendarEvent]{}, context.DeadlineExceeded
+}
+
+type delayedChatMessagesClient struct {
+	*testWorkspaceClient
+	started chan string
+	release chan struct{}
+}
+
+func (c *delayedChatMessagesClient) ChatMessages(ctx context.Context, spaceName, pageToken string) (api.Page[api.ChatMessage], error) {
+	if pageToken != "" {
+		return c.testWorkspaceClient.ChatMessages(ctx, spaceName, pageToken)
+	}
+	select {
+	case c.started <- spaceName:
+	default:
+	}
+	select {
+	case <-c.release:
+		return c.testWorkspaceClient.ChatMessages(ctx, spaceName, pageToken)
+	case <-ctx.Done():
+		return api.Page[api.ChatMessage]{}, ctx.Err()
+	}
+}
+
 func newTestWorkspaceClient() *testWorkspaceClient {
 	return &testWorkspaceClient{now: time.Date(2026, 5, 18, 9, 30, 0, 0, time.FixedZone("WIB", 7*60*60))}
 }
