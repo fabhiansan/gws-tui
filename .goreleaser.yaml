@@ -1,0 +1,83 @@
+# GoReleaser config for gws-tui.
+# Docs: https://goreleaser.com — schema v2.
+
+version: 2
+
+project_name: gws-tui
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gws-tui
+    main: ./cmd/gws-tui
+    binary: gws-tui
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/fabhiansan/gws-tui/cmd.Version={{.Version}}
+      - -X github.com/fabhiansan/gws-tui/cmd.Commit={{.Commit}}
+      - -X github.com/fabhiansan/gws-tui/cmd.Date={{.Date}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+
+homebrew_casks:
+  - name: gws-tui
+    repository:
+      owner: fabhiansan
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/fabhiansan/gws-tui
+    description: "Terminal UI for Google Workspace (Chat, Mail, Calendar, Meet)"
+    binaries:
+      - gws-tui
+    caveats: |
+      gws-tui calls the upstream Google Workspace CLI for live Workspace data.
+      Install it separately:
+          brew install googleworkspace-cli
+        or:
+          npm install -g @googleworkspace/cli
+
+      Then authenticate once:
+          gws auth login
+
+      If the upstream gws is not on PATH, point gws-tui at it:
+          export GWS_TUI_UPSTREAM=/path/to/upstream/gws
+
+      First release ships unsigned; macOS Gatekeeper may prompt on first run.
+      If it does, right-click → Open, or run:
+          xattr -dr com.apple.quarantine "$(brew --prefix)/bin/gws-tui"
+
+release:
+  draft: false
+  prerelease: auto

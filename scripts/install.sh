@@ -6,7 +6,7 @@
 #
 # What it does:
 #   Phase A  Installs the upstream Google Workspace CLI (@googleworkspace/cli)
-#            and builds + installs this repo's `gws` TUI binary.
+#            and builds + installs this repo's `gws-tui` binary.
 #   Phase B  Walks you through a bring-your-own Google Cloud project so the
 #            TUI can authenticate, then runs the OAuth login.
 #
@@ -134,44 +134,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 3 — build and install the TUI binary from this repo
+# Phase 3 — build and install the gws-tui binary from this repo
 # ---------------------------------------------------------------------------
-step "Building and installing the gws TUI"
+step "Building and installing the gws-tui binary"
 
 GOBIN_DIR="$(go env GOBIN)"
 [[ -n "$GOBIN_DIR" ]] || GOBIN_DIR="$(go env GOPATH)/bin"
 LOCAL_BIN="$HOME/.local/bin"
-UPSTREAM_DIR="$(dirname "$UPSTREAM_GWS")"
 
-# 1-based index of a directory within PATH; 99999 when it is absent.
-path_pos() {
-	local target="$1" i=1 d
-	local IFS=:
-	for d in $PATH; do
-		[[ "$d" == "$target" ]] && { printf '%s' "$i"; return 0; }
-		i=$((i + 1))
-	done
-	printf '%s' 99999
-}
-UPSTREAM_POS="$(path_pos "$UPSTREAM_DIR")"
-
-# The TUI binary and the upstream CLI are both named `gws`. Install the TUI
-# into a PATH directory that resolves *before* the upstream, otherwise typing
-# `gws tui` would hit the upstream CLI (which has no `tui` command) and fail.
-PATH_HINT=""
-if [[ "$(path_pos "$GOBIN_DIR")" -lt "$UPSTREAM_POS" ]]; then
-	info "go install ./cmd/gws  ->  $GOBIN_DIR"
-	go install ./cmd/gws
-	TUI_GWS="$GOBIN_DIR/gws"
+# `gws-tui` does not collide with the upstream `gws`, so install into GOBIN by
+# default and fall back to ~/.local/bin only if GOBIN is unwritable.
+if [[ -w "$GOBIN_DIR" ]] || mkdir -p "$GOBIN_DIR" 2>/dev/null; then
+	info "go install ./cmd/gws-tui  ->  $GOBIN_DIR"
+	go install ./cmd/gws-tui
+	TUI_BIN="$GOBIN_DIR/gws-tui"
 else
 	mkdir -p "$LOCAL_BIN"
-	info "go build  ->  $LOCAL_BIN/gws"
-	go build -o "$LOCAL_BIN/gws" ./cmd/gws
-	TUI_GWS="$LOCAL_BIN/gws"
-	# Flag a PATH change only when ~/.local/bin won't win over the upstream.
-	[[ "$(path_pos "$LOCAL_BIN")" -lt "$UPSTREAM_POS" ]] || PATH_HINT="$LOCAL_BIN"
+	info "go build  ->  $LOCAL_BIN/gws-tui"
+	go build -o "$LOCAL_BIN/gws-tui" ./cmd/gws-tui
+	TUI_BIN="$LOCAL_BIN/gws-tui"
 fi
-ok "TUI installed: $TUI_GWS"
+ok "gws-tui installed: $TUI_BIN"
 
 # ---------------------------------------------------------------------------
 # Phase 4 — PATH sanity check
@@ -179,26 +162,18 @@ ok "TUI installed: $TUI_GWS"
 step "Checking PATH"
 
 hash -r 2>/dev/null || true
-RESOLVED_GWS="$(command -v gws || true)"
-if [[ -z "$RESOLVED_GWS" ]]; then
-	warn "no 'gws' found on PATH yet — see the PATH note below."
-elif [[ "$RESOLVED_GWS" == "$TUI_GWS" ]]; then
-	ok "'gws' resolves to the TUI: $RESOLVED_GWS"
-elif [[ "$RESOLVED_GWS" == "$UPSTREAM_GWS" ]]; then
-	warn "'gws' resolves to the UPSTREAM CLI, not the TUI ($RESOLVED_GWS)."
-	warn "  'gws tui' will fail until the TUI directory comes first on PATH:"
-	warn "  put '$(dirname "$TUI_GWS")' ahead of '$(dirname "$UPSTREAM_GWS")'."
+RESOLVED_TUI="$(command -v gws-tui || true)"
+if [[ -z "$RESOLVED_TUI" ]]; then
+	warn "no 'gws-tui' found on PATH yet. Add the install dir to PATH:"
+	printf '\n    export PATH="%s:$PATH"\n' "$(dirname "$TUI_BIN")"
+elif [[ "$RESOLVED_TUI" != "$TUI_BIN" ]]; then
+	warn "'gws-tui' on PATH resolves to $RESOLVED_TUI (not $TUI_BIN)."
+	warn "  reorder PATH or remove the older copy."
 else
-	info "'gws' resolves to: $RESOLVED_GWS"
+	ok "'gws-tui' resolves to: $RESOLVED_TUI"
 fi
 
-if [[ -n "$PATH_HINT" ]]; then
-	warn "$PATH_HINT must come before $UPSTREAM_DIR on PATH for 'gws tui' to work."
-	warn "Add this to your shell rc (~/.zshrc), then restart your shell:"
-	printf '\n    export PATH="%s:$PATH"\n' "$PATH_HINT"
-fi
-
-# Safety net: the TUI honours GWS_TUI_UPSTREAM before scanning PATH, so this
+# Safety net: gws-tui honours GWS_TUI_UPSTREAM before scanning PATH, so this
 # guarantees it finds the upstream CLI regardless of PATH ordering.
 info "Optional safety net — add to your shell rc so the TUI always finds upstream:"
 printf '\n    export GWS_TUI_UPSTREAM=%q\n' "$UPSTREAM_GWS"
@@ -353,11 +328,10 @@ fi
 # ---------------------------------------------------------------------------
 step "Done"
 ok "upstream gws : $UPSTREAM_GWS"
-ok "gws TUI      : $TUI_GWS"
+ok "gws-tui      : $TUI_BIN"
 printf '\n%s\n' "Next steps:"
-echo "    gws tui                  # launch the TUI"
-echo "    gws tui --feature mail   # jump straight to a feature"
-[[ -n "$PATH_HINT" ]] && echo "    (apply the PATH export above first, then restart your shell)"
+echo "    gws-tui                  # launch the TUI"
+echo "    gws-tui --feature mail   # jump straight to a feature"
 
 printf '\n%s\n' "How chat stays up to date:"
 echo "    A background daemon keeps your workspace in sync. The first time it"
@@ -368,5 +342,5 @@ echo "                 (step 2 above) enabled on your Google Cloud project."
 echo "      polling    each space is checked every 5 seconds. The automatic"
 echo "                 fallback when those APIs are not available — still fine."
 echo "    The daemon picks whichever works; see which one with:"
-echo "        gws daemon logs | grep 'chat'"
+echo "        gws-tui daemon logs | grep 'chat'"
 echo

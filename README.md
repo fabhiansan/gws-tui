@@ -1,16 +1,18 @@
-# gws TUI
+# gws-tui
 
-Standalone terminal UI for Google Workspace, exposed as:
+Standalone terminal UI for Google Workspace, launched as:
 
 ```sh
-gws tui
+gws-tui
 ```
 
 ![Chat screen](docs/screenshots/chat.svg)
 
-The TUI is built with Bubble Tea, Bubbles, and Lip Gloss. It keeps the existing
-Lua Neovim plugin contract intact: non-`tui` commands are delegated to an
-installed upstream `gws` binary.
+The TUI is built with Bubble Tea, Bubbles, and Lip Gloss. It reads live data
+through an authenticated upstream Google Workspace CLI (the `@googleworkspace/cli`
+npm package or the `googleworkspace-cli` Homebrew formula, installed as `gws`).
+The `gws-tui` binary is a separate, dedicated TUI; it does not shadow or replace
+the upstream `gws` CLI.
 
 ## Project Status
 
@@ -25,11 +27,21 @@ Unix-style process and socket behavior.
 
 ## Install
 
-### Quick install
+### Homebrew (recommended)
+
+```sh
+brew tap fabhiansan/tap
+brew install gws-tui
+```
+
+The formula installs `gws-tui` only. The upstream Google Workspace CLI is a
+separate install — see `Prerequisites` below.
+
+### Quick install (from a clone)
 
 After cloning the repository, run the installer. It installs the upstream
-Google Workspace CLI, builds and installs the TUI, and walks you through a
-bring-your-own Google Cloud project for authentication:
+Google Workspace CLI, builds and installs the `gws-tui` binary, and walks you
+through a bring-your-own Google Cloud project for authentication:
 
 ```sh
 bash scripts/install.sh
@@ -41,70 +53,74 @@ state, and image data).
 
 ### Manual install
 
-Prerequisite: install and authenticate the upstream Google Workspace CLI as
-`gws` first, then verify it works:
+Install the binary:
 
 ```sh
-gws auth status
-```
-
-Install the TUI binary:
-
-```sh
-go install github.com/fabhiansan/gws-tui/cmd/gws@latest
-gws tui
-```
-
-If the TUI binary shadows the upstream CLI on `PATH`, delegation should still
-find the next `gws` executable. If your upstream CLI lives somewhere custom, set:
-
-```sh
-export GWS_TUI_UPSTREAM=/path/to/upstream/gws
+go install github.com/fabhiansan/gws-tui/cmd/gws-tui@latest
+gws-tui
 ```
 
 For release archives, download the archive for your OS/architecture, then:
 
 ```sh
-tar -xzf gws-darwin-arm64.tar.gz
+tar -xzf gws-tui_Darwin_arm64.tar.gz
 mkdir -p ~/.local/bin
-install -m 0755 gws ~/.local/bin/gws
-gws tui
+install -m 0755 gws-tui ~/.local/bin/gws-tui
+gws-tui
 ```
 
 For local development:
 
 ```sh
-go build -o ./bin/gws ./cmd/gws
-./bin/gws tui
+go build -o ./bin/gws-tui ./cmd/gws-tui
+./bin/gws-tui
+```
+
+### Prerequisites — upstream Google Workspace CLI
+
+`gws-tui` shells out to the upstream `gws` CLI for live Workspace data. Install
+and authenticate it separately:
+
+```sh
+brew install googleworkspace-cli
+# or:  npm install -g @googleworkspace/cli
+
+gws auth status   # verify
+```
+
+If the upstream binary is installed somewhere off `PATH`, point `gws-tui` at it:
+
+```sh
+export GWS_TUI_UPSTREAM=/path/to/upstream/gws
 ```
 
 ## Commands
 
 ```sh
-gws tui
-gws tui --feature chat
-gws tui --feature mail
-gws tui --feature calendar
-gws tui --feature meet
-gws tui --auth
-gws tui --daemon
-gws tui --no-daemon
-gws tui --no-icons
-gws tui --no-color
-gws tui --no-images
-gws tui --no-vim
-gws tui --version
-gws daemon start
-gws daemon start --detach
-gws daemon status
-gws daemon stop
-gws daemon restart
-gws daemon logs
+gws-tui
+gws-tui --feature chat
+gws-tui --feature mail
+gws-tui --feature calendar
+gws-tui --feature meet
+gws-tui --auth
+gws-tui --daemon
+gws-tui --no-daemon
+gws-tui --no-icons
+gws-tui --no-color
+gws-tui --no-images
+gws-tui --no-vim
+gws-tui --version
+gws-tui daemon start
+gws-tui daemon start --detach
+gws-tui daemon status
+gws-tui daemon stop
+gws-tui daemon restart
+gws-tui daemon logs
 ```
 
 The TUI requires the upstream Google Workspace CLI for live data. If it cannot
 find an upstream `gws`, it exits with a setup error instead of showing dummy
-data. Run `gws tui --help` or `gws daemon --help` for the live flag list.
+data. Run `gws-tui --help` or `gws-tui daemon --help` for the live flag list.
 
 ## Keys
 
@@ -234,14 +250,14 @@ details.
 
 ## Daemon Mode
 
-Daemon mode is optional. `gws tui` remains standalone by default. Use:
+Daemon mode is optional. `gws-tui` remains standalone by default. Use:
 
 ```sh
-gws daemon start --detach
-gws tui --daemon
-gws daemon status
-gws daemon logs
-gws daemon stop
+gws-tui daemon start --detach
+gws-tui --daemon
+gws-tui daemon status
+gws-tui daemon logs
+gws-tui daemon stop
 ```
 
 When `daemon = true` or `--daemon` is set, the TUI attaches to a per-user Unix
@@ -258,7 +274,7 @@ Events API. When your Google Cloud project has the **Pub/Sub** and **Workspace
 Events** APIs enabled, a single `gws events +subscribe` stream covers every
 space at once and the daemon renews the subscription automatically. Otherwise
 it falls back to polling each space every 5 seconds. Either way chat works —
-`gws daemon logs | grep 'chat'` shows which mode is active.
+`gws-tui daemon logs | grep 'chat'` shows which mode is active.
 
 Set `chat_events = false` to force polling. The project is auto-detected from
 `gws auth status`; override it with `chat_events_project` /
@@ -266,19 +282,18 @@ Set `chat_events = false` to force polling. The project is auto-detected from
 `GWS_EVENTS_SUBSCRIPTION` environment variables).
 
 If `$XDG_RUNTIME_DIR` is unavailable, the socket and PID file fall back under
-`~/.cache/gws`. `daemon_autospawn = true` makes `gws tui --daemon` start the
-daemon automatically when the socket is missing. `gws daemon start` keeps the
-server in the foreground for a service manager, while `gws daemon start
---detach` backgrounds it and returns immediately. `gws daemon logs` prints the
-most recent daemon log lines from `daemon_log`. Example service files live in
-`docs/launchd/` and `docs/systemd/`; edit the binary path before installing
+`~/.cache/gws`. `daemon_autospawn = true` makes `gws-tui --daemon` start the
+daemon automatically when the socket is missing. `gws-tui daemon start` keeps
+the server in the foreground for a service manager, while `gws-tui daemon start
+--detach` backgrounds it and returns immediately. `gws-tui daemon logs` prints
+the most recent daemon log lines from `daemon_log`. Example service files live
+in `docs/launchd/` and `docs/systemd/`; edit the binary path before installing
 them.
 
 ## Compatibility
 
-The Lua plugin is not modified by this repository. Non-TUI commands are
-delegated to the upstream CLI, and tests cover the command parser plus the API
-shapes used by the plugin:
+The upstream Google Workspace CLI is invoked unchanged for live data. Tests in
+`internal/api` cover the JSON shapes used by the TUI:
 
 - `gws auth status`
 - `gws chat spaces list`
@@ -295,16 +310,8 @@ go vet ./...
 go build ./...
 ```
 
-Manual smoke remains required before a release:
-
-1. Build the binary.
-2. Put it on `PATH` ahead of the old `gws`, or set the plugin to use it.
-3. Set `GWS_TUI_UPSTREAM` if the upstream CLI is not discoverable as another
-   `gws` on `PATH`.
-4. Run `:GwsOpen` in Neovim and verify existing plugin flows still work.
-5. Run `gws tui` and verify Chat, Mail, Calendar, and Meet screens open.
-6. Run `gws daemon start --detach && gws tui --daemon`, then open a second TUI
-   and verify both clients receive live chat events.
+Manual smoke remains required before a release — see
+`docs/RELEASE_CHECKLIST.md`.
 
 ## Contributing and Security
 

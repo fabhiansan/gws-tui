@@ -5,12 +5,12 @@ Thanks for helping improve `gws-tui`.
 ## Development
 
 ```sh
-go build -o ./bin/gws ./cmd/gws
-./bin/gws tui
+go build -o ./bin/gws-tui ./cmd/gws-tui
+./bin/gws-tui
 ```
 
 Manual TUI development requires an authenticated upstream `gws` CLI. If the
-upstream binary is not discoverable as another `gws` on `PATH`, set
+upstream binary is not discoverable on `PATH`, set
 `GWS_TUI_UPSTREAM=/path/to/upstream/gws` before running the local build.
 
 ## Checks
@@ -22,8 +22,9 @@ make check
 go build ./...
 ```
 
-For changes that touch daemon mode, caching, auth delegation, or live Workspace
-data, also run the manual smoke checklist in `docs/RELEASE_CHECKLIST.md`.
+For changes that touch daemon mode, caching, upstream-CLI invocation, or live
+Workspace data, also run the manual smoke checklist in
+`docs/RELEASE_CHECKLIST.md`.
 
 ## Pull Requests
 
@@ -36,6 +37,6 @@ data, also run the manual smoke checklist in `docs/RELEASE_CHECKLIST.md`.
 
 ## Compatibility
 
-This repository intentionally keeps non-`tui` commands delegated to an existing
-`gws` binary when available. Changes that affect command delegation should keep
-the Neovim plugin compatibility contract covered by tests.
+The `gws-tui` binary calls the upstream Google Workspace CLI (`gws`) for live
+data via the helper in `cmd/upstream.go`. Changes that affect upstream
+invocation should keep the command-shape tests in `internal/api` green.

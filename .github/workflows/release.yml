@@ -9,51 +9,20 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  goreleaser:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goos: [darwin, linux]
-        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          mkdir -p dist
-          package_dir="dist/package"
-          mkdir -p "$package_dir"
-          go build \
-            -ldflags="-s -w -X github.com/fabhiansan/gws-tui/cmd.Version=${GITHUB_REF_NAME} -X github.com/fabhiansan/gws-tui/cmd.Commit=${GITHUB_SHA} -X github.com/fabhiansan/gws-tui/cmd.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o "${package_dir}/gws" ./cmd/gws
-          cp README.md LICENSE CHANGELOG.md "$package_dir/"
-          archive="gws-${GOOS}-${GOARCH}.tar.gz"
-          tar -czf "dist/${archive}" -C "$package_dir" .
-          rm -rf "$package_dir"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gws-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*.tar.gz
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Checksums
-        run: |
-          cd dist
-          sha256sum *.tar.gz > checksums.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

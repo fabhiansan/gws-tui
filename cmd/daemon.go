@@ -25,7 +25,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg, err := tui.LoadConfig()
 	if err != nil {
-		fmt.Fprintf(stderr, "gws daemon: config: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon: config: %v\n", err)
 		return 3
 	}
 	switch args[0] {
@@ -42,19 +42,19 @@ func runDaemon(args []string, stdout, stderr io.Writer) int {
 			return code
 		}
 		if err := daemonpkg.StartDetached(cfg.DaemonLog, "daemon", "start"); err != nil {
-			fmt.Fprintf(stderr, "gws daemon restart: %v\n", err)
+			fmt.Fprintf(stderr, "gws-tui daemon restart: %v\n", err)
 			return 5
 		}
 		fmt.Fprintf(stdout, "daemon restarting at %s\n", cfg.DaemonSocket)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "gws daemon: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(stderr, "gws-tui daemon: unknown subcommand %q\n", args[0])
 		return 3
 	}
 }
 
 func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("gws daemon start", flag.ContinueOnError)
+	flags := flag.NewFlagSet("gws-tui daemon start", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	detach := flags.Bool("detach", false, "start daemon in the background")
 	if err := flags.Parse(args); err != nil {
@@ -62,12 +62,12 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 	}
 	upstream, err := findUpstreamGWS()
 	if err != nil || upstream == "" {
-		fmt.Fprintf(stderr, "gws daemon start: upstream Google Workspace CLI not found; install it as `gws` or set GWS_TUI_UPSTREAM\n")
+		fmt.Fprintf(stderr, "gws-tui daemon start: upstream Google Workspace CLI not found; install it as `gws` or set GWS_TUI_UPSTREAM\n")
 		return 127
 	}
 	if *detach {
 		if err := daemonpkg.StartDetached(cfg.DaemonLog, "daemon", "start"); err != nil {
-			fmt.Fprintf(stderr, "gws daemon start: %v\n", err)
+			fmt.Fprintf(stderr, "gws-tui daemon start: %v\n", err)
 			return 5
 		}
 		fmt.Fprintf(stdout, "daemon starting at %s\n", cfg.DaemonSocket)
@@ -75,12 +75,12 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 	}
 
 	if err := tui.SetupLogging(cfg.DaemonLog); err != nil {
-		fmt.Fprintf(stderr, "gws daemon start: logging: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon start: logging: %v\n", err)
 		return 3
 	}
 	lock, err := daemonpkg.AcquirePIDLock(cfg.DaemonPIDFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "gws daemon start: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon start: %v\n", err)
 		return 4
 	}
 	defer lock.Release()
@@ -95,7 +95,7 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 	server := daemonpkg.NewServer(client, daemonOptions(cfg))
 	fmt.Fprintf(stdout, "daemon listening on %s\n", cfg.DaemonSocket)
 	if err := server.ListenAndServe(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(stderr, "gws daemon start: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon start: %v\n", err)
 		return 5
 	}
 	return 0
@@ -104,10 +104,10 @@ func runDaemonStart(args []string, cfg tui.Config, stdout, stderr io.Writer) int
 func runDaemonStop(cfg tui.Config, stdout, stderr io.Writer) int {
 	if err := daemonpkg.StopPID(cfg.DaemonPIDFile, 5*time.Second); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(stderr, "gws daemon stop: daemon is not running")
+			fmt.Fprintln(stderr, "gws-tui daemon stop: daemon is not running")
 			return 4
 		}
-		fmt.Fprintf(stderr, "gws daemon stop: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon stop: %v\n", err)
 		return 5
 	}
 	fmt.Fprintln(stdout, "daemon stopped")
@@ -130,7 +130,7 @@ func runDaemonStatus(cfg tui.Config, stdout, stderr io.Writer) int {
 	defer cancel()
 	status, err := client.DaemonStatus(ctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "gws daemon status: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon status: %v\n", err)
 		return 5
 	}
 	fmt.Fprintf(stdout, "running: pid=%d socket=%s uptime=%s clients=%d protocol=%d\n",
@@ -149,7 +149,7 @@ func runDaemonStatus(cfg tui.Config, stdout, stderr io.Writer) int {
 func runDaemonLogs(cfg tui.Config, stdout, stderr io.Writer) int {
 	file, err := os.Open(cfg.DaemonLog)
 	if err != nil {
-		fmt.Fprintf(stderr, "gws daemon logs: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon logs: %v\n", err)
 		return 4
 	}
 	defer file.Close()
@@ -162,7 +162,7 @@ func runDaemonLogs(cfg tui.Config, stdout, stderr io.Writer) int {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(stderr, "gws daemon logs: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui daemon logs: %v\n", err)
 		return 5
 	}
 	for _, line := range lines {
@@ -189,14 +189,14 @@ func daemonOptions(cfg tui.Config) daemonpkg.Options {
 }
 
 func printDaemonUsage(w io.Writer) {
-	fmt.Fprint(w, `gws daemon — background workspace backend
+	fmt.Fprint(w, `gws-tui daemon — background workspace backend
 
 USAGE:
-    gws daemon start [--detach]
-    gws daemon stop
-    gws daemon status
-    gws daemon logs
-    gws daemon restart
+    gws-tui daemon start [--detach]
+    gws-tui daemon stop
+    gws-tui daemon status
+    gws-tui daemon logs
+    gws-tui daemon restart
 `)
 }
 

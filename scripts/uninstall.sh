@@ -77,19 +77,23 @@ CACHE_DIR="$HOME/.cache/gws"
 # Phase 1 — stop the daemon and clear the Workspace session
 # ---------------------------------------------------------------------------
 step "Clearing Google Workspace session"
-if have gws; then
-	if gws daemon stop >/dev/null 2>&1; then
+if have gws-tui; then
+	if gws-tui daemon stop >/dev/null 2>&1; then
 		ok "daemon stopped"
 	else
 		info "daemon not running"
 	fi
+else
+	info "no 'gws-tui' on PATH — skipping daemon stop"
+fi
+if have gws; then
 	if gws auth logout >/dev/null 2>&1; then
 		ok "logged out (token cache + OS keyring cleared)"
 	else
 		info "nothing to log out of"
 	fi
 else
-	info "no 'gws' on PATH — skipping daemon stop and logout"
+	info "no upstream 'gws' on PATH — skipping logout"
 fi
 
 # ---------------------------------------------------------------------------
@@ -107,9 +111,9 @@ done
 [[ $removed -eq 1 ]] || info "no credential files found"
 
 # ---------------------------------------------------------------------------
-# Phase 3 — remove the TUI binary
+# Phase 3 — remove the gws-tui binary
 # ---------------------------------------------------------------------------
-step "Removing the gws TUI binary"
+step "Removing the gws-tui binary"
 if have go; then
 	GOBIN_DIR="$(go env GOBIN 2>/dev/null || true)"
 	[[ -n "$GOBIN_DIR" ]] || GOBIN_DIR="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
@@ -117,14 +121,14 @@ else
 	GOBIN_DIR="$HOME/go/bin"
 fi
 removed=0
-for p in "$GOBIN_DIR/gws" "$HOME/.local/bin/gws"; do
+for p in "$GOBIN_DIR/gws-tui" "$HOME/.local/bin/gws-tui"; do
 	if [[ -e "$p" || -L "$p" ]]; then
 		rm -f "$p"
 		ok "removed $p"
 		removed=1
 	fi
 done
-[[ $removed -eq 1 ]] || info "no TUI binary found"
+[[ $removed -eq 1 ]] || info "no gws-tui binary found"
 
 # ---------------------------------------------------------------------------
 # Phase 4 — uninstall the upstream Google Workspace CLI

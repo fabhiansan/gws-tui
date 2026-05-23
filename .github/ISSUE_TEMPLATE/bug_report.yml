@@ -21,7 +21,7 @@ body:
       label: Reproduction Steps
       description: List the smallest steps that trigger the issue.
       placeholder: |
-        1. Run `gws tui ...`
+        1. Run `gws-tui ...`
         2. Open ...
         3. Press ...
     validations:
@@ -42,7 +42,7 @@ body:
     id: version
     attributes:
       label: Version
-      placeholder: "`gws tui --version` output or commit SHA"
+      placeholder: "`gws-tui --version` output or commit SHA"
     validations:
       required: true
   - type: dropdown

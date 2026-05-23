@@ -13,7 +13,7 @@ import (
 )
 
 func runTUI(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("gws tui", flag.ContinueOnError)
+	flags := flag.NewFlagSet("gws-tui", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
 	feature := flags.String("feature", "", "initial feature: chat, mail, calendar, meet, tasks, drive, or docs")
@@ -31,13 +31,13 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *version {
-		fmt.Fprintf(stdout, "gws tui %s (%s, %s)\n", Version, Commit, Date)
+		fmt.Fprintf(stdout, "gws-tui %s (%s, %s)\n", Version, Commit, Date)
 		return 0
 	}
 
 	cfg, err := tui.LoadConfig()
 	if err != nil {
-		fmt.Fprintf(stderr, "gws tui: config: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui: config: %v\n", err)
 		return 3
 	}
 	if *feature != "" {
@@ -62,7 +62,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 		cfg.Daemon = false
 	}
 	if err := tui.SetupLogging(cfg.LogPath); err != nil {
-		fmt.Fprintf(stderr, "gws tui: logging: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui: logging: %v\n", err)
 		return 3
 	}
 
@@ -72,7 +72,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	if cfg.Daemon {
 		remote, daemonSnapshot, err := connectDaemonClient(cfg)
 		if err != nil {
-			fmt.Fprintf(stderr, "gws tui: daemon: %v\n", err)
+			fmt.Fprintf(stderr, "gws-tui: daemon: %v\n", err)
 			return 5
 		}
 		client = remote
@@ -81,7 +81,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 	} else {
 		upstream, err := findUpstreamGWS()
 		if err != nil || upstream == "" {
-			fmt.Fprintf(stderr, "gws tui: upstream Google Workspace CLI not found; install it as `gws` or set GWS_TUI_UPSTREAM\n")
+			fmt.Fprintf(stderr, "gws-tui: upstream Google Workspace CLI not found; install it as `gws` (brew install googleworkspace-cli or npm i -g @googleworkspace/cli) or set GWS_TUI_UPSTREAM\n")
 			return 127
 		}
 		client = api.NewDefaultClient(api.ClientOptions{
@@ -114,7 +114,7 @@ func runTUI(args []string, stdout, stderr io.Writer) int {
 
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(context.Background()))
 	if _, err := program.Run(); err != nil {
-		fmt.Fprintf(stderr, "gws tui: %v\n", err)
+		fmt.Fprintf(stderr, "gws-tui: %v\n", err)
 		return 5
 	}
 	return 0

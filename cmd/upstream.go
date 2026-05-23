@@ -2,15 +2,14 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
+// findUpstreamGWS locates the upstream Google Workspace CLI binary (still
+// named `gws`). The TUI and daemon shell out to it for live Workspace data.
 func findUpstreamGWS() (string, error) {
 	if explicit := os.Getenv("GWS_TUI_UPSTREAM"); explicit != "" {
 		return explicit, nil
@@ -44,22 +43,6 @@ func findUpstreamGWS() (string, error) {
 		return candidate, nil
 	}
 	return "", errors.New("upstream gws not found")
-}
-
-func delegate(upstream string, args []string, stdout, stderr io.Writer) int {
-	command := exec.Command(upstream, args...)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	command.Stdin = os.Stdin
-	if err := command.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		fmt.Fprintf(stderr, "gws: could not delegate to %s: %v\n", upstream, err)
-		return 5
-	}
-	return 0
 }
 
 func upstreamDescription() string {
